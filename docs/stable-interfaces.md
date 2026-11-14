@@ -209,6 +209,10 @@ the next in the same major version.
   it defaults to empty ([acceptance policy](safe-outputs.md#pushing-to-a-pull-requests-branch)).
   `[gitlab.outputs] own-branch-repos` likewise lets merge request branches
   go to the target project itself.
+  The stack proposal and `check::stack::artifact` receipt are experimental
+  library-only formats, not stable CLI/workflow inputs. They enable no caller
+  and leave the ordinary one-PR cap unchanged
+  ([stack receipts](safe-outputs.md#experimental-library-receipts)).
 - **The runner configuration**, the workflow's `config` input
   (`agentic-job config --from`, `sandbox setup --config`, `run --config`): the tables
   `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,

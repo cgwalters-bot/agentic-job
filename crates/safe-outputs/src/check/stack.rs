@@ -10,6 +10,8 @@
 
 use std::collections::BTreeSet;
 
+pub mod artifact;
+
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -182,7 +184,7 @@ mod tests {
         })
     }
 
-    fn proposal() -> Value {
+    pub(super) fn proposal() -> Value {
         json!({"base_commit": BASE, "steps": [
             step(1, "one.rs"), step(2, "two.rs"), step(3, "three.rs")
         ]})

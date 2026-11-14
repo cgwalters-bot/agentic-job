@@ -277,8 +277,78 @@ branch check did not read. A step that does not apply,
 or changes other paths, stops the stack at its position with a fixed reason, so
 a conflict never drops a step silently. Neither function pushes or publishes.
 
-Remaining slices must wire both into trusted bounds and digest-bound check
-artifacts, then push each step's branch with a lease and open its PR against its
+### Experimental library receipts
+
+The concrete threat is replacing the root, ordered issue plan, policy, exact
+patch bytes or PR metadata after check, or extending a refused prefix. The
+experimental `check::stack::artifact` module binds these in a bounded receipt.
+Its caller-owned `Admission` contains the ordinary `Policy`, full root commit
+ID and ordered issue numbers. An empty plan refuses (disabled); an explicit
+plan is limited to ten distinct positive issues and `policy.max_outputs`.
+Only an ordinary new GitHub PR policy is accepted, not a continuation,
+secondary, external or advisory context. No new workflow option or caller is
+enabled, and the policy's ordinary one-PR ceiling is not raised. This module
+does not implement or replace the policy-bounds work in open #3449.
+
+`artifact::check` uses the policy's patch bytes, file count, protected paths
+and pinned author. Each reached step must match its position in the admitted
+issue plan; a mismatch retains only the earlier prefix. Proposals may contain
+a shorter prefix of that plan, but may not exceed it. The returned JSON receipt
+is at most 64 KiB and binds SHA-256 digests of the exact proposal bytes, the
+serialized admission, and each accepted step's patch, title/body and checked
+paths, plus its issue number and first refused position. Refusal diagnostics
+are not stored. Even changes to envelope whitespace invalidate a receipt;
+changes to policy formatting alone do not, because the typed policy is bound.
+
+The receipt is **not signed** and is not publication authority. A caller must
+transfer it from a trusted check job, never let a producer replace it, and
+independently supply admission in apply. This library reads no files: adapters
+must retain bounded no-follow regular-file reads, scan original bytes before
+redaction, and supply a read-only, value-free per-step secret/content inspection
+callback in both jobs. `artifact::revalidate` repeats those checks, including
+inspection even when digests match, and compares the entire receipt. A changed
+accepted prefix refuses rather than silently growing or shrinking it.
+`apply::stack::build_verified` performs that revalidation before creating any
+Git worktree, then builds only the accepted prefix and retains the first check
+or Git refusal. It acquires no credential and makes no forge write.
+
+Local tests cover receipt tampering, changed admission/metadata, disabled and
+over-limit plans, independent inspection, three replayed steps, a middle
+refusal and a freshly checked step-1 fix rebuilding steps 2/3. They do **not**
+prove publication, stale push leases, or live credential behavior.
+
+### Remaining publisher and recovery requirements
+
+There is no supported stacked hand-back in the producer, CLI or reusable
+workflows yet, on any forge. Callers must not increase `create_pull_request.max`
+or attempt to publish these library receipts through the ordinary handler.
+Future adapters must admit repository, root base, issue order and branch bounds
+outside producer control, use existing credential roles and per-step secret
+gates, and refuse unsupported cross-fork parent layouts rather than borrow
+authority from another repository. No agent-board selection or caller setting
+is changed here.
+
+A publisher must open each accepted draft PR on its predecessor (the first on
+the admitted target branch), with its own title, body and closing line. On the
+first refusal or failure it must retain/report earlier PRs and stop. A lost
+write response is ambiguous, not permission to retry: inspect destination refs,
+PRs and apply records before resuming. Per-step URL/head/refusal reporting and
+aggregate cost must come from trusted apply/accounting data; unavailable cost
+must be marked unavailable, never inferred from producer claims.
+
+A fix needs a new checked proposal and receipt for the admitted step and all
+descendants, bound to their pinned current heads. Replay must use only checked
+patches, preserve existing Signed-off-by trailers without adding any, stop on
+conflicts and update refs with exact head leases. The current library receipt
+does **not** bind published heads or authorize fix pushes. After a parent
+changes or merges, rebuild/recheck the remaining steps on the new admitted
+root before leased updates. GitHub retargeting a PR changes its base branch;
+it does not rebase its commits. Inspect the merge result (including squash or
+rebase merges), resolve conflicts explicitly, and obtain a new trusted check
+rather than replay unchecked branch contents.
+
+Remaining slices must wire these library receipts into trusted policy, producer
+and check/apply workflow artifacts, then push each step's branch with a lease and open its PR against its
 predecessor, appending that step's closing line. Publication must stop on
 refusal without removing earlier PRs. The publisher must keep the stack rebased
 after parent changes/merges with `restack`, not rely on PR retargeting to

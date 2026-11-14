@@ -42,6 +42,32 @@ pub fn build(repo: &Path, base: &str, steps: &[CheckedStep], temp: &Path) -> Res
     replay(repo, base, &steps, temp)
 }
 
+/// Revalidate a trusted library receipt before building anything. Check and Git
+/// refusals both retain only their accepted prefix. This is local replay, not a
+/// publisher: credential roles, repository/branch bounds and push leases remain
+/// the responsibility of a future publication adapter.
+pub fn build_verified(
+    repo: &Path,
+    content: &[u8],
+    receipt: &[u8],
+    admission: &crate::check::stack::artifact::Admission<'_>,
+    inspect: impl FnMut(&crate::check::stack::Step) -> Result<()>,
+    temp: &Path,
+) -> Result<Stacked> {
+    let checked = crate::check::stack::artifact::revalidate(content, receipt, admission, inspect)?;
+    if checked.accepted.is_empty() {
+        return Ok(Stacked {
+            steps: Vec::new(),
+            refused: checked.refused,
+        });
+    }
+    let mut stacked = build(repo, admission.base_commit, &checked.accepted, temp)?;
+    if stacked.refused.is_none() {
+        stacked.refused = checked.refused;
+    }
+    Ok(stacked)
+}
+
 /// Rebuilds the stack of the accepted STEPS on BASE after a fix round
 /// replaced step POSITION (one-based) with FIX, checked as a step of the
 /// same stack. The steps below POSITION are the same commits as before;
@@ -217,6 +243,101 @@ mod tests {
 
     fn show(repo: &Path, revision: &str) -> String {
         run(repo, &["show", "-s", "--format=%P %s", revision])
+    }
+
+    #[test]
+    fn trusted_receipt_revalidates_before_local_replay_and_after_a_fix() {
+        use crate::check::stack::artifact::{self, Admission};
+        let fixture = fixture();
+        let (repo, temp) = (fixture.repo(), fixture.temp.path());
+        let mut policy = crate::check::fixtures::policy();
+        policy.max_outputs = 3;
+        let admission = Admission {
+            policy: &policy,
+            base_commit: &fixture.base,
+            issues: &[1, 2, 3],
+        };
+        let proposal = |steps: Vec<&CheckedStep>| {
+            serde_json::json!({
+                "base_commit": fixture.base,
+                "steps": steps.iter().map(|step| &step.step).collect::<Vec<_>>()
+            })
+            .to_string()
+        };
+        let content = proposal(fixture.steps.iter().collect());
+        let (_, receipt) = artifact::check(content.as_bytes(), &admission, |_| Ok(())).unwrap();
+        // A failed revalidation must not even allocate the replay worktree.
+        assert!(
+            build_verified(
+                &repo,
+                content.as_bytes(),
+                &receipt,
+                &admission,
+                |_| anyhow::bail!("scan refused"),
+                &temp.join("absent")
+            )
+            .is_err()
+        );
+        assert!(!temp.join("absent").exists());
+        let built = build_verified(
+            &repo,
+            content.as_bytes(),
+            &receipt,
+            &admission,
+            |_| Ok(()),
+            temp,
+        )
+        .unwrap();
+        assert_eq!(built.steps.len(), 3);
+        assert!(built.refused.is_none());
+
+        let refuse = |step: &Step| {
+            ensure!(step.issue != 2, "secret gate refused");
+            Ok(())
+        };
+        let (_, prefix_receipt) = artifact::check(content.as_bytes(), &admission, refuse).unwrap();
+        let prefix = build_verified(
+            &repo,
+            content.as_bytes(),
+            &prefix_receipt,
+            &admission,
+            refuse,
+            temp,
+        )
+        .unwrap();
+        assert_eq!(prefix.steps, built.steps[..1]);
+        assert_eq!(prefix.refused.unwrap().position, 2);
+
+        run(&repo, &["checkout", "-q", "--detach", &fixture.base]);
+        let (fix, _) = commit(&repo, &fixture.base, 1, "a.txt", "fixed\n");
+        let fixed = proposal(vec![&fix, &fixture.steps[1], &fixture.steps[2]]);
+        assert!(
+            build_verified(
+                &repo,
+                fixed.as_bytes(),
+                &receipt,
+                &admission,
+                |_| Ok(()),
+                temp
+            )
+            .is_err()
+        );
+        let (_, fixed_receipt) = artifact::check(fixed.as_bytes(), &admission, |_| Ok(())).unwrap();
+        let rebuilt = build_verified(
+            &repo,
+            fixed.as_bytes(),
+            &fixed_receipt,
+            &admission,
+            |_| Ok(()),
+            temp,
+        )
+        .unwrap();
+        let restacked = restack(&repo, &fixture.base, &fixture.steps, 1, &fix, temp).unwrap();
+        assert_eq!(rebuilt.steps, restacked.steps);
+        assert_eq!(rebuilt.steps.len(), 3);
+        for (old, new) in built.steps.iter().zip(&rebuilt.steps) {
+            assert_ne!(old.head, new.head);
+        }
     }
 
     #[test]
