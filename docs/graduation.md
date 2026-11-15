@@ -229,3 +229,83 @@ policy/check jobs and keep agents away from write tokens and OIDC credentials.
   independently owned dependency. Record acceptance evidence in this document
   and link it as `Findings:` from the graduation issue; this run cannot edit
   that issue body through its allowed safe outputs.
+
+## Burn-down: parked pull requests
+
+Verdicts for [#4259](https://github.com/cgwalters-forge/agentic-job/issues/4259),
+part of the burn-down [#4113](https://github.com/cgwalters-forge/agentic-job/issues/4113).
+They are taken from each PR head diffed against main at 740ff7f on 2026-11-15.
+Result: salvage three, keep three, and #3693 merged minutes later. Every
+`CHANGELOG.md` and
+`.github/release.yml` hunk is superseded by 5527fdd (#4203) and 376930e (#4232).
+A replacement drops those hunks. None of the seven has a label now, even though
+the poll's notes on five of them say `needs-human`.
+
+- [#3333](https://github.com/cgwalters-forge/agentic-job/pull/3333) secure-host
+  extraction root: **keep**. Main already has its standalone crate manifest
+  (c5a308c). Nothing else splits off cleanly: even the crate docs
+  (`README.md`, `EXTRACTION.md`) describe the `ci/ci.yml` rename, the retained
+  `egress/` path and the `legacy-runtime` feature, which main lacks. The
+  parts depend on each other. The `ci/ci.yml` template tests `egress/` in its
+  new place and the `legacy-runtime` feature. The `timed.rs` move renames the
+  stage log prefix that `ci.yml` greps for. `runtime.rs` and `legacy-runtime`
+  rename privileged paths. Together they make one security-boundary PR under
+  [#1735](https://github.com/cgwalters-forge/agentic-job/issues/1735), and a
+  human has to push it because it edits `ci.yml` and `example-secure-host.yml`.
+  The PR overlaps the test ports in `tests/workflows.rs` and `docs/plan.md`.
+  Its bot approval of 2026-11-12 is on a head far behind main, so the rebase
+  needs a new review.
+- [#3674](https://github.com/cgwalters-forge/agentic-job/pull/3674) hardened
+  job container: **keep**. None of it is on main. It is waiting on a maintainer
+  to accept the container-job workflow shape and install
+  `job-container/workflow.yml` as a workflow
+  ([run](https://github.com/cgwalters-forge/tracker/actions/runs/43629982043),
+  [#137](https://github.com/cgwalters-forge/agentic-job/issues/137)). It has no
+  test-port overlap.
+- [#3690](https://github.com/cgwalters-forge/agentic-job/pull/3690) old-side
+  address recovery: **keep until d543dde is proven**, then close as superseded.
+  d543dde replays redacted old sides against the trusted base and makes
+  replacement series fail closed, but `[commit] replay-redacted-endpoints` is
+  off by default and covers only native `create_pull_request`. The tracker sets
+  neither that key in `hosted.toml` nor `native_handlers` in `dispatch.toml`,
+  as d543dde asks. d543dde targets cgwalters-forge/tracker#1638, while the PR
+  is part of cgwalters-forge/tracker#1309, and both are still open. Close the
+  PR once the tracker enables both and a hosted run shows #1309 fixed.
+  If replacement-series replay is still wanted, it belongs in a
+  new issue built on `crates/safe-outputs/src/replay.rs`. That issue should
+  also take on d543dde's open follow-up: apply literal placeholders the
+  ordinary way first, as 5ee3b2a tried. The PR overlaps
+  `tests/apply_workflow.rs` and `tests/check.rs`.
+- [#3693](https://github.com/cgwalters-forge/agentic-job/pull/3693) review merge
+  policy: **merged** as 6831f8d on 2026-11-15, right after the snapshot above,
+  so it no longer holds the test ports in `tests/workflows.rs` and `policy.yml`
+  ([#556](https://github.com/cgwalters-forge/agentic-job/issues/556)).
+- [#3694](https://github.com/cgwalters-forge/agentic-job/pull/3694) attachment
+  admission: **salvage**. None of it is on main, and the operator direction on
+  [#3692](https://github.com/cgwalters-forge/agentic-job/issues/3692) still
+  wants it. One rebased commit would carry the two `policy/attachments`
+  modules, the `policy.rs` hook, `tests/attachments.rs` and the docs and spec
+  text. That is about 1,800 lines with no review yet, and nothing in dispatch,
+  run, check or apply uses it, so it would land as unused groundwork. It
+  overlaps the test-port draft
+  [#3879](https://github.com/cgwalters-forge/agentic-job/pull/3879) in
+  `policy.rs`.
+- [#3695](https://github.com/cgwalters-forge/agentic-job/pull/3695) threat-feed
+  retry: **salvage in place**. The approved head 8821cf8 sits on top of 943038e,
+  and its tree is 3fca003 plus the feed change: only
+  `crates/secure-host/src/egress.rs` and `docs/workflow.md` differ, and
+  main's fetch still has one 60-second window that a single stalled attempt
+  can use up. Rebasing the branch onto main as one commit without the changelog
+  hunk keeps the PR; `docs/workflow.md` has changed on main since and needs a
+  small merge. Its test-port overlap comes only from stale rebase hunks, so the
+  rebase drops it.
+- [#3696](https://github.com/cgwalters-forge/agentic-job/pull/3696) stack
+  receipts: **salvage**. Main has only the caller-bounded stack steps
+  (b316bbc). A smaller PR on top of that would carry the receipt binding and
+  revalidation: d535752, plus the per-step size check from 5ce1991. Leased pushes
+  and per-step publication (9ecf31d through 5aaf444) would get their own review later.
+  That review should include the unbalanced `pre`/`code` closing lines the
+  last run flagged in `publish.rs`
+  ([note](https://github.com/cgwalters-forge/agentic-job/pull/3696#issuecomment-6869134349),
+  [#3438](https://github.com/cgwalters-forge/agentic-job/issues/3438)).
+  It overlaps #3879 in `docs/stable-interfaces.md`.
