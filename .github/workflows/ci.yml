@@ -701,23 +701,17 @@ jobs:
       # workflows.rs binds them to the forwarder's SHA and image-version comment.
       - name: Published executable and action compatibility
         env:
-          ACTION: 466a490e983ff07e6fb076fa4bd8b4d5f918fcd6
-          VERSION: 0.6.9
+          ACTION: 6e720e90708413982f90c1a396475946f5a31d0c
+          VERSION: 0.6.14
           BIN_DIR: /usr/local/bin
         run: |
-          if [ "$ACTION" = 466a490e983ff07e6fb076fa4bd8b4d5f918fcd6 ]; then
-            test "$VERSION" = 0.6.9
-            test "$("$BIN_DIR/agentic-job" --version)" = "agentic-job $VERSION"
-            echo 'Legacy v0.6.9 baseline only; standalone published acceptance pending actions#230.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            for name in secure-host agentic-job; do
-              test "$("$BIN_DIR/$name" --version)" = "secure-host $VERSION"
-            done
-            cmp "$BIN_DIR/secure-host" "$BIN_DIR/agentic-job"
-            "$BIN_DIR/agentic-job" config --host --string sandbox.runner-user="$(id -un)" > /dev/null
-            "$BIN_DIR/agentic-job" sandbox check
-            echo 'Standalone published executable identity and action compatibility passed.' >> "$GITHUB_STEP_SUMMARY"
-          fi
+          for name in secure-host agentic-job; do
+            test "$("$BIN_DIR/$name" --version)" = "secure-host $VERSION"
+          done
+          cmp "$BIN_DIR/secure-host" "$BIN_DIR/agentic-job"
+          "$BIN_DIR/agentic-job" config --host --string sandbox.runner-user="$(id -un)" > /dev/null
+          "$BIN_DIR/agentic-job" sandbox check
+          echo "Standalone published executable identity and action compatibility passed for secure-host v$VERSION, expected from actions $ACTION." >> "$GITHUB_STEP_SUMMARY"
       - name: No later step has root
         run: |
           if sudo -n true; then echo "::error::the runner's user still has sudo"; exit 1; fi

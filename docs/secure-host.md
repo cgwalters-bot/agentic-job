@@ -59,9 +59,8 @@ forward keeps the old action. At `@main` or a later commit:
   [`hosted.toml`](../secure-host/hosted.toml) for Ubuntu 26.04 or
   [`rhel-cloud.toml`](../secure-host/rhel-cloud.toml) for RHEL 10 and
   CentOS Stream 10, selected from `/etc/os-release`, and not the new
-  action's default, which turns egress filtering off: the
-  v0.6 image's binary still creates its second user, and a step that
-  runs code as it keeps writing only through the proxy's rules. A
+  action's default, which turns egress filtering off: every later step
+  is the runner's user's, and keeps writing only through the proxy's rules. A
   `config` of the caller's own replaces it whole. The new action sets
   `egress.write-policy` from its own `egress` input, over the file, so
   the forwarder passes `egress: write-policy` when the file asks for it,
@@ -72,10 +71,10 @@ forward keeps the old action. At `@main` or a later commit:
   its comment names the image tag that commit runs, and
   [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)'
   `the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs`
-  refuses a pin whose two copies differ, whose tag is older than v0.6.9
-  (the required runner storage rules), or newer than the workspace's version.
+  refuses a pin whose two copies differ, whose tag is older than v0.6.14
+  (the standalone, runner-only image), or newer than the workspace's version.
 - The floor is ubuntu-26.04, the runner the new action is written for;
-  the pinned image admits exactly Ubuntu 26.04 and RHEL 10
+  the pinned image admits exactly Ubuntu 26.04, RHEL 10 and CentOS Stream 10
   ([supported hosts](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#supported-hosts)).
 - Setting another input of the old action that chose the host fails the
   step and names the new action: `lock`, `egress`,
@@ -84,11 +83,10 @@ forward keeps the old action. At `@main` or a later commit:
   asked for a host the new action would not set up, so the step does
   not ignore it. A configuration file says the same things.
 
-### What main has that the pinned image does not yet
+### What the pinned image changed since v0.6.9
 
-The action's documents describe the image it pins (v0.6.9). Main has
-changed the host since, and a forwarder caller gets these only with the
-next image release:
+The forwarder pinned v0.6.9 until it moved to v0.6.14, which brought a
+forwarder caller these host changes:
 
 - The Ubuntu `packages` stage shares a 45-second deadline across package
   downloads and, if needed, one index refresh and download retry. A stuck
@@ -108,8 +106,6 @@ next image release:
   sssd-kcm, gssproxy and sshd (including `sshd-unix-local.socket`) so
   untrusted code cannot reach those listeners; it adds no socket
   exceptions. An explicit `config` still replaces the default whole.
-  The pinned image does not yet admit CentOS Stream 10, even with this
-  default; use an image built from this source until the pin moves.
 - Under `host.deny-runner-reads`, setup discards every core dump on the
   host: it sets `kernel.core_pattern` to `|/bin/false`, and `secure-host
   check` fails its `core-pattern` probe on a host without it. The
@@ -127,9 +123,7 @@ next image release:
   needs them sets `host.deny-runner-reads = false`. CI's `confined` job
   probes each route in its control before secure-host and requires it to
   fail after. It forces a dump only of a child of its own that carries a
-  marker, never of the Worker. Until the pin moves, a host the pinned
-  image sets up keeps its dumps, and the check the run action runs is
-  that image's binary, which does not look. `run` still refuses an inference
+  marker, never of the Worker. `run` still refuses an inference
   provider's key, an MCP credential, the OIDC request and the rest under
   `--runner-home` ([sandbox](sandbox.md)). These probes are the evidence
   a later decision to lift any of them would rest on, and they do not
@@ -138,23 +132,27 @@ next image release:
 ### Deployed write-policy diagnostics
 
 The forwarder selects actions commit
-`466a490e983ff07e6fb076fa4bd8b4d5f918fcd6`, the reviewed
-[#180](https://github.com/cgwalters-forge/actions/pull/180) deployment,
-whose `Containerfile.pin` names the attested v0.6.9 image, digest
-`sha256:008d34bf9598ef83d7859772200f26637814d2cd105028457208ddc87d69788b`.
+`6e720e90708413982f90c1a396475946f5a31d0c`
+([actions#271](https://github.com/cgwalters-forge/actions/pull/271)),
+whose `Containerfile.pin` names the attested
+[v0.6.14](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.14)
+image, digest
+`sha256:02e5f14ff420da99004ddc3bea4dd6d4a521051389736416cd737e9f51525a42`.
+Its `secure-host/action.yml` is the same file as at the previous pin,
+`466a490e983ff07e6fb076fa4bd8b4d5f918fcd6` (v0.6.9, digest
+`sha256:008d34bf9598ef83d7859772200f26637814d2cd105028457208ddc87d69788b`),
+so the forwarder's inputs are unchanged.
 Before pulling it, the action verifies the digest's SLSA provenance against
 its signer, this repository's `release.yml` on `refs/heads/main`, built on a
 GitHub-hosted runner; the provenance it accepts names source revision
-`57119eeffa17ea41b383cfdaf8370b8abeba8868`, which the `v0.6.9` tag points at.
-It includes [#2816](https://github.com/cgwalters-forge/agentic-job/pull/2816):
+`489c69d53cc23b989131952c9e3ca4d5add4e2b5`, which the `v0.6.14` tag points at.
+Since v0.6.9 it includes [#2816](https://github.com/cgwalters-forge/agentic-job/pull/2816):
 write-policy refusal responses name the method and connection host, never
 the path or signed query. The upload step itself prints that response even
 when it cannot upload artifacts; no proxy-log artifact is needed for it.
-Image attestation verification, write-policy selection and token boundaries
-are unchanged by this pin update.
 
 For [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811), the
-example workflow has now uploaded an artifact under this deployment on a
+example workflow has uploaded an artifact under the v0.6.9 deployment on a
 hosted runner. Actions' [#228](https://github.com/cgwalters-forge/actions/pull/228)
 moves `example-plain-ci.yml` to that action commit and asserts the pin in
 its workflow test; the pull request run for its head
@@ -239,7 +237,7 @@ the explicit proxy (unless a caller's own policy grants them).
 A self-hosted CI job, or a VM of its own, needs the binary **and its matching
 `world_write.bpf.o`**, from a verified release or a trusted source build
 ([provenance](#where-the-binary-and-image-come-from)). On a fresh disposable
-[supported host](#what-main-has-that-the-pinned-image-does-not-yet), load the
+[supported host](#what-the-pinned-image-changed-since-v069), load the
 object as root before setup, then check as the user the later steps run as:
 
 ```sh
@@ -314,16 +312,16 @@ the egress proxy and the network rules to what the run's tables ask
 (the broker under `inference.front`), and serves the session bridge's
 port when the tables name one, which
 it does not read itself. agentic-job's readers refuse a table that no
-longer says what the run's tables ask. The pinned image, a release
-whose binary is agentic-job's and does all of setup, refuses that
-table, so until a release is pinned the agent job runs this step only
-with `image-archive`, as CI's end-to-end jobs do; running it before
-every image is
+longer says what the run's tables ask. The agent job still runs this
+step only with `image-archive`, as CI's end-to-end jobs do, a gate from
+images up to v0.6.9, whose binary was agentic-job's and did all of setup.
+The pinned v0.6.14 image is standalone and installs no agent code, so
+running the step before every image is required; that is
 [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656).
 
 The agent is then a later step like any other: no root, the metadata
 service only where the configuration leaves it open
-([above](#what-main-has-that-the-pinned-image-does-not-yet)), and, as
+([above](#what-the-pinned-image-changed-since-v069)), and, as
 the action's
 [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#what-a-later-step-can-count-on-and-what-it-cannot)
 says, nothing between it and the job's own tokens. So the agent job
@@ -530,7 +528,7 @@ The forwarder exposes these three inputs of the new action; every one is optiona
 
 | Input | What it sets |
 | --- | --- |
-| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. The pinned image reads the host's table only by this name, which an image of this source takes as `[host]`'s deprecated alias (#2071); a file for an image of this source, `image-archive`, may use `[host]`. Default: [hosted.toml](../secure-host/hosted.toml) for Ubuntu 26.04, [rhel-cloud.toml](../secure-host/rhel-cloud.toml) for RHEL 10 or exact CentOS Stream 10, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
+| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. Images up to v0.6.9 read the host's table only by this name, which v0.6.14, the pinned image, and an image of this source take as `[host]`'s deprecated alias (#2071); a file for either may use `[host]`. Default: [hosted.toml](../secure-host/hosted.toml) for Ubuntu 26.04, [rhel-cloud.toml](../secure-host/rhel-cloud.toml) for RHEL 10 or exact CentOS Stream 10, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
 | `check` | `false` skips `sandbox check`. Default `true`. The pinned action does not pass `--record`, so it leaves no passing record for the run action's `--unless-passed` check; that check probes again ([record mechanism](sandbox-check.md)) |
 | `image-archive` | An image archive, as `podman load` takes it, run in place of the pinned image, unverified: for a job that built it, as CI's do |
 
@@ -584,65 +582,44 @@ is not published-path acceptance.
 
 ### Published standalone acceptance (#2070)
 
-Rechecked on 2026-11-09: the effective action, image digest and source
-remain [the v0.6.9 deployment above](#deployed-write-policy-diagnostics).
-The actual Ubuntu
+The forwarder and `site.yml` now pin
+[the v0.6.14 deployment above](#deployed-write-policy-diagnostics), whose
+source contains the split from
+[v0.6.12](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.12)
+and [#3144](https://github.com/cgwalters-forge/agentic-job/pull/3144) and
+[#3154](https://github.com/cgwalters-forge/agentic-job/pull/3154) from
+[v0.6.13](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.13).
+The earlier Ubuntu
 [`secure-host-published` setup/check](https://github.com/cgwalters-forge/agentic-job/actions/runs/42143295583/job/127648635121)
-verified that image's attestation, completed setup and passed 96 checks.
-It is a **legacy baseline**, not proof of the split or runner-only setup.
-The same run's
-[`e2e-dispatch`](https://github.com/cgwalters-forge/agentic-job/actions/runs/42143295583/job/127648702033)
-was skipped, not agent E2E evidence.
+ran the v0.6.9 image: a legacy baseline, not proof of the split or
+runner-only setup.
 
-The split shipped in
-[v0.6.12](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.12),
-source `eecc8c434e67a7607264ab3f7d90c88b6d02042a`.
-[Actions#211](https://github.com/cgwalters-forge/actions/pull/211) proposes
-image digest `sha256:d5fd0f3e102c589807df68656d5623f6d6cbc9ecb257bdd3c9af431242d7b73a`
-at reviewed head `502522ad437a469da99120f89e848219434f16a7`, but is still
-open. [Actions#230](https://github.com/cgwalters-forge/actions/issues/230)
-owns adoption using that bump; compatibility/evidence
-[#231](https://github.com/cgwalters-forge/actions/pull/231) and attestation
-regression [#235](https://github.com/cgwalters-forge/actions/pull/235) are
-also open. The exact prerequisite to moving this repository's forwarder
-and site pins is a reviewed immutable action revision selecting a
-compatible, attested published standalone image through that adoption.
-Neither pin moves here; no competing bump or release is needed from this PR.
-[Tracker#1369](https://github.com/cgwalters-forge/tracker/issues/1369)
-still records the release train's single-versioned-actions-pin blocker.
-
-The push-only `secure-host-published` job now binds its expected version
-and action SHA to the forwarder in regression tests. Only the exact reviewed
-legacy deployment gets the legacy baseline branch. Every replacement must
+The push-only `secure-host-published` job binds its expected version
+and action SHA to the forwarder in regression tests, and no legacy
+deployment is excused: the pinned image must
 report `secure-host VERSION` under **both** installed executable names,
 have identical installed bytes, and pass the action's `config --host
 --string sandbox.runner-user=…` and `sandbox check` compatibility calls.
+Its step summary names the action SHA and version it accepted.
 The action itself exercises `/agentic-job` configuration in the image
 before setup; neither an archive override nor `check: false` is used.
 Failures stop the job, not a silently skipped acceptance step. This adds
 acceptance only, not a new host control, permission or credential exception.
 
-Fresh Ubuntu published standalone setup/check and executable acceptance
-are **pending**, as is applicable published-path agent E2E such as
-`e2e-dispatch`. That E2E also depends on
+Ubuntu published setup/check and executable acceptance on this pin are
+**pending** until a push to main runs that job, as is applicable
+published-path agent E2E such as `e2e-dispatch`, and the `core-pattern`,
+confined run/JavaScript main/post and confined-cleanup evidence for #3144
+and #3154. That E2E also depends on
 [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656)'s
-unconditional `sandbox prepare` and canonical host config adoption after
-image compatibility is established; this slice does not force either
-against the legacy image. v0.6.12 proves the split only: it does not contain
-[#3144](https://github.com/cgwalters-forge/agentic-job/pull/3144) or
-[#3154](https://github.com/cgwalters-forge/agentic-job/pull/3154).
-The later containing numbered release,
-[v0.6.13](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.13),
-was published on 2026-11-10 at source
-`4439980da2aef4db79b40890599ea661daab12b0`; its release notes include both
-changes. Publication is no longer the blocker, but does not prove deployment.
-Their deployment remains pending verification of the exact attested image,
-effective pin adoption and actual `core-pattern`,
-confined run/JavaScript main/post and confined-cleanup evidence. `build-*`
-archives, skipped jobs and green old-image jobs do not satisfy those gates.
+unconditional `sandbox prepare` and canonical host config adoption, which
+follow this pin: until then an agent job without `image-archive` does not
+run `sandbox prepare`, and the standalone image's setup installs no agent
+code. `build-*` archives, skipped jobs and green old-image jobs
+do not satisfy those gates.
 RHEL runtime acceptance is separately **pending**, not inferred from Ubuntu.
 [#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) stays open
-while these deployment and runtime obligations remain.
+while these runtime obligations remain.
 
 ## Where the binary and image come from
 

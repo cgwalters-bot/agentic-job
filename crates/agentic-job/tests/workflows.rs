@@ -7361,7 +7361,6 @@ fn image_source_follows_the_build_repository() {
 #[test]
 fn published_path_requires_the_effective_deployments_executables_and_compatibility() {
     const STEP: &str = "Published executable and action compatibility";
-    const LEGACY: &str = "466a490e983ff07e6fb076fa4bd8b4d5f918fcd6";
     let ci = definition("ci.yml");
     let step = named_step(&ci, STEP);
     let forwarder = definition("secure-host/action.yml");
@@ -7392,21 +7391,24 @@ fn published_path_requires_the_effective_deployments_executables_and_compatibili
     let host = &job["steps"][0];
     assert!(host["with"]["image-archive"].is_badvalue());
     assert!(host["with"]["check"].is_badvalue());
-    // No other legacy deployment is excused: every new pin must prove the split.
-    for (action, version, identity, missing, different_bytes, failed_call, ok) in [
-        (LEGACY, "0.6.9", "agentic-job", false, false, "", true),
-        (LEGACY, "0.6.12", "agentic-job", false, false, "", false),
-        (LEGACY, "0.6.9", "secure-host", false, false, "", false),
-        (PIN, "0.6.12", "secure-host", false, false, "", true),
-        (PIN, "0.6.12", "agentic-job", false, false, "", false),
-        (PIN, "0.6.12", "secure-host", true, false, "", false),
-        (PIN, "0.6.12", "secure-host", false, true, "", false),
-        (PIN, "0.6.12", "secure-host", false, false, "config", false),
-        (PIN, "0.6.12", "secure-host", false, false, "sandbox", false),
+    // No legacy deployment is excused: the pin must prove the split. The
+    // legacy image's single binary answers as agentic-job; an image behind
+    // the pin answers with an older version.
+    let action = step["env"]["ACTION"].as_str().unwrap();
+    let version = step["env"]["VERSION"].as_str().unwrap();
+    for (reported, identity, missing, different_bytes, failed_call, ok) in [
+        ("0.6.9", "agentic-job", false, false, "", false),
+        (version, "agentic-job", false, false, "", false),
+        ("0.6.13", "secure-host", false, false, "", false),
+        (version, "secure-host", false, false, "", true),
+        (version, "secure-host", true, false, "", false),
+        (version, "secure-host", false, true, "", false),
+        (version, "secure-host", false, false, "config", false),
+        (version, "secure-host", false, false, "sandbox", false),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let script = format!(
-            "#!/bin/bash\ncase \"$*\" in\n  --version) echo '{identity} {version}' ;;\n  'config --host --string sandbox.runner-user='*) test '{failed_call}' != config ;;\n  'sandbox check') test '{failed_call}' != sandbox ;;\n  *) exit 99 ;;\nesac\n"
+            "#!/bin/bash\ncase \"$*\" in\n  --version) echo '{identity} {reported}' ;;\n  'config --host --string sandbox.runner-user='*) test '{failed_call}' != config ;;\n  'sandbox check') test '{failed_call}' != sandbox ;;\n  *) exit 99 ;;\nesac\n"
         );
         executable(&dir.path().join("agentic-job"), &script);
         if !missing {
@@ -7433,14 +7435,16 @@ fn published_path_requires_the_effective_deployments_executables_and_compatibili
         assert_eq!(
             result.status.success(),
             ok,
-            "{action} {identity} {missing} {different_bytes} {failed_call}: {result:?}"
+            "{reported} {identity} {missing} {different_bytes} {failed_call}: {result:?}"
         );
         let summary = std::fs::read_to_string(summary).unwrap_or_default();
         assert_eq!(
-            summary.contains("Standalone published executable"),
-            ok && action != LEGACY
+            summary.contains(&format!(
+                "secure-host v{version}, expected from actions {action}"
+            )),
+            ok,
+            "{summary}"
         );
-        assert_eq!(summary.contains("baseline only"), ok && action == LEGACY);
     }
 }
 
@@ -7501,11 +7505,11 @@ fn the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs()
     assert_eq!(used, [line.trim()]);
     let version =
         |found: &regex::Captures| -> [u64; 3] { [1, 2, 3].map(|i| found[i].parse().unwrap()) };
-    // v0.6.9 supplies accounts 30–32 in its built-in runner writes, without
-    // the forwarder's former policy override, and query-free diagnostics.
+    // v0.6.14 makes no second user and installs the standalone binary
+    // under both names, which the published acceptance step requires.
     assert!(
-        version(&found) >= [0, 6, 9],
-        "{line} predates the required built-in runner storage rules"
+        version(&found) >= [0, 6, 14],
+        "{line} predates the standalone, runner-only image"
     );
     let cargo = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
     let workspace = Regex::new(r#"(?m)^version = "(\d+)\.(\d+)\.(\d+)"$"#)

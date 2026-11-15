@@ -25,7 +25,7 @@ fails the check: exit state 1.
 
 The [run action](../run/action.yml) calls `sandbox check --unless-passed`
 before the agent starts. The shipped [secure-host forwarder](../secure-host/action.yml)
-pins [actions at 466a490e](https://github.com/cgwalters-forge/actions/blob/466a490e983ff07e6fb076fa4bd8b4d5f918fcd6/secure-host/action.yml),
+pins [actions at 6e720e90](https://github.com/cgwalters-forge/actions/blob/6e720e90708413982f90c1a396475946f5a31d0c/secure-host/action.yml),
 whose `Prove it` step calls plain `agentic-job sandbox check`, **without
 `--record`**. It leaves no reusable record: normally the run action probes
 again, even with secure-host's default `check: true`
@@ -82,13 +82,13 @@ with the failure class `control_unreachable`
 ([workflow.md](workflow.md#why-a-run-failed)); its job still fails
 before the agent starts, and no check record is left for the next check.
 Images up to secure-host v0.6.9 still read
-example.com, so until the pin moves past them secure-host's own check
-fails under an allowlist without it. The probes of
+example.com, so their own check fails under an allowlist without it; the
+forwarder pins v0.6.14. The probes of
 the egress policy, the tailnet and containers were the sandbox user's
 and went with it. `[host.check] control-url`, `fetch-repo`,
 `allow-sockets` and `allow-tcp-ports` are read only by images from
-before #2989; this binary accepts them while the pinned image still
-needs them, and the check notes each as ignored. `before-agent` is
+before #2989; this binary accepts them for callers that still pin such
+an image, and the check notes each as ignored. `before-agent` is
 refused. `container-image` and `containers` are left for `run`'s probes
 under `inference.front`, which `run` refuses with no second user.
 

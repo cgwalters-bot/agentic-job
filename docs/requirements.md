@@ -75,9 +75,9 @@ that user and `run`'s environment, so the job holds only read-only
 tokens and the run token, and the token probe does not run. The network
 rules that restrict private-network access match the sandbox user only;
 the runner's user is refused metadata too with
-`host.deny-runner-metadata`, on with the lock unless set false (not
-yet in the image the forwarder pins:
-[what main has](secure-host.md#what-main-has-that-the-pinned-image-does-not-yet)),
+`host.deny-runner-metadata`, on with the lock unless set false (in v0.6.14,
+the image the forwarder pins:
+[what it changed](secure-host.md#what-the-pinned-image-changed-since-v069)),
 and `run` refuses `[host.check] before-agent`, so host probes do not
 repeat. The reusable workflow passes no inference key or MCP credential.
 Caller-owned steps can still expose credentials; these are not made safe by

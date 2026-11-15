@@ -193,9 +193,9 @@ jobs:
       # host's file has no `setup.script`, which the runner's user runs
       # below (agentic-job#2989). An image of this source holds no agent
       # code, so the next step does agentic-job's part first, and the file
-      # says so (`[host.prepared]`), which the pinned image, a release
-      # that does all of it, would refuse. For that image the file names
-      # the host's table `[sandbox]`, the only name it reads.
+      # says so (`[host.prepared]`), which images up to v0.6.9, releases
+      # that did all of it, refuse. Without an archive the file names
+      # the host's table `[sandbox]`, the only name they read.
       - name: The host's configuration
         env:
           IMAGE_ARTIFACT: ${{ inputs.secure-host-image-artifact-id }}
@@ -205,8 +205,9 @@ jobs:
       # As root, before secure-host takes root away: the agents, their
       # managed settings, and the policy job's binary as the helper that
       # `run` goes through, which the image's setup keeps. Only for an
-      # image of this source until the pinned one is such an image
-      # (docs/secure-host.md#the-agent-job, agentic-job#2656).
+      # image archive so far, though the pinned v0.6.14 image installs no
+      # agent code either: running it for every image is agentic-job#2656
+      # (docs/secure-host.md#the-agent-job).
       - name: agentic-job's part of the host's setup
         if: ${{ inputs.secure-host-image-artifact-id != '' }}
         # By path: sudo's secure_path on RHEL leaves out /usr/local/bin.
