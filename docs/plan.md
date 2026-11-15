@@ -189,14 +189,6 @@ specific diagnostics. This supplements, rather than removes, the legacy parity
 cases pending the caller-evidence gate above. No runtime control, permission or
 caller setting changes.
 
-Patch association also has standalone Rust CLI coverage in `tests/check.rs`:
-the real collector/checker accepts the matching request, patch and base, and
-refuses missing, extra or renamed patches, a different request branch, an orphan
-patch, and missing or mismatched base repository/ref/commit metadata. This makes
-those corpus behaviors testable without Node or external checkouts. The legacy
-old-tree/upstream comparisons remain intact; this is preparation for cleanup,
-not evidence that the parity or fixture-deletion prerequisites are satisfied.
-
 The scripted end-to-end comment fixtures and CI's negative-publication filter
 are checked by `scripted_comments` tests in `crates/agentic-job/tests/workflows.rs`,
 replacing their JavaScript assertions. These local tests preserve fixed caller
@@ -227,6 +219,21 @@ accepted cases assert exact items and refused cases assert diagnostics. Label bo
 come from TOML policy generation rather than modifying serialized policy. Only the
 replaced JavaScript test is removed; the key fixture, old-tree setup and upstream
 parity drivers remain. No runtime control or caller setting changes.
+
+The legacy PR text and mixed-case branch cases also run through Rust's
+`policy`, `collect` and `check` in `tests/check.rs`. Exact collected and checked
+items pin control-character removal, deferred mentions and disallowed-link
+redaction; the branch keeps its case while resolving the lowercase patch filename.
+A plain request is the positive control. The legacy parity cases and gated
+fixture cleanup remain unchanged; no runtime control or caller setting is added.
+
+Patch association also has standalone Rust CLI coverage in `tests/check.rs`:
+the real collector/checker accepts the matching request, patch and base, and
+refuses missing, extra or renamed patches, a different request branch, an orphan
+patch, and missing or mismatched base repository/ref/commit metadata. This makes
+those corpus behaviors testable without Node or external checkouts. The legacy
+old-tree/upstream comparisons remain intact; this is preparation for cleanup,
+not evidence that the parity or fixture-deletion prerequisites are satisfied.
 
 ## Deployment
 
@@ -307,11 +314,12 @@ credentialless TF/GitLab launch or live publication of this revision.
 
 The [contract](dispatch.md#external-vm-runner-to-midstream-draft) of
 [#2891](https://github.com/cgwalters-forge/agentic-job/issues/2891) is
-designed, not built or deployed. This is its one list of follow-ups, in
-dependency order, for the next replan of
+designed and partly built, not deployed. This is its one list of
+follow-ups, in dependency order, for the next replan of
 [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
-Slices 3 (#3291), 4 and 5 are built. None has run on an external runner.
-Each slice is one implement-sized pull
+Slices 3 (#3291), 4 and 5 are built, off by default; none has run on an
+external runner, and no caller enables them. Each slice is one
+implement-sized pull
 request. None of them enables a profile, changes credentials, broker
 admission or bounds, or adds ostree or any other target. Repositories
 without an owner are under `cgwalters-forge`.
@@ -383,7 +391,8 @@ without an owner are under `cgwalters-forge`.
    never read. It needs no deployment. Implemented for
    [#3293](https://github.com/cgwalters-forge/agentic-job/issues/3293),
    off by default and tested against offline fixtures only
-   ([binary interface](dispatch.md#binary-correlation-interface)).
+   ([binary interface](dispatch.md#binary-correlation-interface)); slice 7
+   still has to pass the receipt.
 6. **actions — External mode of the wrapper.** In
    `.github/workflows/cgwalters-agentic-job.yml`, a mode that runs policy,
    agent and check only: no apply job, no `SAFE_OUTPUTS_PAT`, the kind,

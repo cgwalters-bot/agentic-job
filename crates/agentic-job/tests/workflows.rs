@@ -5827,15 +5827,17 @@ fn request(env: &[(&str, &str)]) -> (Output, tempfile::TempDir) {
 
 #[test]
 fn external_output_repository_defaults_to_the_caller_as_apply_does() {
-    for (repo, output_repo, accepted) in [
-        ("o/r", "", true),
-        ("o/other", "", false),
-        ("o/other", "o/other", true),
-        ("o/r", "o/other", false),
+    for (repo, output_repo, private, accepted) in [
+        ("o/r", "", "", true),
+        ("o/r", "", "true", true),
+        ("o/other", "", "", false),
+        ("o/other", "o/other", "", true),
+        ("o/r", "o/other", "", false),
     ] {
-        let (output, _) = request(&[
+        let (output, dir) = request(&[
             ("REPO", repo),
             ("OUTPUT_REPO", output_repo),
+            ("PRIVATE", private),
             ("EXTERNAL_RECEIPT", r#"{"record":{"item":64}}"#),
             ("ISSUE", "64"),
             ("FAKE_SAFE_OUTPUTS", "{}"),
@@ -5846,6 +5848,19 @@ fn external_output_repository_defaults_to_the_caller_as_apply_does() {
             "{repo}/{output_repo}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        if accepted {
+            // The binary is told the defaulted repository, once.
+            let policy: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("policy.json")).unwrap())
+                    .unwrap();
+            let args = policy["args"].as_array().unwrap();
+            let named: Vec<_> = args
+                .windows(2)
+                .filter(|pair| pair[0] == "--output-repo")
+                .map(|pair| pair[1].as_str().unwrap())
+                .collect();
+            assert_eq!(named, [repo], "{repo}/{output_repo}/{private}");
+        }
     }
 }
 

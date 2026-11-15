@@ -75,7 +75,9 @@ taken from what the agent's machine uploaded. [safe-outputs.md](safe-outputs.md)
 `policy --external-receipt FILE` accepts only the trusted waiting job's
 receipt, after ordinary caller/organization bounds compilation. It pins
 check to the recorded base commit and external run's branch without
-trusting external policy/configuration. This is compose-only and off by
+trusting external policy/configuration. It requires `--output-repo` to
+name the target: apply takes an omitted one to be the calling repository,
+which `policy.yml` passes explicitly. This is compose-only and off by
 default; the complete reusable workflow has no such input.
 
 `config` exists because a workflow gets a run's settings as strings from

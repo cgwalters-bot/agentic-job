@@ -68,6 +68,8 @@ fn receipt_is_caller_owned_and_does_not_bypass_policy_check_or_detection() {
         "2",
         "--external-receipt",
         "receipt.json",
+        "--output-repo",
+        "owner/target",
     ];
     let compiled = command(dir, &policy_args);
     status(&compiled, 0);
@@ -86,6 +88,12 @@ fn receipt_is_caller_owned_and_does_not_bypass_policy_check_or_detection() {
     changed = policy_args.to_vec();
     changed[8] = "other";
     status(&command(dir, &changed), 1);
+    // Apply defaults an omitted output repository to the caller, so it
+    // must be named, and be the target.
+    status(&command(dir, &policy_args[..policy_args.len() - 2]), 2);
+    changed = policy_args.to_vec();
+    *changed.last_mut().unwrap() = "owner/caller";
+    status(&command(dir, &changed), 2);
     let mut replay = receipt.clone();
     replay["record"]["caller_run_id"] = 89.into();
     std::fs::write(dir.join("receipt.json"), replay.to_string()).unwrap();
