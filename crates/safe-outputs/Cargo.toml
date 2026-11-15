@@ -1,7 +1,7 @@
 [package]
 name = "safe-outputs"
 description = "gh-aw's safe-output contract: the request vocabulary and collector, the policy and its bounds, and the check of a hand-back against them, bounded, without an agent run or a CI system"
-version = "0.6.14"
+version = "0.6.15"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
