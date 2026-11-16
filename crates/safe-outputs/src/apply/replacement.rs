@@ -119,7 +119,8 @@ pub fn trial(
 }
 
 /// Rebuild with exact recovery against the authenticated base and each actual
-/// predecessor. POLICY is trusted caller configuration, not producer data.
+/// predecessor. Private repositories permit exact literal matches only, never
+/// address restoration. POLICY is trusted caller configuration, not producer data.
 /// VALIDATE must refuse credentials in application bytes without logging them.
 /// Recovered bytes live only in a private temporary mail, removed on return;
 /// the only publication input is the resulting commit object.
@@ -184,8 +185,8 @@ fn trial_using(
         );
         let policy = preparation.policy;
         ensure!(
-            policy.forge == crate::Forge::Github && !policy.private,
-            "recovery requires a trusted public GitHub repository"
+            policy.forge == crate::Forge::Github,
+            "recovery requires a trusted GitHub repository"
         );
         let push = policy
             .safe_outputs
@@ -382,11 +383,12 @@ fn apply_recovered(
         commit_author: policy.commit_author.as_deref(),
         ..push.rules()
     };
-    let recovered = super::recover::reconstruct(
+    let recovered = super::recover::reconstruct_using(
         &patch,
         &rules,
         base,
         usize::try_from(policy.max_patch_bytes)?,
+        !policy.private,
         |path, limit| read_preimage(dir, &parent, path, limit),
     )?;
     // Literal placeholders can match the authenticated old side unchanged.
@@ -1033,6 +1035,27 @@ mod tests {
     }
 
     #[test]
+    fn private_literal_old_placeholders_use_exact_verification_without_restoration() {
+        for case in ["context", "removed"] {
+            let mut fixture = RecoveryFixture::with_source(false, |value| {
+                let url = if case == "context" || value == "old" {
+                    "<inference-address>"
+                } else {
+                    "configured"
+                };
+                format!("url={url}\n{value}\n")
+            });
+            fixture.policy.private = true;
+            let recovered = fixture
+                .trial(&|_| panic!("private literal content needs no restoration: {case}"))
+                .unwrap();
+            assert_eq!(recovered.restored_lines, 0, "{case}");
+            assert_eq!(recovered.built.tree, fixture.intended_tree, "{case}");
+            fixture.clean();
+        }
+    }
+
+    #[test]
     fn recovered_trial_does_not_relocate_to_literal_placeholder_context() {
         let fixture = RecoveryFixture::with_source(false, |value| {
             format!(
@@ -1071,6 +1094,18 @@ mod tests {
                 "padding\n".repeat(10)
             )
         );
+        fixture.clean();
+
+        // A private repository must refuse rather than fall back to Git's
+        // successful but relocated literal match in the same checked path.
+        let mut private = fixture.policy.clone();
+        private.private = true;
+        let error = trial_recovered(&fixture.args, &fixture.consumer, &read, &private, &|_| {
+            panic!("private bytes must not reach credential revalidation")
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "recovery requires public preimages");
+        assert!(!format!("{error:#}").contains(ADDRESS));
         fixture.clean();
     }
 

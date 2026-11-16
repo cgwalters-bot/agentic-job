@@ -143,6 +143,20 @@ pub fn reconstruct(
     rules: &PatchRules<'_>,
     base: &str,
     max_patch_bytes: usize,
+    read_preimage: impl FnMut(&str, usize) -> Result<Vec<u8>>,
+) -> Result<Recovered> {
+    reconstruct_using(patch, rules, base, max_patch_bytes, true, read_preimage)
+}
+
+/// Exact-only preparation also admits literal placeholders in private blobs.
+/// Disallow restoration before substituting any bytes: private content must
+/// never be treated as an address source, even if it matches the redaction.
+pub(crate) fn reconstruct_using(
+    patch: &str,
+    rules: &PatchRules<'_>,
+    base: &str,
+    max_patch_bytes: usize,
+    allow_restoration: bool,
     mut read_preimage: impl FnMut(&str, usize) -> Result<Vec<u8>>,
 ) -> Result<Recovered> {
     let limit = max_patch_bytes.min(MAX_BYTES);
@@ -206,6 +220,7 @@ pub fn reconstruct(
                 if body == expected {
                     output.push_str(line);
                 } else if body.contains(PLACEHOLDER) {
+                    ensure!(allow_restoration, "recovery requires public preimages");
                     ensure!(
                         matches_redaction(body, expected),
                         "recovery old-side mismatch"

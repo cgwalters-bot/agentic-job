@@ -11,7 +11,8 @@ says what a caller may rely on across versions.
 
 - Recover redacted inference addresses on replacement-series context/removed
   lines from trusted public preimages during apply. Literal old-side placeholders
-  that restore no bytes retain the original credential-check policy. Added placeholders keep
+  that restore no bytes retain the original credential-check policy, including
+  in private repositories where address restoration remains forbidden. Added placeholders keep
   new work draft and are refused on pushes. Ordinary and secondary patch
   recovery remain unsupported; failures link the retained artifact (tracker#1309).
 

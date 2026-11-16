@@ -123,7 +123,8 @@ limit), with at most 50 files and one preimage read per file.
 preparation boundary for a replacement series. It binds the original series to
 check's receipt and trusted policy, rechecks every mail and the aggregate bounds,
 and authenticates the base through the existing replacement ancestry checks.
-Only a policy identifying a public GitHub repository is admitted. Each preimage
+Only a policy identifying a GitHub repository is admitted; private repositories
+allow exact literal matches but refuse any address restoration. Each preimage
 is a bounded regular immutable git blob, not a working-tree file; each rebuilt
 predecessor supplies the next commit's preimage. Git replacement objects are
 disabled. After applying a recovered mail, every resulting blob is compared
@@ -142,7 +143,8 @@ credential shapes and known apply credentials in reconstructed application
 bytes, more conservatively than the ordinary handback shape warnings. Mails
 without old-side placeholders retain ordinary application behavior. When exact
 reconstruction proves old-side placeholders are literal and restores no bytes,
-the already-checked mail needs no additional credential scan. It still passes
+the already-checked mail needs no additional credential scan, including in a
+private repository. Private preimages are never used to restore addresses. It still passes
 the reconstruction bounds and exact-position result verification; literal
 placeholders with CRLF, large preimages or missing final newlines remain
 unsupported on this path. Counts of
@@ -152,15 +154,15 @@ Callers must enforce that draft state before publishing.
 
 The shipped apply workflow runs `recovery-preflight` against the authenticated
 checked upload before forking or publishing anything. It selects recovered
-replacement trials only when old-side placeholders occur in a public GitHub
-series. The trial receives the apply credential for nondisclosing validation;
+replacement trials when old-side placeholders occur in a GitHub series, with
+private series restricted to exact literal matches. The trial receives the apply credential for nondisclosing validation;
 the publication guard pushes its built objects, never the redacted input mails.
 Added placeholders on ordinary, replacement or secondary patches force the
 automatic readiness decision to draft, with a warning in the job log. Pushes
 with added placeholders are refused: the existing readiness opt-in cannot
 guarantee a previously-ready PR is draft before publication. An explicit request
 to mark work ready (or update it to non-draft) in that hand-back is also refused.
-Ordinary private/CRLF replacements without recovery retain their existing path.
+Replacements without old-side placeholders retain their existing path.
 
 Ordinary native/legacy patch and secondary recovery remain unsupported. These
 paths still try the original bytes, since placeholder text can be literal base

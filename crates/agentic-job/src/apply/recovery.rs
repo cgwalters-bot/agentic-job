@@ -77,9 +77,8 @@ fn inspect(args: &Args) -> Result<(bool, usize)> {
                 added += counts.added;
             }
             ensure!(
-                !replacement_recovery
-                    || (policy.forge == safe_outputs::Forge::Github && !policy.private),
-                "replacement recovery requires public GitHub preimages"
+                !replacement_recovery || policy.forge == safe_outputs::Forge::Github,
+                "replacement preparation requires GitHub preimages"
             );
         } else {
             let counts = recover::placeholders(&text);
@@ -131,7 +130,7 @@ mod tests {
             ("secondary", false, true, false, false, true),
             ("replacement", true, false, false, false, true),
             ("replacement", true, true, false, false, true),
-            ("replacement", true, false, true, false, false),
+            ("replacement", true, false, true, false, true),
             ("replacement", false, false, true, false, true),
             ("ordinary", false, true, false, true, false),
         ] {
