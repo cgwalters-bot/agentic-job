@@ -4,7 +4,8 @@
 //! caller's repositories, output limits or push branches. Resolve identities on
 //! the read-only policy machine, and compile writes through ordinary policy
 //! admission. No workflow consumes this result yet; it is not a checked receipt
-//! and must not be used to authorize publication.
+//! and must not be used to authorize publication. A trusted consumer reads a
+//! serialized admission back only through [`load`].
 
 use std::collections::BTreeSet;
 
@@ -23,6 +24,9 @@ pub mod route;
 /// Hard ceilings before parsing or reading forge metadata.
 pub const MAX_ATTACHMENTS: usize = 8;
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024;
+
+/// A serialized admission list carries compiled policies, so it is larger.
+pub const MAX_ADMITTED_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,7 +77,10 @@ impl Attachment {
 
 /// Metadata resolved at admission, not full input context. A later workflow must
 /// fetch comments/diffs and bind these identities into check/apply artifacts.
-#[derive(Debug, Serialize)]
+/// Read one back only through [`load`], from a trusted producer's artifact,
+/// never from producer output.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Admitted {
     pub attachment: Attachment,
     /// Repository containing the pinned head, distinct from a PR's target. None
@@ -119,10 +126,6 @@ pub fn admit(
     } else {
         serde_json::from_str(text).context("invalid attachments list")?
     };
-    ensure!(
-        attachments.len() <= MAX_ATTACHMENTS,
-        "at most {MAX_ATTACHMENTS} attachments"
-    );
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
@@ -134,38 +137,9 @@ pub fn admit(
             "attachment admission currently requires GitHub bounds"
         );
     }
-    let mut seen = BTreeSet::new();
     // Validate the entire request before reading metadata, including duplicates
     // across modes. A second read declaration must not conceal a write target.
-    for attachment in &attachments {
-        let repo = attachment.repo();
-        ensure!(
-            REPO_RE.is_match(repo) && !dotted(repo),
-            "invalid attachment repository"
-        );
-        let identity = match attachment {
-            Attachment::Issue { number, .. } | Attachment::PullRequest { number, .. } => {
-                ensure!(
-                    PULL_NUMBER_RE.is_match(&number.to_string()),
-                    "invalid attachment item number"
-                );
-                // GitHub shares issue and PR numbers: both spellings are one target.
-                format!("{}#{number}", repo.to_ascii_lowercase())
-            }
-            Attachment::Branch { branch, mode, .. } => {
-                ensure!(
-                    BASE_RE.is_match(branch) && !branch.contains(".."),
-                    "invalid attachment branch"
-                );
-                ensure!(
-                    *mode == Mode::Read,
-                    "write-mode branch attachments have no safe-output operation"
-                );
-                format!("{}@{branch}", repo.to_ascii_lowercase())
-            }
-        };
-        ensure!(seen.insert(identity), "duplicate attachment target");
-    }
+    distinct(attachments.iter())?;
     let admitted = attachments
         .into_iter()
         .map(|attachment| {
@@ -392,6 +366,145 @@ pub fn admit(
         }
     }
     Ok(admitted)
+}
+
+/// Parse and check a serialized admission list, the only way a trusted consumer
+/// may take one from the policy job's artifact. Unknown fields refuse, and so
+/// do invalid or duplicate identities, heads that do not fit their kind and
+/// mode, and write policies that are invalid, for another repository, not
+/// bound to their own pull request and pinned head, or of another shape than
+/// admission compiles. This rereads neither the forge nor the bounds, so it
+/// does not replace admission. In particular, a consumer must not take the
+/// write policies' sum as within the bounds: only admission checks that.
+pub fn load(text: &str) -> Result<Vec<Admitted>> {
+    ensure!(
+        text.len() <= MAX_ADMITTED_BYTES,
+        "admitted attachments exceed 1 MiB"
+    );
+    let admitted: Vec<Admitted> =
+        serde_json::from_str(text).context("invalid admitted attachments")?;
+    distinct(admitted.iter().map(|admitted| &admitted.attachment))?;
+    for admitted in &admitted {
+        admitted.validate()?;
+    }
+    Ok(admitted)
+}
+
+impl Admitted {
+    fn validate(&self) -> Result<()> {
+        let attachment = &self.attachment;
+        let repo = attachment.repo();
+        let write = attachment.mode() == Mode::Write;
+        let head = self.head.as_deref();
+        ensure!(
+            head.is_none_or(|head| COMMIT_RE.is_match(head)),
+            "attachment head is not an exact commit SHA"
+        );
+        let head_repo = self.head_repo.as_deref();
+        ensure!(
+            head_repo.is_none_or(|name| REPO_RE.is_match(name) && !dotted(name)),
+            "invalid attachment head repository"
+        );
+        let pinned = match attachment {
+            Attachment::Issue { .. } => head.is_none() && head_repo.is_none(),
+            // Only a write head names its repository; a read head comes from the
+            // target's pull ref.
+            Attachment::PullRequest { .. } => head.is_some() && head_repo.is_some() == write,
+            Attachment::Branch { .. } => {
+                head.is_some() && head_repo.is_some_and(|name| name.eq_ignore_ascii_case(repo))
+            }
+        };
+        ensure!(pinned, "attachment head does not fit its kind and mode");
+        ensure!(
+            self.write_policy.is_some() == write,
+            "attachment write policy does not match its mode"
+        );
+        let Some(policy) = &self.write_policy else {
+            return Ok(());
+        };
+        policy.validate()?;
+        ensure!(
+            policy.repo.eq_ignore_ascii_case(repo),
+            "attachment write policy is for another repository"
+        );
+        // What `admit` compiles: a comment on an issue, or a push and perhaps a
+        // comment on a pull request, within its total, and none of a run's
+        // other grants.
+        let (kind, types): (_, &[&str]) = match attachment {
+            Attachment::PullRequest { .. } => {
+                (Kind::Branch, &[PUSH_TO_PULL_REQUEST_BRANCH, ADD_COMMENT])
+            }
+            _ => (Kind::Analysis, &[ADD_COMMENT]),
+        };
+        let outputs = &policy.safe_outputs;
+        ensure!(
+            policy.kind == kind
+                && policy.forge == Forge::Github
+                && (1..=types.len()).contains(&(policy.max_outputs as usize))
+                && outputs.types().all(|output| types.contains(&output))
+                && outputs.types().all(|output| {
+                    outputs
+                        .max_of(output)
+                        .is_some_and(|max| (1..=policy.max_outputs).contains(&max))
+                })
+                && policy.continuation.is_none()
+                && policy.external.is_none()
+                && policy.advisory.is_none()
+                && policy.secondary_pull_request.is_none()
+                && policy.push_repo.is_none(),
+            "attachment write policy is not of the shape admission compiles"
+        );
+        if let Attachment::PullRequest { number, .. } = attachment {
+            ensure!(
+                outputs
+                    .push_to_pull_request_branch
+                    .as_ref()
+                    .is_some_and(|push| push.target == number.to_string()
+                        && Some(push.head.as_str()) == head),
+                "attachment push policy is not bound to its pinned pull request head"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Check each attachment's identity and refuse duplicates, across modes too.
+fn distinct<'a>(attachments: impl ExactSizeIterator<Item = &'a Attachment>) -> Result<()> {
+    ensure!(
+        attachments.len() <= MAX_ATTACHMENTS,
+        "at most {MAX_ATTACHMENTS} attachments"
+    );
+    let mut seen = BTreeSet::new();
+    for attachment in attachments {
+        let repo = attachment.repo();
+        ensure!(
+            REPO_RE.is_match(repo) && !dotted(repo),
+            "invalid attachment repository"
+        );
+        let identity = match attachment {
+            Attachment::Issue { number, .. } | Attachment::PullRequest { number, .. } => {
+                ensure!(
+                    PULL_NUMBER_RE.is_match(&number.to_string()),
+                    "invalid attachment item number"
+                );
+                // GitHub shares issue and PR numbers: both spellings are one target.
+                format!("{}#{number}", repo.to_ascii_lowercase())
+            }
+            Attachment::Branch { branch, mode, .. } => {
+                ensure!(
+                    BASE_RE.is_match(branch) && !branch.contains(".."),
+                    "invalid attachment branch"
+                );
+                ensure!(
+                    *mode == Mode::Read,
+                    "write-mode branch attachments have no safe-output operation"
+                );
+                format!("{}@{branch}", repo.to_ascii_lowercase())
+            }
+        };
+        ensure!(seen.insert(identity), "duplicate attachment target");
+    }
+    Ok(())
 }
 
 fn compile(

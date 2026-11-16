@@ -293,8 +293,18 @@ head after context was fetched. Admission and context together must fit the
 8 MiB serialized ceiling; all existing shared read/response limits still apply.
 The pair is future trusted-producer transport groundwork, not an accepted policy
 input or a checked receipt. Only its admission fields are policy metadata;
-snapshot fields remain untrusted forge data. It has no deserializer or workflow
-consumer. The snapshot-only API drops the admission fields from this result.
+snapshot fields remain untrusted forge data and have no deserializer. The
+snapshot-only API drops the admission fields from this result.
+
+The admission list alone can be read back, for a future trusted consumer
+loading it from the policy job's artifact, never from producer output, through
+`attachments::load`. It caps the input at 1 MiB and refuses unknown fields,
+invalid or duplicate identities, heads that do not fit the kind and mode, and a
+write policy that is missing, invalid, for another repository, of another shape
+than admission compiles, or with a push not bound to its own pull request and
+pinned head. It rereads neither the forge nor the bounds, so it does not
+replace admission: in particular, only admission holds the write policies'
+sum within the bounds. No workflow consumes it yet.
 
 Snapshots contain checkout plans, not checked-out source. A consumer must fetch
 the target's pull ref (including for write-mode PRs) or branch ref from the
@@ -325,7 +335,9 @@ refusals, such as the applied-marker rule. Check and apply do not call it yet.
 
 Remaining work must wire trusted dispatch inputs, checkout materialization and
 full review-thread context, carry exact attachment/head identities and the
-routing through the hand-back and check/apply, check routed pushes' patches
+routing through the hand-back and check/apply, give the collector a
+configuration that admits routed types (it counts each type against the run's
+own configuration), check routed pushes' patches
 against the attachment's pinned head, repeat live push safety checks and test
 an issue run updating an attached bot PR end to end. Review-thread replies and
 the conversion of `fix` to a write attachment remain undone too.

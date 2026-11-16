@@ -5,7 +5,9 @@ use agentic_job::policy::attachments::context::{
     MAX_CONTEXT_BYTES, MAX_PAGES, MAX_READS, MAX_RESPONSE_BYTES, resolve, snapshot,
 };
 use agentic_job::policy::attachments::route::{Routing, route};
-use agentic_job::policy::attachments::{Admitted, MAX_ATTACHMENTS, MAX_REQUEST_BYTES, Mode, admit};
+use agentic_job::policy::attachments::{
+    self, Admitted, MAX_ADMITTED_BYTES, MAX_ATTACHMENTS, MAX_REQUEST_BYTES, Mode, admit, load,
+};
 use anyhow::Result;
 use safe_outputs::Forge;
 use safe_outputs::bounds::{Organization, RepoRule};
@@ -532,6 +534,143 @@ fn compiled_write_policies_retain_existing_limits() {
     assert_eq!(push.target, "8");
     assert_eq!(push.max_patch_files, bounds.max_patch_files);
     assert_eq!(push.head, SHA);
+}
+
+/// A serialized admission, an edit to it and the refusal it must produce.
+type Tamper<'a> = (&'a Value, &'a dyn Fn(&mut Value), &'a str);
+
+#[test]
+fn serialized_admissions_validate_only_as_admitted() {
+    let bounds = bounds();
+    let admitted = |kind: &str, mode: &str| {
+        let admitted = admit(&request(kind, mode), &bounds, None, false, &mut metadata).unwrap();
+        serde_json::to_value(admitted).unwrap()
+    };
+    let load = |value: &Value| load(&value.to_string());
+    for (kind, mode) in [
+        ("issue", "read"),
+        ("issue", "write"),
+        ("pull-request", "read"),
+        ("pull-request", "write"),
+        ("branch", "read"),
+    ] {
+        let value = admitted(kind, mode);
+        let loaded = load(&value).unwrap_or_else(|error| panic!("{kind} {mode}: {error:#}"));
+        assert_eq!(
+            serde_json::to_value(loaded).unwrap(),
+            value,
+            "{kind} {mode}"
+        );
+    }
+    let pull = admitted("pull-request", "write");
+    let issue = admitted("issue", "write");
+    let branch = admitted("branch", "read");
+    let push = "/0/write_policy/safe_outputs/push_to_pull_request_branch";
+    let outputs = "/0/write_policy/safe_outputs";
+    let shape = "not of the shape admission compiles";
+    let cases: &[Tamper] = &[
+        (
+            &issue,
+            &|v| v[0]["write_policy"] = pull[0]["write_policy"].clone(),
+            shape,
+        ),
+        (
+            &issue,
+            &|v| v[0]["write_policy"]["kind"] = "branch".into(),
+            shape,
+        ),
+        (
+            &issue,
+            &|v| v[0]["write_policy"]["max_outputs"] = 50.into(),
+            shape,
+        ),
+        (
+            &issue,
+            &|v| v.pointer_mut(outputs).unwrap()["add_comment"]["max"] = 50.into(),
+            shape,
+        ),
+        (
+            &issue,
+            &|v| v.pointer_mut(outputs).unwrap()["create_issue"] = json!({"max": 1}),
+            shape,
+        ),
+        (
+            &pull,
+            &|v| v[0]["write_policy"]["forge"] = "forgejo".into(),
+            shape,
+        ),
+        (&pull, &|v| v[0]["extra"] = true.into(), "unknown field"),
+        (
+            &pull,
+            &|v| v[0]["head"] = BASE_SHA.into(),
+            "pinned pull request head",
+        ),
+        (
+            &pull,
+            &|v| v.pointer_mut(push).unwrap()["target"] = "9".into(),
+            "pinned pull request head",
+        ),
+        (&pull, &|v| v[0]["head"] = "main".into(), "exact commit SHA"),
+        (
+            &pull,
+            &|v| v[0]["write_policy"] = Value::Null,
+            "does not match its mode",
+        ),
+        (
+            &pull,
+            &|v| v[0]["head_repo"] = Value::Null,
+            "does not fit its kind and mode",
+        ),
+        (
+            &pull,
+            &|v| v[0]["attachment"]["mode"] = "read".into(),
+            "does not fit its kind and mode",
+        ),
+        (
+            &pull,
+            &|v| v[0]["head_repo"] = "-bad".into(),
+            "invalid attachment head repository",
+        ),
+        (
+            &issue,
+            &|v| v[0]["head"] = SHA.into(),
+            "does not fit its kind and mode",
+        ),
+        (
+            &issue,
+            &|v| v[0]["write_policy"]["repo"] = FORK.into(),
+            "another repository",
+        ),
+        (
+            &branch,
+            &|v| v[0]["head_repo"] = FORK.into(),
+            "does not fit its kind and mode",
+        ),
+        (
+            &pull,
+            &|v| v[0]["write_policy"]["kind"] = "everything".into(),
+            "unknown variant",
+        ),
+        (
+            &pull,
+            &|v| *v = json!([v[0], v[0]]),
+            "duplicate attachment target",
+        ),
+        (
+            &branch,
+            &|v| *v = json!(vec![&v[0]; MAX_ATTACHMENTS + 1]),
+            "at most",
+        ),
+    ];
+    for (base, edit, expected) in cases {
+        let mut value = (*base).clone();
+        edit(&mut value);
+        let error = format!("{:#}", load(&value).unwrap_err());
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+    let oversized = " ".repeat(MAX_ADMITTED_BYTES + 1);
+    let error = format!("{:#}", attachments::load(&oversized).unwrap_err());
+    assert!(error.contains("exceed 1 MiB"), "{error}");
 }
 
 #[test]

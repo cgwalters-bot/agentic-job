@@ -59,7 +59,8 @@ and apply, and apply publication remain unimplemented; `fix` still uses the
 existing single-target contract. The admission result MUST NOT be treated as a
 checked publication receipt. No existing RC guarantee is broadened by it.
 The kind × mode × repository-bounds matrix, context pagination, shared resource
-limits, moving-source refusals, metadata refusals and write routing are exercised
+limits, moving-source refusals, metadata refusals, write routing and the strict
+validation of a serialized admission list are exercised
 in [attachments.rs](../crates/agentic-job/tests/attachments.rs); these are not
 end-to-end publication evidence.
 
