@@ -12,8 +12,8 @@ publishing a release. Unchecked items are transfer gates, not completed work.
 ## What can land before the move
 
 Pages already derives its project URL and source links from the running
-repository in `just site-build-pages`: `SITE_URL`, `SITE_BASE` and
-`SITE_SOURCE_URL` feed `site/astro.config.mjs`. It will build
+repository in `just site-build-pages`: `SITE_URL` and
+`SITE_SOURCE_URL` feed `site/mkdocs.yml`. It will build
 `https://bootc-dev.github.io/agentic-job/` without a source change. A custom
 domain would require different build settings; none is assumed here.
 

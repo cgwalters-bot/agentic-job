@@ -1,0 +1,37 @@
+# The documentation site, built by `just site-build` from the pages it
+# copies into docs_dir. Zensical reads this MkDocs format, rather than its
+# own zensical.toml, for !ENV: SITE_URL and SITE_SOURCE_URL place a build
+# (`just site-build-pages`); unset, it serves at / and links repository
+# files in the checkout.
+site_name: agentic-job
+site_description: Run untrusted CI steps, a coding agent included, without the credentials they could misuse.
+site_url: !ENV [SITE_URL, ""]
+docs_dir: pages
+site_dir: dist
+
+theme:
+  favicon: favicon.svg
+  features:
+    - content.code.copy
+    - navigation.sections
+    - search.highlight
+
+# Zensical checks links in the source, before repo_links rewrites those to
+# repository files; lychee checks the built site's links instead.
+validation:
+  invalid_links: false
+
+# Close to the forge's Markdown: no typographic replacements, so `--flag`
+# in prose stays, and the forge's heading anchors, which links use.
+markdown_extensions:
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight
+  - pymdownx.magiclink
+  - pymdownx.superfences
+  - pymdownx.tasklist
+  - repo_links:
+      source: !ENV [SITE_SOURCE_URL, ""]

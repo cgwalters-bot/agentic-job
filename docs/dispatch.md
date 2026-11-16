@@ -762,21 +762,23 @@ profiles all come from a single tracker commit:
    dispatch time, a margin for clock skew, and keeps those whose run name
    ends with a space and `[DISPATCH-ID]` exactly. Exactly one run must match, and it
    must satisfy every rule:
-   - its workflow path is the profile's `workflow`;
-   - its `head_branch` is the profile's `ref`;
-   - its `head_sha` is the profile's `commit`;
-   - its `triggering_actor` is the identity of the dispatch credential;
-   - its `run_attempt` is 1;
-   - its referenced workflows include the wrapper at the profile's
-     `actions` commit and agentic-job's `policy.yml` and `check.yml` at its
-     `agentic-job` commit, and no other revision of either.
 
-   The dispatch fails, and nothing is applied, if no such run appears
-   within 10 minutes of dispatch, or if a run whose name carries the
-   `dispatch-id` breaks any rule. It also fails if more than one run
-   matches, and then all of them are refused. A ref that moved between the
-   map's review and the dispatch fails `head_sha`; the fix is a reviewed
-   change to the map's commit, not a looser match.
+    - its workflow path is the profile's `workflow`;
+    - its `head_branch` is the profile's `ref`;
+    - its `head_sha` is the profile's `commit`;
+    - its `triggering_actor` is the identity of the dispatch credential;
+    - its `run_attempt` is 1;
+    - its referenced workflows include the wrapper at the profile's
+      `actions` commit and agentic-job's `policy.yml` and `check.yml` at its
+      `agentic-job` commit, and no other revision of either.
+
+    The dispatch fails, and nothing is applied, if no such run appears
+    within 10 minutes of dispatch, or if a run whose name carries the
+    `dispatch-id` breaks any rule. It also fails if more than one run
+    matches, and then all of them are refused. A ref that moved between the
+    map's review and the dispatch fails `head_sha`; the fix is a reviewed
+    change to the map's commit, not a looser match.
+
 4. **Wait.** The job polls that one run by ID until it completes or the
    deadline passes. Tracker's waiting job runs on a hosted runner with a
    360-minute job limit, so the map refuses a `lifetime-minutes` above 330.

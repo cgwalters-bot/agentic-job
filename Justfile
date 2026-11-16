@@ -199,12 +199,20 @@ agents-lock spec package +links:
 refresh-top-level-domains:
     curl --fail --silent --show-error --proto '=https' --output crates/safe-outputs/src/top-level-domains.txt https://data.iana.org/TLD/tlds-alpha-by-domain.txt
 
-# The documentation site in site/, rendering its own pages and docs/.
-# Dependencies come from the lock alone, without their install scripts.
-# SITE_BASE, SITE_URL and SITE_SOURCE_URL (site/astro.config.mjs) place it.
+# The documentation site in site/, rendering its own pages and docs/,
+# copied by route into site/pages/ for the build (site/repo_links.py maps
+# their links).
+# Zensical comes from the hashed lock alone, as wheels: no build scripts.
+# SITE_URL and SITE_SOURCE_URL (site/mkdocs.yml) place it. 4 seconds
+# with the wheels cached.
 site-build:
-    cd site && npm ci --ignore-scripts --no-audit --no-fund
-    cd site && ASTRO_TELEMETRY_DISABLED=1 npm run build
+    python3 -m venv --clear site/.venv
+    site/.venv/bin/pip install --quiet --disable-pip-version-check --require-hashes --only-binary :all: -r site/requirements.txt
+    rm -rf site/pages && mkdir -p site/pages/docs
+    cp docs/*.md site/pages/docs/ && cp site/index.md site/overview.md site/favicon.svg site/pages/
+    cd site && PYTHONPATH=. .venv/bin/zensical build --clean
+    # The copies' links, relative to their sources, would fail markdown-links.
+    rm -r site/pages
 
 # site-build for GitHub Pages, from a GitHub Actions run's own variables:
 # served at the repository's default project-site address,
@@ -212,11 +220,11 @@ site-build:
 # OWNER.github.io would need other values), and linking repository files
 # at the built commit.
 site-build-pages:
-    SITE_URL="https://$GITHUB_REPOSITORY_OWNER.github.io" SITE_BASE="/${GITHUB_REPOSITORY#*/}/" SITE_SOURCE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/" {{ just_executable() }} site-build
+    SITE_URL="https://$GITHUB_REPOSITORY_OWNER.github.io/${GITHUB_REPOSITORY#*/}/" SITE_SOURCE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/" {{ just_executable() }} site-build
 
-# dist.test.mjs checks the pages site-build renders, so it builds first.
+# Builds first: site.yml's link check reads the build this leaves.
 site-test: site-build
-    node --test site/links.test.mjs site/index.test.mjs site/dist.test.mjs
+    cd site && .venv/bin/python -m unittest test_repo_links
 
 # Links and fragments of a build served at /, as site-build makes it by
 # default; links to repository files then name the checkout's files.

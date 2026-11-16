@@ -1,26 +1,16 @@
 ---
-title: agentic-job
 description: Run untrusted CI steps, a coding agent included, without the credentials they could misuse.
-template: splash
-hero:
-  tagline: >-
-    agentic-job runs a coding agent in CI with no write token and no
-    model key in its reach, and has another machine check what it
-    produced before anything with a write token acts on it.
-  # Front matter is not Markdown, so these links are not rewritten as the
-  # body's are: they are relative to this page, the root of the site.
-  actions:
-    - text: Get started
-      link: docs/try-it/
-      icon: right-arrow
-    - text: How it works
-      link: docs/workflow/
-      variant: minimal
 ---
 
-import { Card, CardGrid } from "@astrojs/starlight/components";
+# agentic-job
 
 > This text is LLM generated.
+
+agentic-job runs a coding agent in CI with no write token and no
+model key in its reach, and has another machine check what it
+produced before anything with a write token acts on it.
+
+[Get started](../docs/try-it.md), or read [how it works](../docs/workflow.md).
 
 ## Agent security is just CI security
 
@@ -29,29 +19,30 @@ script from a pull request or a dependency's install hook: code you did
 not write, steered by text you did not write, on a machine that holds
 your tokens. agentic-job gives all three the same defence.
 
-<CardGrid>
-  <Card title="A sandboxed agent" icon="padlock">
+- **A sandboxed agent**
+
     The agent runs as an ordinary unprivileged user on a runner that has
     lost sudo and the container daemon, in a job that holds no secret but a
     run token, and no token that can write to the forge. [The sandbox](../docs/sandbox.md)
-  </Card>
-  <Card title="Checked safe outputs, applied elsewhere" icon="approve-check">
+
+- **Checked safe outputs, applied elsewhere**
+
     The agent can only leave a file of requests. A second job checks them
     on a clean machine and a third applies them; no job with a write token
     runs anything the agent wrote. [Safe outputs](../docs/safe-outputs.md)
-  </Card>
-  <Card title="secure-host for any job" icon="setting">
+
+- **secure-host for any job**
+
     One step takes sudo and the container daemon away from every later
     step of a job, then probes that it did and fails the job if not. It
     needs no agent. [Securing the CI host](../docs/secure-host.md)
-  </Card>
-  <Card title="Bounded tokens" icon="information">
+
+- **Bounded tokens**
+
     The agent's forge token is read only and expires with the job. The
     model key stays with a credential broker on another machine, which
     hands each run a token good for that run alone.
     [Which tokens reach what](../docs/workflow.md#which-tokens-reach-what)
-  </Card>
-</CardGrid>
 
 ## Try it in a workflow
 

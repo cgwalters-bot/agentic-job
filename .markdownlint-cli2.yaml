@@ -1,6 +1,8 @@
 config:
   # Prose is wrapped (or not) by the author.
   MD013: false
-# The site's npm dependencies, after `just site-build`.
+# The site's Python dependencies, and the pages a failed `just site-build`
+# leaves copied.
 ignores:
-  - site/node_modules/**
+  - site/.venv/**
+  - site/pages/**

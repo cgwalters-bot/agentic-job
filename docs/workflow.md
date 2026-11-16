@@ -1211,16 +1211,16 @@ cannot reach a private proxy.
   their transitive dependencies. Choose `model`, `max-requests`,
   `budget` and `timeout` with the operator.
 
-  `agent: vibe` installs `mistral-vibe==2.26.1` into a root-owned Python
-  virtual environment before hardening; it does not use the `npm` input.
-  Set `model` to the broker's bare Mistral model name (for example
-  `devstral-small-latest`; optional with a configuration repository, below) and `inference-url` to the broker root, **not**
-  its `/mistral/v1` route. Keep `inference-register: github-oidc` and set
-  `inference-audience` as for the other real agents. No Mistral key is
-  passed to the job. Vibe is opt-in and
-  requires `max-requests`: an arbitrary broker model has no authoritative
-  price in Vibe, so its local `budget` cannot be the only cap. The existing
-  timeout, request-count and subagent limits still apply.
+    `agent: vibe` installs `mistral-vibe==2.26.1` into a root-owned Python
+    virtual environment before hardening; it does not use the `npm` input.
+    Set `model` to the broker's bare Mistral model name (for example
+    `devstral-small-latest`; optional with a configuration repository, below) and `inference-url` to the broker root, **not**
+    its `/mistral/v1` route. Keep `inference-register: github-oidc` and set
+    `inference-audience` as for the other real agents. No Mistral key is
+    passed to the job. Vibe is opt-in and
+    requires `max-requests`: an arbitrary broker model has no authoritative
+    price in Vibe, so its local `budget` cannot be the only cap. The existing
+    timeout, request-count and subagent limits still apply.
 
 The policy job validates the effective configuration, including overrides
 of the caller's `config`, before starting the agent machine. After the
@@ -1836,27 +1836,27 @@ To set it up:
 3. Explicitly pass that same name and set `apply-environment: NAME` and,
    for another repository, `output-repo`:
 
-   ```yaml
-   jobs:
-     apply:
-       uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
-       permissions:
-         contents: read
-         issues: read
-         pull-requests: read
-         actions: read
-         id-token: write
-       secrets:
-         SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
-       with:
-         id: proposals
-         repo: OWNER/REPO
-         allow: .github/agentic-job/allow.toml
-         proposals-artifact: board-proposals
-         outputs: add_comment,noop
-         comment-target: '123'
-         apply-environment: writes
-   ```
+    ```yaml
+    jobs:
+      apply:
+        uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT
+        permissions:
+          contents: read
+          issues: read
+          pull-requests: read
+          actions: read
+          id-token: write
+        secrets:
+          SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+        with:
+          id: proposals
+          repo: OWNER/REPO
+          allow: .github/agentic-job/allow.toml
+          proposals-artifact: board-proposals
+          outputs: add_comment,noop
+          comment-target: '123'
+          apply-environment: writes
+    ```
 
 For a repository/organization secret, the **stored name is caller-chosen**:
 map `SAFE_OUTPUTS_PAT: ${{ secrets.YOUR_BOT_PAT }}`.

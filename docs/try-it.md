@@ -174,6 +174,6 @@ checks its inputs against the reusable workflow, composes its generic host
 configuration and admits its bounds. It also parses the GitLab pipeline,
 checks its command flags and job separation, and runs its deterministic
 producer through collect/check. The same suite executes the local script
-above. `just site-test` builds the site and tests its rendered pages and
-links. These checks need no model or forge writes; they do not establish
+above. `just site-test` builds the site and tests its pages and link
+rewriting. These checks need no model or forge writes; they do not establish
 live GitHub/GitLab deployment or privileged host proof.
