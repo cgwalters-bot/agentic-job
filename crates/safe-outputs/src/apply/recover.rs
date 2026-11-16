@@ -185,11 +185,10 @@ pub(crate) fn reconstruct_using(
     }
     ensure!(
         patch.ends_with('\n')
-            && !patch.contains('\r')
             && !patch
                 .lines()
                 .any(|line| line == "\\ No newline at end of file"),
-        "recovery does not support CR or missing final newlines"
+        "recovery does not support missing final newlines"
     );
 
     let mut output = String::with_capacity(patch.len());
@@ -209,6 +208,13 @@ pub(crate) fn reconstruct_using(
     let mut deleted = false;
 
     for line in patch.split_inclusive('\n') {
+        // Diff metadata stays LF-only. Hunk bodies and preimage lines retain
+        // their CR bytes, so matching and postimage hashes distinguish CRLF
+        // from LF without normalizing either the patch or the public blob.
+        ensure!(
+            remaining != (0, 0) || !line.contains('\r'),
+            "recovery metadata contains CR"
+        );
         let text = &line[..line.len() - 1];
         if remaining != (0, 0) {
             let prefix = text.as_bytes().first().copied().unwrap_or(b' ');
@@ -498,6 +504,36 @@ mod tests {
                     "old\n".to_owned()
                 }
             );
+        }
+    }
+
+    #[test]
+    fn crlf_recovery_never_normalizes_old_or_new_bytes() {
+        let patch = mail("@@ -1,2 +1,2 @@\n url=<inference-address>\r\n-old\r\n+new\r\n");
+        let preimage = format!("url={ADDRESS}\r\nold\r\n");
+        let recovered = recover(&patch, &preimage).unwrap();
+        assert_eq!(
+            recovered.application_patch(),
+            patch.replace(PLACEHOLDER, ADDRESS)
+        );
+        assert_eq!(recovered.restored_lines, 1);
+        let expected = format!("url={ADDRESS}\r\nnew\r\n");
+        recovered
+            .verify_application(|_, _| Ok(Some(expected.as_bytes().to_vec())))
+            .unwrap();
+        assert!(
+            recovered
+                .verify_application(|_, _| Ok(Some(expected.replace('\r', "").into_bytes())))
+                .is_err()
+        );
+        for changed in [
+            preimage.replace('\r', ""),
+            preimage.replace("old\r\n", "old\n"),
+            preimage.replace("\r\nold", "\nold"),
+        ] {
+            let error = recover(&patch, &changed).err().unwrap();
+            assert_eq!(error.to_string(), "recovery old-side mismatch");
+            assert!(!format!("{error:#}").contains(ADDRESS));
         }
     }
 

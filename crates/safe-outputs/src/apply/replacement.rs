@@ -670,7 +670,7 @@ mod tests {
             "-1",
             "HEAD",
         ];
-        run(repo, &args) + "\n"
+        String::from_utf8(git_output(repo, &args).unwrap()).unwrap()
     }
 
     fn write(path: &Path, value: &Value) -> PathBuf {
@@ -1052,6 +1052,61 @@ mod tests {
             assert_eq!(recovered.restored_lines, 0, "{case}");
             assert_eq!(recovered.built.tree, fixture.intended_tree, "{case}");
             fixture.clean();
+        }
+    }
+
+    #[test]
+    fn crlf_placeholders_preserve_exact_replacement_bytes() {
+        for private in [false, true] {
+            for address in ["<inference-address>", ADDRESS] {
+                if private && address == ADDRESS {
+                    continue;
+                }
+                for removed in [false, true] {
+                    for ending in ["\r\n", "\n"] {
+                        let source = |value: &str| {
+                            let url = if removed && value != "old" {
+                                "configured"
+                            } else {
+                                address
+                            };
+                            // Also exercise mixed line endings: the unchanged
+                            // suffix and edited value must not be normalized.
+                            format!("url={url}\r\n{value}{ending}suffix\r\n")
+                        };
+                        let mut fixture = RecoveryFixture::with_source(false, source);
+                        fixture.policy.private = private;
+                        let raw = std::fs::read(&fixture.args.series).unwrap();
+                        let calls = Cell::new(0);
+                        let recovered = fixture
+                            .trial(&|_| {
+                                assert_eq!(address, ADDRESS);
+                                calls.set(calls.get() + 1);
+                                Ok(())
+                            })
+                            .unwrap();
+                        let restored = if address == ADDRESS {
+                            if removed { 1 } else { 2 }
+                        } else {
+                            0
+                        };
+                        assert_eq!(recovered.restored_lines, restored);
+                        assert_eq!(calls.get(), restored);
+                        assert_eq!(recovered.added_placeholders, 0);
+                        assert_eq!(recovered.built.tree, fixture.intended_tree);
+                        assert_eq!(
+                            git_output(
+                                &fixture.consumer,
+                                &["show", &format!("{}:config", recovered.built.head)]
+                            )
+                            .unwrap(),
+                            source("new").as_bytes()
+                        );
+                        assert_eq!(std::fs::read(&fixture.args.series).unwrap(), raw);
+                        fixture.clean();
+                    }
+                }
+            }
         }
     }
 
