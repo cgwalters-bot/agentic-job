@@ -11,7 +11,8 @@ says what a caller may rely on across versions.
 
 - Experimental attachment admission can resolve issue, PR and branch identities
   against caller/organization bounds and read bounded context with pinned
-  checkout plans. This is library groundwork only: no
+  checkout plans, and route hand-back writes to declared write attachments
+  within their own limits and the run's shared ones. This is library groundwork only: no
   dispatch input or attachment publication is enabled, and `fix` is unchanged
   (#3692).
 

@@ -307,13 +307,28 @@ outdated state; full review-thread context still needs a separate read.
 These APIs take a caller-owned, bounded, read-only reader. Snapshot JSON is
 untrusted data, not task instructions or a checked publication receipt; a future
 prompt consumer must apply the existing event-context sanitizing/fencing rules.
-Neither API creates check artifacts, routes requests or publishes. Remaining
-work must wire trusted dispatch inputs, checkout materialization and full
-review-thread context, carry exact attachment/head identities through the hand-back and
-check/apply, count attachment writes against the item's own outputs, repeat
-live push safety checks and test an issue run updating an attached bot PR end
-to end. Review-thread replies and the conversion of `fix` to a write attachment
-remain undone too.
+Neither API creates check artifacts, routes requests or publishes.
+
+The companion `attachments::route::route` function splits a hand-back's
+collected requests between the run's own policy and admitted write attachments.
+A request reaches an attachment only as an `add_comment` with `repo` and
+`item_number`, or a `push_to_pull_request_branch` with `repo` and
+`pull_request_number`, naming it exactly; it is then held to that attachment's
+compiled write policy with the ordinary target-field checks. Any other request
+naming an attachment's repository and number in any number field, a write to a
+read attachment, and a write attachment duplicating the run's own item refuse.
+Per-attachment limits apply, and every request, routed or not, counts against
+the run policy's `max_outputs` and the per-type `max` of each type that policy
+allows, so attachments add only types the run lacks. Routing checks targets
+and limits only: the whole hand-back must still pass check's per-item
+refusals, such as the applied-marker rule. Check and apply do not call it yet.
+
+Remaining work must wire trusted dispatch inputs, checkout materialization and
+full review-thread context, carry exact attachment/head identities and the
+routing through the hand-back and check/apply, check routed pushes' patches
+against the attachment's pinned head, repeat live push safety checks and test
+an issue run updating an attached bot PR end to end. Review-thread replies and
+the conversion of `fix` to a write attachment remain undone too.
 
 ## Stacked proposals: library groundwork only
 

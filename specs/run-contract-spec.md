@@ -52,12 +52,14 @@ an enabled run contract. The
 [admission/context APIs and limits](../docs/safe-outputs.md#attachments-admission-and-context-groundwork-only)
 describe what is implemented. The context API reads bounded paginated content
 and CI observations and records exact checkout plans; it neither materializes
-source nor reads review-thread resolution state. Dispatch input, full context retrieval, checked
-write routing and apply publication remain unimplemented; `fix` still uses the
+source nor reads review-thread resolution state. A routing API assigns
+hand-back requests to declared write attachments, but check and apply do not
+call it. Dispatch input, full context retrieval, wiring routing into check
+and apply, and apply publication remain unimplemented; `fix` still uses the
 existing single-target contract. The admission result MUST NOT be treated as a
 checked publication receipt. No existing RC guarantee is broadened by it.
 The kind × mode × repository-bounds matrix, context pagination, shared resource
-limits, moving-source refusals and metadata refusals are exercised
+limits, moving-source refusals, metadata refusals and write routing are exercised
 in [attachments.rs](../crates/agentic-job/tests/attachments.rs); these are not
 end-to-end publication evidence.
 

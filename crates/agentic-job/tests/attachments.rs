@@ -4,10 +4,13 @@ use agentic_job::policy::Bounds;
 use agentic_job::policy::attachments::context::{
     MAX_CONTEXT_BYTES, MAX_PAGES, MAX_READS, MAX_RESPONSE_BYTES, resolve, snapshot,
 };
-use agentic_job::policy::attachments::{MAX_ATTACHMENTS, MAX_REQUEST_BYTES, Mode, admit};
+use agentic_job::policy::attachments::route::{Routing, route};
+use agentic_job::policy::attachments::{Admitted, MAX_ATTACHMENTS, MAX_REQUEST_BYTES, Mode, admit};
 use anyhow::Result;
+use safe_outputs::Forge;
 use safe_outputs::bounds::{Organization, RepoRule};
-use serde_json::{Value, json};
+use safe_outputs::check::Publishers;
+use serde_json::{Map, Value, json};
 
 const REPO: &str = "example-org/example";
 const FORK: &str = "example-bot/example";
@@ -961,6 +964,199 @@ fn write_attachments_share_the_run_output_limit() {
     ] {
         let result = admit(&text, caller, organization, false, &mut metadata);
         assert!(result.is_err(), "{result:?}");
+    }
+}
+
+struct NoPublishers;
+
+impl Publishers for NoPublishers {
+    fn inline_comment(&self, _: &Map<String, Value>, _: Forge) -> Result<()> {
+        anyhow::bail!("no inline comments")
+    }
+
+    fn native_refusals(&self, _: &[Value], _: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+#[test]
+fn hand_back_writes_route_only_to_declared_write_attachments() {
+    let mut bounds = bounds();
+    let limits = &mut bounds.github.as_mut().unwrap().outputs.types;
+    limits.get_mut("add_comment").unwrap().max = 3;
+    let issue: Value = serde_json::from_str(&request("issue", "write")).unwrap();
+    let pull: Value = serde_json::from_str(&request("pull-request", "write")).unwrap();
+    let text = json!([issue[0], pull[0]]).to_string();
+    let admitted = admit(&text, &bounds, None, false, &mut metadata).unwrap();
+    let read = admit(
+        &request("issue", "read"),
+        &bounds,
+        None,
+        false,
+        &mut metadata,
+    )
+    .unwrap();
+    // The run's own policy: three outputs, of which two comments and no push.
+    let mut run = admitted[0].write_policy.clone().unwrap();
+    run.max_outputs = 3;
+    run.safe_outputs.others.get_mut("add_comment").unwrap().max = 2;
+    let comment = |fields: Value| {
+        let mut item = json!({"type": "add_comment", "body": "b", "repo": REPO});
+        item.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        item
+    };
+    let push = |fields: Value| {
+        let mut item = json!({"type": "push_to_pull_request_branch", "message": "m",
+            "repo": REPO, "branch": "bot/topic"});
+        item.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        item
+    };
+    type Expected = std::result::Result<(Vec<(usize, usize)>, Vec<usize>), &'static str>;
+    type Case<'a> = (
+        &'a str,
+        &'a [Admitted],
+        Vec<Value>,
+        Option<(&'a str, u64)>,
+        Expected,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "explicit targets route; others stay ordinary",
+            &admitted,
+            vec![
+                comment(json!({"item_number": 7})),
+                push(json!({"pull_request_number": 8})),
+                comment(json!({"item_number": 9})),
+            ],
+            None,
+            Ok((vec![(0, 0), (1, 1)], vec![2])),
+        ),
+        (
+            "a comment on the written PR",
+            &admitted,
+            vec![comment(json!({"item_number": "8"}))],
+            None,
+            Ok((vec![(0, 1)], vec![])),
+        ),
+        (
+            "no repository leaves the run's own target",
+            &admitted,
+            vec![json!({"type": "add_comment", "body": "b", "item_number": 7})],
+            None,
+            Ok((vec![], vec![0])),
+        ),
+        (
+            "an issue attachment takes no push",
+            &admitted,
+            vec![push(json!({"pull_request_number": 7}))],
+            None,
+            Err("does not allow"),
+        ),
+        (
+            "an alias cannot name an attachment",
+            &admitted,
+            vec![comment(json!({"pr_number": 7}))],
+            None,
+            Err("by item_number alone"),
+        ),
+        (
+            "two spellings cannot disagree",
+            &admitted,
+            vec![comment(json!({"item_number": 7, "issue_number": 8}))],
+            None,
+            Err("by item_number alone"),
+        ),
+        (
+            "other output types cannot write an attachment",
+            &admitted,
+            vec![json!({"type": "add_labels", "repo": REPO, "item_number": 7, "labels": ["x"]})],
+            None,
+            Err("only add_comment"),
+        ),
+        (
+            "a push keeps to the attached branch",
+            &admitted,
+            vec![push(json!({"pull_request_number": 8, "branch": "main"}))],
+            None,
+            Err("with branch \"main\""),
+        ),
+        (
+            "per-attachment limits hold",
+            &admitted,
+            vec![
+                comment(json!({"item_number": 7})),
+                comment(json!({"item_number": 7})),
+            ],
+            None,
+            Err("over its max 1"),
+        ),
+        (
+            "attachment writes count against the run's total",
+            &admitted,
+            vec![
+                comment(json!({"item_number": 7})),
+                push(json!({"pull_request_number": 8})),
+                comment(json!({"item_number": 8})),
+                comment(json!({"item_number": 9})),
+            ],
+            None,
+            Err("run's max_outputs 3"),
+        ),
+        (
+            "an attachment cannot duplicate the run's item",
+            &admitted,
+            vec![],
+            Some((REPO, 7)),
+            Err("duplicates the run's own item"),
+        ),
+        (
+            "a read attachment may duplicate the run's item, which stays the run's",
+            &read,
+            vec![comment(json!({"item_number": 7}))],
+            Some((REPO, 7)),
+            Ok((vec![], vec![0])),
+        ),
+        (
+            "a type the run allows shares the run's limit",
+            &admitted,
+            vec![
+                comment(json!({"item_number": 7})),
+                comment(json!({"item_number": 8})),
+                comment(json!({"item_number": 9})),
+            ],
+            None,
+            Err("add_comment outputs with attachment writes, over the run's max 2"),
+        ),
+        (
+            "a read attachment takes no write",
+            &read,
+            vec![comment(json!({"item_number": 7}))],
+            None,
+            Err("read-only attachment"),
+        ),
+    ];
+    for (name, admitted, items, own, expected) in cases {
+        let items: Vec<Map<String, Value>> = items
+            .into_iter()
+            .map(|item| item.as_object().unwrap().clone())
+            .collect();
+        let result = route(admitted, &items, own, &run, &NoPublishers);
+        match expected {
+            Ok((routed, ordinary)) => {
+                assert_eq!(result, Ok(Routing { routed, ordinary }), "{name}")
+            }
+            Err(needle) => {
+                let errors = result.expect_err(name);
+                assert!(
+                    errors.iter().any(|error| error.contains(needle)),
+                    "{name}: {errors:?}"
+                );
+            }
+        }
     }
 }
 

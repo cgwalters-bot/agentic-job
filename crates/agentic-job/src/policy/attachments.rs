@@ -18,6 +18,7 @@ use safe_outputs::contract::{BASE_RE, COMMIT_RE, PULL_NUMBER_RE, REPO_RE, dotted
 use safe_outputs::{Forge, PUSH_TO_PULL_REQUEST_BRANCH};
 
 pub mod context;
+pub mod route;
 
 /// Hard ceilings before parsing or reading forge metadata.
 pub const MAX_ATTACHMENTS: usize = 8;
