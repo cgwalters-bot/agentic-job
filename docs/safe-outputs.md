@@ -234,6 +234,56 @@ failing step and reproduce/fix it without weakening these boundaries. Keep #2397
 open while waiting for merge/run or investigating failure; offline tests and PR
 CI are not credentialed publication evidence.
 
+## Attachments: admission groundwork only
+
+The experimental `agentic_job::policy::attachments::admit` function resolves a
+caller-supplied attachment list against repository and output bounds. This is
+only the admission slice of #3692: **dispatch, run, check and apply do not accept
+attachments yet**. No caller setting enables them, and `fix` is unchanged.
+The result is not a checked receipt or permission to publish.
+
+The concrete threat is an attachment expanding write authority beyond the
+caller's repositories or push branches. The empty list enables nothing. An
+explicit list is capped at eight entries and 16 KiB before parsing, with required
+`kind`, `mode` and `repo` fields. Issues and pull requests use a positive `number`
+of at most nine digits; branches use `branch`. Kinds are `issue`, `pull-request`
+and `branch`; modes are `read` and `write`. Unknown fields, kinds, modes and
+duplicate destinations (including issue/PR aliases or differing modes) refuse.
+File and artifact kinds are not implemented.
+
+All repositories must be public and their clone hosts admitted by both caller
+and optional organization bounds. As for public context repositories, read-mode
+attachments need no admission to the write repository list (`repos`).
+Read-mode PRs and branches resolve to exact commits, without granting writes.
+A read-mode PR's head is fetched from the target's `refs/pull/N/head` and its
+head repository is never consulted, so another author's PR can be read even
+from a fork outside bounds or a deleted one.
+Issue writes require repository admission and compile the existing `add_comment`
+policy. PR writes compile `push_to_pull_request_branch` and, only when both
+bounds files list the target repository, `add_comment`, preserving existing
+branch, credential, patch and output limits. Both bounds files must explicitly
+name the PR author in `own_author`. As for ordinary continuation admission
+(#3162), that rule can admit a push to a bot-authored upstream PR outside `repos`,
+but grants no upstream comments or review replies. Organization repository rules
+cannot be bypassed through `own_author`. A PR's head repository must independently
+fit bounds and be the target or its public fork. A push targets only the admitted
+PR's head. Same-repository heads are allowed by admission, but publication still
+requires the existing owner-branch opt-in and live apply safety checks; merely
+attaching a PR grants no general push authority in its target repository.
+Write-mode branches refuse because no branch-push safe output exists.
+Each write policy is compiled alone, so the outputs, comments and pushes all
+compiled write policies grant together must fit `max_outputs` and each type's
+`max` in every bounds file.
+
+This API takes a caller-owned, bounded, read-only metadata reader. It does not
+fetch bodies, comments, reviews or diffs, create check artifacts, route requests
+or publish. Remaining work must wire trusted dispatch inputs and full read-only
+context, carry exact attachment/head identities through the hand-back and
+check/apply, count attachment writes against the item's own outputs, repeat
+live push safety checks and test an issue run updating an attached bot PR end
+to end. Review-thread replies and the conversion of `fix` to a write attachment
+remain undone too.
+
 ## Stacked proposals: library groundwork only
 
 The experimental `safe_outputs::check::stack` library module checks an ordered
