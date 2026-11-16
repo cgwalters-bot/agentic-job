@@ -2997,6 +2997,54 @@ fn pending_worker_does_not_spend_the_review_allowance() {
     assert_eq!(r.result["handed_back"], false);
 }
 
+/// opencode 2.x's `subagent` tool spends both task allowances, as 1.x's
+/// `task` does.
+#[test]
+fn opencode_2_subagents_spend_the_task_allowances() {
+    let subagent = |id: &str, agent: &str| {
+        format!(
+            r#"{{"update": {{"sessionUpdate": "tool_call", "toolCallId": "{id}", "title": "subagent", "kind": "think", "status": "pending", "rawInput": {{"agent": "{agent}", "description": "x"}}}}}},
+            {{"update": {{"sessionUpdate": "tool_call_update", "toolCallId": "{id}", "status": "completed"}}}}"#
+        )
+    };
+    const LATER: &str = r#"[{"say": "Handed back."}]"#;
+    for (agent, max_tasks, max_worker_tasks, message) in [
+        (
+            "explore",
+            Some(1),
+            None,
+            "started more than 1 subagent tasks; the agent handed back",
+        ),
+        (
+            "worker",
+            Some(4),
+            Some(1),
+            "started more than 1 worker tasks; the agent handed back",
+        ),
+    ] {
+        let script = format!(
+            r#"[{}, {}, {{"sleep": 60}}, {{"say": "Not reached."}}]"#,
+            subagent("s1", agent),
+            subagent("s2", agent)
+        );
+        let r = run(
+            SCRIPT_AND_LATER,
+            Setup {
+                files: &[("script.json", &script), ("later.json", LATER)],
+                timeout_s: 60,
+                max_tasks,
+                max_worker_tasks,
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, 3, "budget");
+        assert_eq!(r.result["message"], message, "{agent}");
+        assert_eq!(r.result["handed_back"], true, "{agent}");
+        assert!(!r.log.contains("Not reached"), "{agent}: {}", r.log);
+        assert_eq!(r.digest().tasks, 2, "{agent}");
+    }
+}
+
 /// A process the agent leaves in its group does not outlive the session;
 /// one that left its session and process group does, since the agent is
 /// this user and nothing kills every process of it (agentic-job#2989).

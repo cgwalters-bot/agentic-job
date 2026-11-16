@@ -15,9 +15,9 @@ use super::steer::{LABEL_UPDATE, STEER_METHOD};
 pub const MAX_TEXT: usize = 200;
 /// Tool kinds whose calls the log shows as edits.
 pub const EDIT_KINDS: &[&str] = &["edit", "delete", "move"];
-/// The tools that start a subagent, lowercase: opencode's `task`, and
-/// Claude Code's `Task`, since renamed `Agent`.
-const TASK_TOOLS: &[&str] = &["task", "agent"];
+/// The tools that start a subagent, lowercase: opencode 1.x's `task`,
+/// since renamed `subagent`, and Claude Code's `Task`, since renamed `Agent`.
+const TASK_TOOLS: &[&str] = &["task", "subagent", "agent"];
 /// The kinds both report one as; a shell command that happens to be
 /// titled "task" is not one.
 const TASK_KINDS: &[&str] = &["think", "other", ""];
@@ -1187,26 +1187,29 @@ mod tests {
 
     #[test]
     fn worker_task_targets() {
-        for key in ["subagent_type", "agent", "agent_name"] {
-            let mut raw = json!({"description": "diff-reviewer worker"});
-            raw[key] = json!("worker");
-            let (digest, _) = lines(&[
-                update(
-                    json!({"sessionUpdate": "tool_call", "toolCallId": "w", "title": "task", "kind": "think", "rawInput": raw}),
-                ),
-                update(
-                    json!({"sessionUpdate": "tool_call_update", "toolCallId": "w", "status": "completed"}),
-                ),
-                update(
-                    json!({"sessionUpdate": "tool_call", "toolCallId": "r", "title": "task", "kind": "think", "rawInput": {"subagent_type": "diff-reviewer"}}),
-                ),
-                update(
-                    json!({"sessionUpdate": "tool_call", "toolCallId": "u", "title": "task", "kind": "think", "rawInput": {"description": "worker"}}),
-                ),
-            ]);
-            assert_eq!(digest.tasks, 3);
-            assert_eq!(digest.worker_tasks(&["worker".into()]), 1, "{key}");
-            assert_eq!(digest.worker_tasks(&[]), 0);
+        // opencode 1.x's tool, and 2.x's.
+        for title in ["task", "subagent"] {
+            for key in ["subagent_type", "agent", "agent_name"] {
+                let mut raw = json!({"description": "diff-reviewer worker"});
+                raw[key] = json!("worker");
+                let (digest, _) = lines(&[
+                    update(
+                        json!({"sessionUpdate": "tool_call", "toolCallId": "w", "title": title, "kind": "think", "rawInput": raw}),
+                    ),
+                    update(
+                        json!({"sessionUpdate": "tool_call_update", "toolCallId": "w", "status": "completed"}),
+                    ),
+                    update(
+                        json!({"sessionUpdate": "tool_call", "toolCallId": "r", "title": title, "kind": "think", "rawInput": {"subagent_type": "diff-reviewer"}}),
+                    ),
+                    update(
+                        json!({"sessionUpdate": "tool_call", "toolCallId": "u", "title": title, "kind": "think", "rawInput": {"description": "worker"}}),
+                    ),
+                ]);
+                assert_eq!(digest.tasks, 3, "{title}");
+                assert_eq!(digest.worker_tasks(&["worker".into()]), 1, "{title} {key}");
+                assert_eq!(digest.worker_tasks(&[]), 0);
+            }
         }
     }
 

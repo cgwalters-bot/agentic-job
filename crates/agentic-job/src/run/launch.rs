@@ -59,7 +59,10 @@ pub const OPENCODE_SWITCHES: &[(&str, &str)] = &[
     ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
     // External skills have their own project/home discovery, independent
     // of the project-config switch. Also suppress the home Claude prompt
-    // fallback and bundled authentication plugins.
+    // fallback and bundled authentication plugins. 2.x reads neither
+    // EXTERNAL_SKILLS nor DEFAULT_PLUGINS, kept for a 1.x from `npm`;
+    // CLAUDE_CODE also keeps out its Claude Code skills, but not
+    // `~/.agents/skills` (docs/skills.md).
     ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1"),
     ("OPENCODE_DISABLE_CLAUDE_CODE", "1"),
     ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "1"),

@@ -7722,7 +7722,11 @@ fn the_image_holds_and_installs_the_secure_host_binary() {
     assert!(binary.contains("NAMES=(agentic-job fake-agent secure-host)\n"));
     let release = workflow("release.yml");
     assert!(release.contains("\"secure-host-$TARGET\" \"secure-host-$TARGET.sha256\""));
-    assert!(release.contains("\"secure-host-$TARGET.sha256\"\n"));
+    // pinned-agents is a release asset of its own artifact, outside the
+    // manifest's NAMES, whose prebuilt inventory binary.sh checks exactly.
+    assert!(release.contains("\"secure-host-$TARGET.sha256\" \"pinned-agents-$TARGET.sha256\"\n"));
+    assert!(release.contains("\"pinned-agents-$TARGET\" \"pinned-agents-$TARGET.sha256\""));
+    assert!(build.contains("name: pinned-agents\n"));
     let ci = workflow("ci.yml");
     let image = job(&ci, "secure-host-image");
     for want in [

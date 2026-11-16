@@ -312,7 +312,7 @@ close-resolved = true
 [host.prepared]
 [setup]
 packages = ["nftables", "podman", "uidmap", "cargo"]
-agents = ["opencode-ai@1.18.35"]
+agents = ["@opencode/cli@2.3.0"]
 "#
             );
             fs::write(&path, text).unwrap();

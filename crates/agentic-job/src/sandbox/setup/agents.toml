@@ -3,10 +3,16 @@
 # Written by `just agents-lock`, one entry per agent; review an update as
 # the code it is, since setup installs it as root.
 #
-# opencode-ai's own package is a launcher that its install script swaps
-# for the platform's binary: pinned is that binary's package instead.
+# opencode-ai's and @opencode/cli's own packages are launchers that their
+# install scripts swap for the platform's binary: pinned is that binary's
+# package instead, so its integrity is the platform tarball's, not the
+# launcher's. 1.x stays the workflow default until the secure-host image
+# knows 2.x; 1.x cannot read the session database 2.x leaves in a home
+# ("has no session table").
 #   just agents-lock opencode-ai@1.18.35 opencode-linux-x64@1.18.35 \
 #       opencode=node_modules/opencode-linux-x64/bin/opencode
+#   just agents-lock @opencode/cli@2.3.0 @opencode/cli-linux-x64@2.3.0 \
+#       opencode=node_modules/@opencode/cli-linux-x64/bin/opencode
 #   just agents-lock @agentclientprotocol/claude-agent-acp@0.88.0 \
 #       @agentclientprotocol/claude-agent-acp@0.88.0 \
 #       claude-agent-acp=node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js
@@ -22,6 +28,18 @@ opencode = "node_modules/opencode-linux-x64/bin/opencode"
 path = "node_modules/opencode-linux-x64"
 version = "1.18.35"
 integrity = "sha512-xs/DPt8bK6NTWHpOlVJDWC/P3BnAuAQFHwa+mjrbxhDGd0Pi/GGWGjh4Sr4cpv6KwvfUKVoLKfHc/J8Nnz0XMg=="
+
+
+[[agent]]
+spec = "@opencode/cli@2.3.0"
+
+[agent.bin]
+opencode = "node_modules/@opencode/cli-linux-x64/bin/opencode"
+
+[[agent.package]]
+path = "node_modules/@opencode/cli-linux-x64"
+version = "2.3.0"
+integrity = "sha512-8T3K8L6Nd4fSG5BSgofqhmIDQ1ZvzDZZ2J7bFVB9RK1d5Hjqh24IcxgbcwpgGKkdvItrayi4Rl+wrSmhl17FFg=="
 
 
 [[agent]]

@@ -151,6 +151,12 @@ const STORES: &[&str] = &[
     ".config/gcloud/access_tokens.db",
     ".claude/.credentials.json",
     ".local/share/opencode/auth.json",
+    // opencode 2.x moves auth.json into its database's credential and
+    // account tables. Every run leaves this file, so a home must be fresh.
+    ".local/share/opencode/opencode.db",
+    // It runs in WAL mode: recent credential pages can outlive an
+    // interrupted run in the journal, with or without the main file.
+    ".local/share/opencode/opencode.db-wal",
     agent::GITHUB_TOKEN_FILE,
 ];
 
@@ -1835,6 +1841,12 @@ mod tests {
             (
                 ".kube/config",
                 "users:\n- user:\n    client-key-data: b3BhcXVl\n",
+            ),
+            (".local/share/opencode/opencode.db", "SQLite format 3\0"),
+            // Scanned alone: a journal whose main file is gone.
+            (
+                ".local/share/opencode/opencode.db-wal",
+                "dummy journal page",
             ),
         ] {
             assert!(STORES.contains(&name));

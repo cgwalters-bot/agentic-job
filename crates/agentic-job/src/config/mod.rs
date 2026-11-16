@@ -544,7 +544,7 @@ mod tests {
             [setup]
             packages = ["just", "gcc-c++"]
             npm = ["opencode-ai@1.2.3", "@agentclientprotocol/claude-agent-acp@0.4.0-beta.1"]
-            agents = ["opencode-ai@1.18.35"]
+            agents = ["@opencode/cli@2.3.0"]
         "#;
         let config = Config::parse(good).unwrap();
         assert!(!config.sandbox.check.containers);
@@ -578,8 +578,9 @@ mod tests {
             "[setup]\nnpm = [\"opencode-ai@latest\"]",
             "[setup]\nnpm = [\"opencode-ai@^1.2.3\"]",
             "[setup]\nnpm = [\"@scope/name\"]",
+            "[setup]\nagents = [\"@opencode/cli@2.2.0\"]",
+            "[setup]\nagents = [\"@opencode/cli-linux-x64@2.3.0\"]",
             "[setup]\nagents = [\"opencode-ai@1.18.34\"]",
-            "[setup]\nagents = [\"opencode-linux-x64@1.18.35\"]",
         ];
         for text in bad {
             let config = Config::parse(text).unwrap_or_else(|err| panic!("{text:?}: {err:#}"));

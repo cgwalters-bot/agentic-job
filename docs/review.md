@@ -878,8 +878,13 @@ through `agentic-job.yml`; `review.yml` itself, its network step and its
 submit and status jobs' API calls run only on real pull requests. Real-model review quality is not
 asserted.
 
-The npm registry available during this change reports `opencode-ai` latest as
-1.18.35, not a stable 2.x release. The workflow default uses that available
-release; the launcher no longer refuses versions. The 2.x migration and its
-configuration/ACP breaking-change review remain pending publication of an
-installable stable 2.x package.
+opencode 2.x is published as `@opencode/cli`; 2.3.0 is pinned, but the
+workflow default stays `opencode-ai@1.18.35` until the secure-host image
+knows the new pin. With the launcher's switches its `opencode acp` was checked against
+a loopback OpenAI-compatible stub: the provider configuration `run` writes
+reaches the stub with the run's token, a turn ends with `end_turn`, the
+process exits 0 when its input closes, it starts no background server, and
+a target repository's `opencode.json` and skills stay unread. The
+launcher's `OPENCODE_DISABLE_EXTERNAL_SKILLS` and
+`OPENCODE_DISABLE_DEFAULT_PLUGINS` are not read by 2.3.0; project
+configuration and Claude Code switches alone kept those skills out.

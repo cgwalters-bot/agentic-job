@@ -96,12 +96,13 @@ fn worker_profiles_select_their_model() {
     }
 }
 
-/// The version policy.yml installs of the package PREFIX names.
-fn pinned(prefix: &str) -> String {
-    let policy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/policy.yml");
-    let policy = std::fs::read_to_string(policy).unwrap();
-    let rest = policy.split(prefix).nth(1).unwrap();
-    rest.split('\'').next().unwrap().to_owned()
+/// The version the agents' lock pins of the package NAME.
+fn pinned(name: &str) -> String {
+    let lock = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sandbox/setup/agents.toml");
+    let lock = std::fs::read_to_string(lock).unwrap();
+    let prefix = format!("spec = \"{name}@");
+    let rest = lock.split(&prefix).nth(1).unwrap();
+    rest.split('"').next().unwrap().to_owned()
 }
 
 fn json(command: &mut Command) -> Value {
@@ -115,16 +116,16 @@ fn json(command: &mut Command) -> Value {
 }
 
 #[test]
-fn pinned_opencode_finds_the_skills() {
+fn pinned_opencode_finds_the_subagents() {
     let Ok(opencode) = std::env::var("AGENTIC_JOB_TEST_OPENCODE") else {
         eprintln!("skipped: set AGENTIC_JOB_TEST_OPENCODE to the pinned opencode");
         return;
     };
-    // The version the workflows install, not another one's paths.
+    // The pinned 2.x, not another one's paths.
     let version = Command::new(&opencode).arg("--version").output().unwrap();
     assert_eq!(
         String::from_utf8(version.stdout).unwrap().trim(),
-        pinned("'opencode-ai@")
+        format!("opencode v{}", pinned("@opencode/cli"))
     );
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -141,38 +142,35 @@ fn pinned_opencode_finds_the_skills() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, hostile).unwrap();
     }
-    let run = |args: &[&str]| {
-        let mut command = Command::new(&opencode);
-        command
-            .args(["debug"])
-            .args(args)
-            .current_dir(&work)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap())
-            .env("HOME", &home)
-            .envs(OPENCODE_SWITCHES.iter().copied());
-        json(&mut command)
-    };
-    let skills = run(&["skill"]);
-    for name in ["implement", "review"] {
-        let skill = skills
+    // 2.x has no `debug skill`, and lists skills only once a session has
+    // loaded them; `--standalone` leaves no background server behind.
+    let mut command = Command::new(&opencode);
+    command
+        .args(["--standalone", "debug", "agents"])
+        .current_dir(&work)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &home)
+        .envs(OPENCODE_SWITCHES.iter().copied());
+    let agents = json(&mut command);
+    assert!(!agents.to_string().contains("PROJECT_CANARY"), "{agents}");
+    let find = |id: &str| {
+        agents
             .as_array()
             .unwrap()
             .iter()
-            .find(|skill| skill["name"] == name)
-            .unwrap_or_else(|| panic!("no skill {name}: {skills}"));
-        let want = home.join(format!(".config/opencode/skills/{name}/SKILL.md"));
-        assert_eq!(skill["location"].as_str(), want.to_str());
-    }
-    assert!(!skills.to_string().contains("PROJECT_CANARY"), "{skills}");
-    let reviewer = run(&["agent", "diff-reviewer"]);
+            .find(|agent| agent["id"] == id)
+            .unwrap_or_else(|| panic!("no agent {id}: {agents}"))
+            .clone()
+    };
+    let reviewer = find("diff-reviewer");
     assert_eq!(reviewer["mode"], "subagent");
-    let worker = run(&["agent", "worker"]);
+    let worker = find("worker");
     assert_eq!(worker["mode"], "subagent");
     assert_eq!(worker["model"]["providerID"], "inference");
-    assert_eq!(worker["model"]["modelID"], "example/fast");
+    assert_eq!(worker["model"]["id"], "example/fast");
     assert!(
-        reviewer["prompt"]
+        reviewer["system"]
             .as_str()
             .unwrap()
             .contains("You review a change you did not write."),
@@ -212,7 +210,7 @@ fn pinned_claude_adapter_finds_the_skills() {
     .unwrap();
     assert_eq!(
         package["version"],
-        pinned("'@agentclientprotocol/claude-agent-acp@")
+        pinned("@agentclientprotocol/claude-agent-acp")
     );
     let code = std::fs::read_to_string(Path::new(&adapter).join("dist/acp-agent.js")).unwrap();
     assert!(code.contains(r#"settingSources: ["user", "project", "local"]"#));

@@ -140,7 +140,7 @@ as the runner's user:
 | Agent | Skills | Subagents | Source read |
 | --- | --- | --- | --- |
 | `claude` | `~/.claude/skills/NAME/SKILL.md` | `~/.claude/agents/NAME.md` | The [skills](https://code.claude.com/docs/en/skills) and [subagents](https://code.claude.com/docs/en/sub-agents) documentation; `@agentclientprotocol/claude-agent-acp@0.88.0` starts the SDK with the `user` setting source |
-| `opencode` | `~/.config/opencode/skills/NAME/SKILL.md` | `~/.config/opencode/agents/NAME.md` | opencode v1.18.35's `src/skill/index.ts`, `src/config/paths.ts` and `src/config/agent.ts` |
+| `opencode` | `~/.config/opencode/skills/NAME/SKILL.md` | `~/.config/opencode/agents/NAME.md` | opencode 2.3.0's `debug paths` and `debug agents`, and the skills its `skill` tool offered a loopback model; not its source |
 | `vibe` | `$VIBE_HOME/skills/NAME/SKILL.md` (`~/.config/agentic-job/vibe/skills/`) | `$VIBE_HOME/agents/NAME.toml` and `$VIBE_HOME/prompts/NAME.md` | Vibe 2.26.1's `vibe/core/config/harness_files/_paths.py`, `vibe/core/skills/manager.py`, `vibe/core/agents/` and `vibe/core/prompts/__init__.py` |
 
 Vibe has no Markdown subagents. Its subagent is an agent profile with
@@ -150,9 +150,12 @@ its system prompt. The profile sets nothing else, so the reviewer runs
 with the main agent's tools and permissions. The launcher gives Vibe only
 its user source, so a target repository's `.vibe/` cannot replace them.
 
-The launcher turns off opencode's project configuration and external
-skills (`~/.claude/skills`, `~/.agents/skills`), so its global
-configuration directory is the only place it finds them. The subagent's
+The launcher turns off opencode's project configuration and Claude Code
+skills (`~/.claude/skills`, a target repository's `.opencode/`, `.claude/`
+and `.agents/` skills). opencode 2.3.0 has no switch for the home's own
+`~/.agents/skills`, which it reads besides its global configuration
+directory; like a skill an earlier run left there, it is a reason the
+agent's home must be fresh. The subagent's
 `mode: subagent` is what makes it one for opencode; Claude Code ignores
 the key.
 
@@ -165,25 +168,29 @@ ignore a target repository's `.vibe/` in a folder Vibe trusts, which the
 project source would read. It makes no model request.
 
 The opt-in test `cargo test --test skills` runs the pinned opencode
-(`opencode debug skill` and `debug agent`) and the Claude Agent SDK the
+(`opencode --standalone debug agents`) and the Claude Agent SDK the
 pinned adapter resolves, with the setting sources the adapter passes (its
-`init` message), against a home that `run`'s files were written to, and
-checks that each finds `implement`, `review`, `diff-reviewer` and a worker
-with its explicit model there and
-that opencode ignores a target repository's own. Neither makes a model
-request. The ACP adapter itself and a real session with a model are not
-part of it. It needs both packages installed outside the repository:
+`init` message), against a home that `run`'s files were written to. It
+checks that the SDK finds `implement`, `review`, `diff-reviewer` and a
+worker with its explicit model there, and that opencode finds the
+subagents and ignores a target repository's own. opencode 2.x has no
+`debug skill` and lists skills only once a session has loaded them, so
+its skills are not checked here. Neither makes a model request. The ACP
+adapter itself and a real session with a model are not part of it. It
+needs both agents installed from the pins outside the repository:
 
 ```sh
-npm install --no-save --prefix "$TMP/agents" opencode-ai@1.18.35 @agentclientprotocol/claude-agent-acp@0.88.0
-AGENTIC_JOB_TEST_OPENCODE="$TMP/agents/node_modules/.bin/opencode" \
-AGENTIC_JOB_TEST_CLAUDE_ACP="$TMP/agents/node_modules/@agentclientprotocol/claude-agent-acp" \
+TMP=$(mktemp -d)
+opencode=$(cargo run --quiet --locked --bin pinned-agents -- install "$TMP/agents" @opencode/cli@2.3.0)
+claude=$(cargo run --quiet --locked --bin pinned-agents -- install "$TMP/agents" @agentclientprotocol/claude-agent-acp@0.88.0)
+AGENTIC_JOB_TEST_OPENCODE="$opencode/node_modules/@opencode/cli-linux-x64/bin/opencode" \
+AGENTIC_JOB_TEST_CLAUDE_ACP="$claude/node_modules/@agentclientprotocol/claude-agent-acp" \
   cargo test --locked --test skills -- --nocapture
 ```
 
-CI does not run it yet: an `npm install` outside a lockfile is a zizmor
-finding the [ingress check](workflow-ingress.md) refuses, so CI needs
-a locked install, or a maintainer's exemption, first.
+CI does not run it yet. An `npm install` outside a lockfile is a zizmor
+finding the [ingress check](workflow-ingress.md) refuses; the pinned
+install above is the locked one a CI job would use.
 
 ## What it does not protect
 

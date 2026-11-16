@@ -13,7 +13,7 @@
 //! [`LOCK`] is for Linux on x86-64 with glibc, what the runners are;
 //! elsewhere setup refuses, and `setup.npm` remains. An agent whose
 //! package needs its install script to pick a platform binary
-//! (`opencode-ai`) is pinned as that binary's package instead.
+//! (`@opencode/cli`) is pinned as that binary's package instead.
 //! `just agents-lock` writes an entry from npm's own resolution.
 
 use std::collections::BTreeMap;

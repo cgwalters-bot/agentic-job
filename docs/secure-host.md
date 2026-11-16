@@ -451,7 +451,11 @@ printing a value:
     a credential value. The gate does not execute those helpers or connect to
     those endpoints to decide whether they are safe. Even credentialless
     settings must be removed before gated launch; `run` writes its managed
-    agent settings only after the gate. This fixed-path inventory does not yet
+    agent settings only after the gate. opencode's database
+    (`~/.local/share/opencode/opencode.db`), and its write-ahead journal
+    (`opencode.db-wal`) on its own, are refused too: 2.x keeps
+    provider credentials there, and every run leaves one, so a gated run
+    needs a fresh agent home and a runner home where opencode never ran. This fixed-path inventory does not yet
     cover arbitrary custom configuration paths or discover all credential proxies.
 - A child of `run`, where the agent will be, cannot open the memory of any
   process of the uid (`/proc/PID/mem`, decided as ptrace and

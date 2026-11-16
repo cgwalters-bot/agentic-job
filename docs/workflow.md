@@ -1194,7 +1194,8 @@ not define, and opts into `apply-partial`, which inference does not need.
 - **Agent programs and limits:** `agent: claude` defaults to
   `@agentclientprotocol/claude-agent-acp@0.88.0` (the ACP adapter, which brings
   the Claude Agent SDK); `agent: opencode` defaults to `opencode-ai@1.18.35`.
-  Both come from tarballs pinned in the binary, every dependency included,
+  `@opencode/cli@2.3.0` is pinned too, for `setup.agents`; it becomes the
+  default once the secure-host image's own pins include it. They come from tarballs pinned in the binary, every dependency included,
   installed without npm or install scripts (`setup.agents`, see
   [the sandbox](sandbox.md#what-setup-does-for-an-agent)), and are for x86-64
   Linux with glibc: setup refuses another OS or CPU before it changes
@@ -1204,7 +1205,16 @@ not define, and opts into `apply-partial`, which inference does not need.
   `budget` and `timeout` with the operator. Replace the scripted caller's
   `max-requests: "0"` with the default `"150"` or another positive cap:
   composition accepts a zero for a brokered agent with a budget, and the
-  run then has no request cap.
+  run then has no request cap. Each release also has a
+  static `pinned-agents` binary that installs the same pins on a
+  workstation: `pinned-agents install DIR SPEC`. Only its `.sha256`
+  file vouches for it: unlike the other binaries, it is not in the
+  attested `release.json`.
+
+    opencode 1.x cannot read the session database 2.x leaves in a home
+    (`~/.local/share/opencode/opencode.db`), and its ACP server then never
+    answers. A host that reuses its `runner-home` and goes back from 2.x
+    to 1.x needs that home emptied first.
 
     `agent: vibe` installs `mistral-vibe==2.26.1` into a root-owned Python
     virtual environment before hardening; it does not use the `npm` input.
