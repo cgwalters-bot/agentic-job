@@ -49,12 +49,15 @@ tested conformance claim.
 Attachments (#3692) have experimental read-only admission groundwork in
 [`policy/attachments.rs`](../crates/agentic-job/src/policy/attachments.rs), not
 an enabled run contract. The
-[admission API and limits](../docs/safe-outputs.md#attachments-admission-groundwork-only)
-describe what is implemented. Dispatch input, full context retrieval, checked
+[admission/context APIs and limits](../docs/safe-outputs.md#attachments-admission-and-context-groundwork-only)
+describe what is implemented. The context API reads bounded paginated content
+and CI observations and records exact checkout plans; it neither materializes
+source nor reads review-thread resolution state. Dispatch input, full context retrieval, checked
 write routing and apply publication remain unimplemented; `fix` still uses the
 existing single-target contract. The admission result MUST NOT be treated as a
 checked publication receipt. No existing RC guarantee is broadened by it.
-The kind × mode × repository-bounds matrix and metadata refusals are exercised
+The kind × mode × repository-bounds matrix, context pagination, shared resource
+limits, moving-source refusals and metadata refusals are exercised
 in [attachments.rs](../crates/agentic-job/tests/attachments.rs); these are not
 end-to-end publication evidence.
 

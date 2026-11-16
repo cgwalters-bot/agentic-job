@@ -10,7 +10,8 @@ says what a caller may rely on across versions.
 ## Unreleased
 
 - Experimental attachment admission can resolve issue, PR and branch identities
-  against caller/organization bounds. This is library groundwork only: no
+  against caller/organization bounds and read bounded context with pinned
+  checkout plans. This is library groundwork only: no
   dispatch input or attachment publication is enabled, and `fix` is unchanged
   (#3692).
 

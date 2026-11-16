@@ -17,6 +17,8 @@ use safe_outputs::apply::ADD_COMMENT;
 use safe_outputs::contract::{BASE_RE, COMMIT_RE, PULL_NUMBER_RE, REPO_RE, dotted};
 use safe_outputs::{Forge, PUSH_TO_PULL_REQUEST_BRANCH};
 
+pub mod context;
+
 /// Hard ceilings before parsing or reading forge metadata.
 pub const MAX_ATTACHMENTS: usize = 8;
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024;
@@ -70,7 +72,7 @@ impl Attachment {
 
 /// Metadata resolved at admission, not full input context. A later workflow must
 /// fetch comments/diffs and bind these identities into check/apply artifacts.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Admitted {
     pub attachment: Attachment,
     /// Repository containing the pinned head, distinct from a PR's target. None

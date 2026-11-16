@@ -234,7 +234,7 @@ failing step and reproduce/fix it without weakening these boundaries. Keep #2397
 open while waiting for merge/run or investigating failure; offline tests and PR
 CI are not credentialed publication evidence.
 
-## Attachments: admission groundwork only
+## Attachments: admission and context groundwork only
 
 The experimental `agentic_job::policy::attachments::admit` function resolves a
 caller-supplied attachment list against repository and output bounds. This is
@@ -275,10 +275,41 @@ Each write policy is compiled alone, so the outputs, comments and pushes all
 compiled write policies grant together must fit `max_outputs` and each type's
 `max` in every bounds file.
 
-This API takes a caller-owned, bounded, read-only metadata reader. It does not
-fetch bodies, comments, reviews or diffs, create check artifacts, route requests
-or publish. Remaining work must wire trusted dispatch inputs and full read-only
-context, carry exact attachment/head identities through the hand-back and
+The companion `attachments::context::snapshot` API runs admission first, then
+reads issue/PR bodies and paginated comments, PR reviews and review comments,
+and check runs and commit statuses for the pinned head. It shares ceilings of
+256 reads and 8 MiB across admission and all attachments, with at most 1 MiB per
+response and ten 100-row pages per collection. Unreadable, malformed, oversized
+or incomplete pages refuse, rather than silently losing context. The supplied
+read-only API reader must also cap HTTP response bytes before parsing JSON.
+PR head/base commits and branch commits are rechecked after the content reads;
+movement refuses. Other forge text and CI state remain mutable observations,
+not an atomic snapshot.
+
+`attachments::context::resolve` retains each snapshot alongside the exact
+admitted identities and compiled write policy from that same resolution. This
+serializable pair avoids a second admission accidentally resolving a different
+head after context was fetched. Admission and context together must fit the
+8 MiB serialized ceiling; all existing shared read/response limits still apply.
+The pair is future trusted-producer transport groundwork, not an accepted policy
+input or a checked receipt. Only its admission fields are policy metadata;
+snapshot fields remain untrusted forge data. It has no deserializer or workflow
+consumer. The snapshot-only API drops the admission fields from this result.
+
+Snapshots contain checkout plans, not checked-out source. A consumer must fetch
+the target's pull ref (including for write-mode PRs) or branch ref from the
+admitted clone URL, verify the exact head, and fetch a PR's pinned base commit
+before exposing source to the agent. The complete diff and commit graph must
+come from that checkout, not the forge's potentially truncated files/compare
+APIs. REST review comments include reply links but not thread resolution or
+outdated state; full review-thread context still needs a separate read.
+
+These APIs take a caller-owned, bounded, read-only reader. Snapshot JSON is
+untrusted data, not task instructions or a checked publication receipt; a future
+prompt consumer must apply the existing event-context sanitizing/fencing rules.
+Neither API creates check artifacts, routes requests or publishes. Remaining
+work must wire trusted dispatch inputs, checkout materialization and full
+review-thread context, carry exact attachment/head identities through the hand-back and
 check/apply, count attachment writes against the item's own outputs, repeat
 live push safety checks and test an issue run updating an attached bot PR end
 to end. Review-thread replies and the conversion of `fix` to a write attachment
