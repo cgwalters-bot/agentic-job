@@ -20,6 +20,7 @@ use crate::check::read_patch;
 use crate::contract::{COMMIT_RE, PatchRules};
 
 const PLACEHOLDER: &str = "<inference-address>";
+const NO_NEWLINE: &str = "\\ No newline at end of file";
 const MAX_BYTES: usize = 1 << 20;
 const MAX_FILES: usize = 50;
 
@@ -103,16 +104,40 @@ impl Recovered {
     }
 }
 
+/// One file's final-newline state: whether its preimage lacks one, and which
+/// sides a `\ No newline at end of file` marker has claimed so far.
+#[derive(Default)]
+struct FinalNewline {
+    old_missing: bool,
+    old_marked: bool,
+    new_marked: bool,
+}
+
 fn finish_postimage(
     path: &str,
     deleted: bool,
     mut result: String,
     old_lines: &[&str],
     old_position: usize,
+    newline: &FinalNewline,
 ) -> Result<Postimage> {
-    for line in old_lines.get(old_position..).unwrap_or_default() {
+    // A marker must claim exactly the preimage's unterminated last line, and
+    // nothing may follow a new side that ends without a newline.
+    let tail = old_lines.get(old_position..).unwrap_or_default();
+    ensure!(
+        if tail.is_empty() {
+            newline.old_missing == newline.old_marked
+        } else {
+            !newline.new_marked
+        },
+        "recovery final newline mismatch"
+    );
+    for line in tail {
         result.push_str(line);
         result.push('\n');
+    }
+    if newline.old_missing && !tail.is_empty() {
+        result.pop();
     }
     ensure!(
         !deleted || result.is_empty(),
@@ -183,13 +208,7 @@ pub(crate) fn reconstruct_using(
     for header in patch.lines().filter(|line| line.starts_with("diff --git ")) {
         ensure!(sections.insert(header), "recovery repeats a file section");
     }
-    ensure!(
-        patch.ends_with('\n')
-            && !patch
-                .lines()
-                .any(|line| line == "\\ No newline at end of file"),
-        "recovery does not support missing final newlines"
-    );
+    ensure!(patch.ends_with('\n'), "recovery patch lacks final newline");
 
     let mut output = String::with_capacity(patch.len());
     let mut preimage;
@@ -206,6 +225,9 @@ pub(crate) fn reconstruct_using(
     let mut postimage = String::new();
     let mut postimage_lines = 0;
     let mut deleted = false;
+    let mut newline = FinalNewline::default();
+    // The prefix of the hunk line a final-newline marker would apply to.
+    let mut last_prefix = None;
 
     for line in patch.split_inclusive('\n') {
         // Diff metadata stays LF-only. Hunk bodies and preimage lines retain
@@ -216,9 +238,31 @@ pub(crate) fn reconstruct_using(
             "recovery metadata contains CR"
         );
         let text = &line[..line.len() - 1];
-        if remaining != (0, 0) {
+        if in_files && text == NO_NEWLINE {
+            // The marker belongs to the hunk line just before it, on each side
+            // that line occupies. The old side must be the preimage's last,
+            // unterminated line; the new side's postimage loses its newline.
+            let prefix = last_prefix.take();
+            ensure!(prefix.is_some(), "recovery final newline mismatch");
+            if prefix != Some(b'+') {
+                ensure!(
+                    newline.old_missing && !newline.old_marked && old_position == old_lines.len(),
+                    "recovery final newline mismatch"
+                );
+                newline.old_marked = true;
+            }
+            if prefix != Some(b'-') {
+                ensure!(
+                    !newline.new_marked && postimage.pop() == Some('\n'),
+                    "recovery final newline mismatch"
+                );
+                newline.new_marked = true;
+            }
+            output.push_str(line);
+        } else if remaining != (0, 0) {
             let prefix = text.as_bytes().first().copied().unwrap_or(b' ');
             let body = text.get(1..).unwrap_or("");
+            last_prefix = Some(prefix);
             if prefix == b' ' || prefix == b'-' {
                 let expected = old_lines.get(old_position).copied();
                 ensure!(expected.is_some(), "recovery old-side position is absent");
@@ -244,6 +288,7 @@ pub(crate) fn reconstruct_using(
                 output.push_str(line);
             }
             if prefix == b' ' || prefix == b'+' {
+                ensure!(!newline.new_marked, "recovery final newline mismatch");
                 remaining.1 -= 1;
                 postimage.push_str(if prefix == b' ' {
                     old_lines[old_position - 1]
@@ -264,6 +309,7 @@ pub(crate) fn reconstruct_using(
                     std::mem::take(&mut postimage),
                     &old_lines,
                     old_position,
+                    &newline,
                 )?);
             }
             file_path = text
@@ -278,6 +324,8 @@ pub(crate) fn reconstruct_using(
             old_lines.clear();
             deleted = false;
             postimage_lines = 0;
+            newline = FinalNewline::default();
+            last_prefix = None;
             output.push_str(line);
         } else if in_files && (text == "+++ /dev/null" || text.starts_with("deleted file mode ")) {
             deleted = true;
@@ -293,10 +341,7 @@ pub(crate) fn reconstruct_using(
             ensure!(bytes.len() <= limit, "recovery preimage exceeds byte limit");
             preimage = String::from_utf8(bytes)
                 .map_err(|_| anyhow::anyhow!("recovery preimage is not UTF-8"))?;
-            ensure!(
-                preimage.is_empty() || preimage.ends_with('\n'),
-                "recovery preimage lacks final newline"
-            );
+            newline.old_missing = !preimage.is_empty() && !preimage.ends_with('\n');
             old_lines = preimage.split_terminator('\n').collect();
             output.push_str(line);
         } else if in_files && let Some(captures) = HUNK.captures(text) {
@@ -320,9 +365,12 @@ pub(crate) fn reconstruct_using(
             ensure!(
                 position >= previous_end
                     && position <= old_lines.len()
-                    && (!new_file || remaining.0 == 0),
+                    && (!new_file || remaining.0 == 0)
+                    && !newline.old_marked
+                    && !newline.new_marked,
                 "recovery hunk position is invalid or overlapping"
             );
+            last_prefix = None;
             for line in &old_lines[old_position..position] {
                 postimage.push_str(line);
                 postimage.push('\n');
@@ -355,6 +403,7 @@ pub(crate) fn reconstruct_using(
             postimage,
             &old_lines,
             old_position,
+            &newline,
         )?);
     }
     let recovered = read_patch(&output, rules, base);
@@ -534,6 +583,91 @@ mod tests {
             let error = recover(&patch, &changed).err().unwrap();
             assert_eq!(error.to_string(), "recovery old-side mismatch");
             assert!(!format!("{error:#}").contains(ADDRESS));
+        }
+    }
+
+    #[test]
+    fn missing_final_newlines_are_matched_exactly() {
+        let marker = format!("{NO_NEWLINE}\n");
+        for (hunk, preimage, restored) in [
+            (
+                format!("@@ -1,2 +1,2 @@\n url=<inference-address>\n-old\n{marker}+new\n{marker}"),
+                format!("url={ADDRESS}\nold"),
+                1,
+            ),
+            (
+                format!("@@ -1,2 +1,2 @@\n url=<inference-address>\n-old\n{marker}+old\n"),
+                format!("url={ADDRESS}\nold"),
+                1,
+            ),
+            (
+                format!("@@ -1,2 +1,2 @@\n url=<inference-address>\n-old\n+old\n{marker}"),
+                format!("url={ADDRESS}\nold\n"),
+                1,
+            ),
+            (
+                format!("@@ -1,3 +1,3 @@\n-url=<inference-address>\n+new\n old\n tail\n{marker}"),
+                format!("url={ADDRESS}\nold\ntail"),
+                1,
+            ),
+            (
+                "@@ -1,2 +1,2 @@\n-url=<inference-address>\n+new\n old\n".to_owned(),
+                format!("url={ADDRESS}\nold\ntail"),
+                1,
+            ),
+            (
+                format!("@@ -1,2 +1,2 @@\n <inference-address>\n-old\n{marker}+new\n{marker}"),
+                "<inference-address>\nold".to_owned(),
+                0,
+            ),
+        ] {
+            let recovered = recover(&mail(&hunk), &preimage).unwrap();
+            assert_eq!(recovered.restored_lines, restored, "{hunk}");
+            let repo = tempfile::tempdir().unwrap();
+            git(repo.path(), &["init", "--quiet"]);
+            std::fs::write(repo.path().join("config"), &preimage).unwrap();
+            std::fs::write(
+                repo.path().join("change.patch"),
+                recovered.application_patch(),
+            )
+            .unwrap();
+            git(repo.path(), &["apply", "change.patch"]);
+            let actual = std::fs::read(repo.path().join("config")).unwrap();
+            recovered
+                .verify_application(|_, _| Ok(Some(actual.clone())))
+                .unwrap();
+        }
+
+        for (hunk, preimage) in [
+            (
+                format!("@@ -1,2 +1,2 @@\n url=<inference-address>\n-old\n{marker}+new\n"),
+                format!("url={ADDRESS}\nold\n"),
+            ),
+            (
+                "@@ -1,2 +1,2 @@\n url=<inference-address>\n-old\n+new\n".to_owned(),
+                format!("url={ADDRESS}\nold"),
+            ),
+            (
+                format!("@@ -1,2 +1,3 @@\n url=<inference-address>\n-old\n+new\n{marker}+more\n"),
+                format!("url={ADDRESS}\nold\n"),
+            ),
+            (
+                format!("@@ -1 +1 @@\n{marker}-url=<inference-address>\n+new\n"),
+                format!("url={ADDRESS}"),
+            ),
+            (
+                format!("@@ -1 +1 @@\n-url=<inference-address>\n+new\n{marker}{marker}"),
+                format!("url={ADDRESS}\n"),
+            ),
+            (
+                format!(
+                    "@@ -1 +1 @@\n-url=<inference-address>\n{marker}+new\n{marker}@@ -2 +2 @@\n-x\n+y\n"
+                ),
+                format!("url={ADDRESS}"),
+            ),
+        ] {
+            let error = recover(&mail(&hunk), &preimage).err().unwrap();
+            assert!(!format!("{error:#}").contains(ADDRESS), "{hunk}");
         }
     }
 

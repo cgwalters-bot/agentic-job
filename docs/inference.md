@@ -114,8 +114,10 @@ before reading preimages and revalidates paths afterward. Every non-placeholder
 byte must match, and only one placeholder per line, replacing one host:port
 literal, is supported. Old- and new-side hunk coordinates must agree with all
 preceding hunk deltas. Overlapping hunks, duplicate file sections, malformed
-patches, CR in diff metadata and missing final newlines are refused. CRLF and
+patches and CR in diff metadata are refused. CRLF and
 mixed line endings in hunk content are matched and preserved byte-for-byte.
+A `\ No newline at end of file` marker must claim exactly the preimage's
+unterminated last line on the old side, and ends the new side.
 Duplicate sections are
 rejected before any preimage read, including delete/recreate pairs. Patch and
 per-file preimage reads are bounded to 1 MiB (or the caller's smaller patch
@@ -148,7 +150,7 @@ reconstruction proves old-side placeholders are literal and restores no bytes,
 the already-checked mail needs no additional credential scan, including in a
 private repository. Private preimages are never used to restore addresses. It still passes
 the reconstruction bounds and exact-position result verification; literal
-placeholders with large preimages or missing final newlines remain
+placeholders with preimages over the reconstruction bound remain
 unsupported on this path. Counts of
 restored lines and added placeholders are safe step outputs; added placeholders
 are never restored, and the command warns to keep them in draft for review.

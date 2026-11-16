@@ -13,7 +13,8 @@ says what a caller may rely on across versions.
   lines from trusted public preimages during apply. Literal old-side placeholders
   that restore no bytes retain the original credential-check policy, including
   in private repositories where address restoration remains forbidden. CRLF and
-  mixed content line endings are preserved. Added placeholders keep
+  mixed content line endings, and missing final newlines, are preserved
+  exactly. Added placeholders keep
   new work draft and are refused on pushes. Ordinary and secondary patch
   recovery remain unsupported; failures link the retained artifact (tracker#1309).
 

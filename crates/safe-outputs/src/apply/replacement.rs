@@ -352,8 +352,8 @@ fn apply_recovered(
 ) -> Result<Applied> {
     let placeholders = super::recover::placeholders(mail);
     if placeholders.old == 0 {
-        // Preserve ordinary replacement compatibility (CRLF, large preimages,
-        // missing final newlines and credential-shape fixture warnings). Only
+        // Preserve ordinary replacement compatibility (large preimages and
+        // credential-shape fixture warnings). Only
         // old-side recovery needs the stricter reconstruction restrictions.
         count_application_mail(mail, preparation)?;
         preparation
@@ -1011,14 +1011,15 @@ mod tests {
 
     #[test]
     fn literal_old_placeholders_do_not_require_credential_revalidation() {
-        for case in ["context", "removed"] {
+        for case in ["context", "removed", "unterminated"] {
             let fixture = RecoveryFixture::with_source(false, |value| {
-                let url = if case == "context" || value == "old" {
+                let url = if case != "removed" || value == "old" {
                     "<inference-address>"
                 } else {
                     "configured"
                 };
-                format!("url={url}\n{value}\n")
+                let end = if case == "unterminated" { "" } else { "\n" };
+                format!("url={url}\n{value}{end}")
             });
             let ordinary = trial(&fixture.args, &fixture.consumer, &read).unwrap();
             // The legacy trial leaves its original mail in the caller's temp.
