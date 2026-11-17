@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn lookup() {
         let prices = Prices::builtin().unwrap();
-        assert_eq!(prices.date, "2026-10-29");
+        assert_eq!(prices.date, "2026-11-17");
         let gpt = prices.rates("gpt-5.5");
         for (model, want) in [
             ("gpt-5.5", gpt),
@@ -170,6 +170,10 @@ mod tests {
             })
         };
         for (model, want) in [
+            ("praxis/gpt-6.2-astra", rates(8.0, 0.40, 40.0)),
+            ("gpt-6-2-astra", rates(8.0, 0.40, 40.0)),
+            ("praxis/gpt-6.2-sol", rates(2.0, 0.10, 10.0)),
+            ("gpt-6-2-sol", rates(2.0, 0.10, 10.0)),
             ("praxis/gpt-6.1-sol", rates(2.0, 0.10, 10.0)),
             ("gpt-6-1-sol", rates(2.0, 0.10, 10.0)),
             ("praxis/gpt-6-astra", rates(10.0, 1.0, 50.0)),
