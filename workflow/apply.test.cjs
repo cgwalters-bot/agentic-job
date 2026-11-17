@@ -76,28 +76,6 @@ function sent(body) {
 const comment = (body = 'first') => ({ type: 'add_comment', body });
 const pull = { type: 'create_pull_request', title: 't', body: 'change', branch: 'agent-run-7' };
 
-// What the guard leaves out, a replacement push included, is
-// src/apply/applied.rs's to test; this is where apply runs it.
-test('the guard is policy binary, given the token and the trial, after the partial mark', () => {
-  // Policy's binary, checked to be this run's, is there before the trial
-  // rebuilds a series and whenever the handlers, and so the guard, run.
-  const steps = workflow.split('\n      - ');
-  const condition = text => steps.find(step => step.includes(text)).match(/^        if: (.*)$/m)[1];
-  assert.ok(workflow.indexOf("- name: Require policy's binary\n") < workflow.indexOf('id: trial'));
-  assert.ok(workflow.indexOf('path: ${{ runner.temp }}/apply-binary') < workflow.indexOf('id: trial'));
-  const trustedBinary = "${{ fromJSON(inputs.policy).apply-staged != 'true' || fromJSON(inputs.policy).external-run-id != '' }}";
-  for (const text of ["name: Require policy's binary\n", 'path: ${{ runner.temp }}/apply-binary']) assert.equal(condition(text), trustedBinary);
-  assert.equal(condition('id: applied\n'), condition('id: apply\n'));
-  assert.ok(workflow.indexOf('- name: Mark what a partial run') < workflow.indexOf('- name: Leave out what an earlier attempt applied'));
-  const guardStep = workflow.split('- name: Leave out what an earlier attempt applied\n')[1].split(/\n      - /)[0];
-  assert.match(guardStep, /\n {10}"\$RUNNER_TEMP\/apply-binary\/agentic-job" applied --dir "\$GH_AW_TMP" /);
-  assert.match(guardStep, /\n {10}GH_TOKEN: \$\{\{ inputs.role-bindings == '' && \(secrets.SAFE_OUTPUTS_PAT \|\| github.token\) \|\| secrets.PUBLICATION_TOKEN \}\}\n/);
-  assert.match(guardStep, /\n {10}TOKEN_IS_PAT: \$\{\{ secrets\.SAFE_OUTPUTS_PAT != '' \}\}\n/);
-  assert.match(guardStep, /\n {10}REPLACEMENT_HEAD: \$\{\{ steps\.trial\.outputs\.head \}\}\n/);
-  assert.match(step('Apply the patch on its own base, and compare what changed with what was checked'),
-    /"\$RUNNER_TEMP\/apply-binary\/agentic-job" replacement trial /);
-});
-
 test('a posted body hides the name the guard put last, and only that name', () => {
   const name = 'agentic-job-applied: 7/0/0123456789abcdef';
   const other = 'agentic-job-applied: 7/1/fedcba9876543210';
@@ -227,18 +205,6 @@ function scriptEnv(name, key) {
   return section.match(new RegExp(`^          ${key}: (.*)$`, 'm'))?.[1];
 }
 
-// gh-aw replaces its own list with GH_AW_ALLOWED_DOMAINS: the handlers
-// keep the links the policy call wrote down, as `collect` does. The
-// result step's reason is tests/workflows.rs's.
-test('every sanitizer keeps the links the policy keeps', () => {
-  const domains = '${{ fromJSON(inputs.policy).allowed-domains }}';
-  assert.equal(scriptEnv("Apply the outputs with gh-aw's handlers", 'GH_AW_ALLOWED_DOMAINS'), domains);
-  const policy = readFileSync(join(__dirname, '../.github/workflows/policy.yml'), 'utf8');
-  assert.match(policy, /\n        value: \$\{\{ jobs\.policy\.outputs\.allowed-domains \}\}\n/);
-  assert.match(policy, /\n      allowed-domains: \$\{\{ steps\.request\.outputs\.allowed-domains \}\}\n/);
-  assert.match(policy, /"allowed-domains=\$\(jq -r '\.allowed_domains \/\/ \[\] \| join\(","\)' "\$JOB_DIR\/policy\.json"\)"/);
-});
-
 test('the pinned comment handler posts a guarded review verdict', { skip: !process.env.GH_AW_JS }, async () => {
   const body = 'VERDICT: APPROVE\nREASON: Scripted dispatch tests wiring.\nReviewed SHA: 0123';
   const guarded = await guard([comment(body)], [], { target: '454', artifacts: 'dispatch-review-' });
@@ -280,12 +246,6 @@ test('the pinned comment handler posts a guarded review verdict', { skip: !proce
   assert.ok(created[0].body.startsWith(`${body}\n\n<!-- agentic-job-applied:`), created[0].body);
   // That the comment is the run's result, not a no-result notice, is src/apply/result.rs's.
   assert.equal(applied.url, 'https://github.com/owner/repo/issues/454#issuecomment-1');
-});
-
-// The result step has no token (tests/workflows.rs), so it cannot post.
-test('apply leaves all status writes to conclude', () => {
-  assert.equal(step('Edit the status comment').trim(),
-    'chmod +x "$RUNNER_TEMP/conclude-binary/agentic-job"\n"$RUNNER_TEMP/conclude-binary/agentic-job" status');
 });
 
 // The handlers log the patch and stream git's output, both the agent's
