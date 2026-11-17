@@ -65,5 +65,6 @@ that #2999 restores MCP. No new local proxy is planned here.
 An allowed tool can send everything in its arguments to the remote server.
 A write-capable tool bypasses safe outputs, and detection does not inspect MCP
 traffic. Future admission must retain trusted upstream selection, tool/method
-and response bounds, negative controls and credential nondisclosure. See
-[the acceptance inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
+and response bounds, negative controls and credential nondisclosure. The
+[hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
+tracks that acceptance.

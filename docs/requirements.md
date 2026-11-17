@@ -27,8 +27,10 @@ The operator chose runner-only execution on 4 November 2026
 ([#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989)).
 [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed
 the old second-user implementation; do not reintroduce it as an escape from
-runner-mode refusals. The migration and
-acceptance gaps are recorded in [the dated inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
+runner-mode refusals, which are
+[listed](interface.md#removed-keys-and-runner-mode-refusals). The
+[hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
+tracks the migration and acceptance gaps.
 
 - `runner`, the default: `run --runner-home`, and the agent is the
   runner's own user, as any deterministic step after secure-host is.

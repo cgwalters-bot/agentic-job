@@ -2,7 +2,7 @@
 // same requests and the same hand-backs, and must give the same verdict.
 //
 // The old check is cgwalters-devspace-sandbox's safe-outputs/safe-outputs.mjs
-// at the commit docs/plan.md names, run as it is (it vendors gh-aw's
+// at the commit ci.yml's corpus job pins, run as it is (it vendors gh-aw's
 // collector). The new one is `agentic-job policy`, then gh-aw's collector
 // from gh-aw's own repository with the validation rules of safe-outputs/
 // here, then `agentic-job check`. The hand-backs are made by the old

@@ -24,6 +24,7 @@ a change that fails `just check` isn't done.**
   Keep changes task-scoped and free of artifacts, binaries, symlinks, submodules,
   new executables, mode changes, credentials and generated litter.
   The run brief's protected paths and output limits admit no exceptions here.
+- No status ledgers in docs: status lives in issues.
 
 ## Hand-back
 

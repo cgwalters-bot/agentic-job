@@ -59,4 +59,4 @@ tests do not prove Kubernetes Pod Security or a live GitLab inference deployment
   not get the end-to-end jobs that write. Setup takes two to five minutes
   on a hosted runner ([#188](https://github.com/cgwalters-forge/agentic-job/issues/188)).
 
-See [remaining work](plan.md) for the longer implementation and acceptance ledger.
+See [remaining work](plan.md) for where the rest is tracked.

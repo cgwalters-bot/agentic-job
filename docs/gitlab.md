@@ -50,7 +50,7 @@ for the runner-only credential boundary. Container runners can explicitly
 delegate host isolation as described below; that does not supply a new
 inference identity contract. See the
 [current boundary](inference.md) and
-[hardening inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
+[runner-mode refusals](interface.md#removed-keys-and-runner-mode-refusals).
 
 The pipeline below deliberately has no agent, inference configuration,
 registration or sandbox setup. Do not turn its producer into an agent

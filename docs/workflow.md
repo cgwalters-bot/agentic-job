@@ -69,7 +69,7 @@ separate jobs on separate machines. The apply job's additional checks are
    [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989),
    was removed in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991)
    and is refused. See the
-   [migration inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
+   [runner-mode refusals](interface.md#removed-keys-and-runner-mode-refusals).
 3. **check**, on a machine the agent never touched. `agentic-job collect`
    validates and sanitizes the producer's requests, as gh-aw's collector
    would, then `agentic-job check` holds them and the patch to the policy.
@@ -835,7 +835,7 @@ No caller-specific repository, account or network is required by agentic-job.
   refused on a push. With a merge queue, PRs skip these callers and merge
   groups exercise refusal only: event admission, the review verdict and
   dispatch's review profile are not covered there. Restoring that coverage is
-  [follow-up work](plan.md#open-work). The slash-command, label and schedule examples are
+  follow-up to [#464](https://github.com/cgwalters-forge/agentic-job/issues/464). The slash-command, label and schedule examples are
   live here with the scripted agent.
 - With a merge queue configured, pull requests (including forks) skip CI's
   write-capable end-to-end jobs; the queue runs them before landing. Without
@@ -848,7 +848,7 @@ No caller-specific repository, account or network is required by agentic-job.
   ran the write-capable E2E jobs and passed `required-checks` and `ci`.
   It skipped `e2e-review`, ran dispatch's research profile only, and stopped
   `e2e-event` at policy refusal; it does not prove the remaining
-  [admission paths](plan.md#open-work).
+  admission paths ([#464](https://github.com/cgwalters-forge/agentic-job/issues/464)).
 - Not tried at all: a network join in a composed caller other than
   `review.yml`, and applying a `create_issue`:
   that type is checked through `collect` and `check` in CI (the
@@ -1254,7 +1254,7 @@ for this walkthrough. The deployment/credential owner remains
 [agent-board#282](https://github.com/cgwalters-forge/agent-board/issues/282).
 Separately authorized evidence is still required for the four real profiles,
 a fresh agent following only the README, bounded token authority and recurrence
-([acceptance bars](plan.md#acceptance-evidence-and-missing-proof)). Parsing,
+([acceptance bars](https://github.com/cgwalters-forge/tracker/issues/596)). Parsing,
 mocked handlers and passing local tests cannot establish those results.
 
 ### Agent configuration repositories and model names
@@ -1733,7 +1733,7 @@ an account cannot read it, and so cannot fork it. A
 fine-grained PAT of such an account, for "All repositories" with
 Contents, Pull requests and Administration write, would narrow it to
 the account's own repositories; which permissions GitHub asks of each
-step has not been tried here ([what is left](plan.md#open-work)). Policy refuses `create_pull_request` and
+step has not been tried here ([#426](https://github.com/cgwalters-forge/agentic-job/issues/426)). Policy refuses `create_pull_request` and
 `push_to_pull_request_branch` to a call without `apply-environment`, as
 it refuses `update_project`: the job token names
 nobody and has no account to fork into. Apply fails before it pushes
@@ -1793,7 +1793,7 @@ queue rule; `required-checks` permits only the corresponding gated skips and
 the required `ci` sentinel demands its success. Without a queue, a fork's
 non-documentation pull request fails that gate and needs same-repository
 branch testing instead. No PAT is forwarded to fork PRs. Queued execution is
-not proof of [event/review admission coverage](plan.md#open-work), nor a
+not proof of [event/review admission coverage](https://github.com/cgwalters-forge/agentic-job/issues/464), nor a
 substitute for [human approval before enqueueing](#ci-runner-use).
 The event callers and the review caller refuse a
 fork's pull request unless their bounds say `forks = true`

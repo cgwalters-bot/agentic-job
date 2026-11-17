@@ -8,8 +8,9 @@ probe is gone. `before-agent`
 is refused. The second-user paths were removed in
 [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991), along with
 the helper's `enter`/`reap` operations. No check record or token
-shape scan proves same-UID process isolation. See the
-[acceptance inventory](plan.md#runner-only-hardening-inventory-2026-11-05).
+shape scan proves same-UID process isolation. The
+[hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
+tracks that acceptance.
 
 `agentic-job sandbox check` runs as the runner's user after `sandbox
 setup`, and probes that user's hardening: since

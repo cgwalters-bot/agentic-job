@@ -16,8 +16,8 @@ Runner-only execution uses `run --runner-home DIR`. It does not isolate the
 supervisor from the same-UID agent. The operator superseded the second-user
 direction in [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989);
 [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed it.
-The migration's breaking-key errors
-are [listed in the plan](plan.md#breaking-keys-and-safe-refusals).
+The keys it removed and what runner mode refuses are
+[listed below](#removed-keys-and-runner-mode-refusals).
 
 | Command | Runs as | Does |
 | --- | --- | --- |
@@ -90,6 +90,26 @@ The `secure-host` binary, from the same workspace and release, is the
 host's side alone: `supported`, `apt`, `world-write`, `setup`, `check`,
 `config` and the image's entrypoint `image`, with no command that runs
 an agent ([secure-host.md](secure-host.md#the-secure-host-binary)).
+
+## Removed keys and runner-mode refusals
+
+The parser refuses `host.create-user`, `user`, `groups`,
+`allow-existing-user`, `filesystem-view`, `host.check.before-agent` and
+`setup.tools`, including through the `[sandbox]` alias, by name and with a
+diagnostic citing #2989, even when set to false: callers delete them. It
+also refuses `agent-user: sandbox` and requires `--runner-home`. The
+probe-only `sandbox.check.control-url`, `fetch-repo`, `allow-sockets` and
+`allow-tcp-ports` are still accepted and ignored for the old image; refusing
+them waits for its migration. These keys are under `[host]`, and `[sandbox]`
+is its warned alias.
+
+Runner admission refuses `register = "api-key"` and `[mcp.NAME]` before
+setup, without needing a secret; the [MCP example](mcp.md#configuration) is
+tested as a refusal, not an enablement. `run --runner-home` refuses OIDC
+request credentials, `inference.front`, a private target, `before-agent`,
+`setup.tools` and a child agent. Do not remove `--runner-home` to evade a
+refusal. A private bounds opt-in or a successful `config` parse does not
+grant launch support.
 
 ## Files read
 

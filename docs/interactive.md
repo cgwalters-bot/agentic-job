@@ -110,7 +110,16 @@ chats this is why ACP. We just mix in Tailscale or equiv. Should be a
 clean mode flag to wait for a connection. Or start from a prompt but
 accept dynamic connections."
 
-The [plan](plan.md#interactive-sessions) defers this work. The proposed
+A session run already waits for one operator's prompts after its task's
+turn, over the tailnet ([session runs](../specs/session.md)), with the
+runner's user as the agent, which can take the bridge's one client slot
+itself. Writes during a session wait for a premise the agent cannot forge,
+and until then for the end-of-run check and apply. A client attaches late
+or comes back with the cursor it last saw
+([attaching](#attaching-to-a-session)). No end-to-end session has run over
+a real tailnet;
+[#536](https://github.com/cgwalters-forge/agentic-job/issues/536) tracks
+the rest of this work. The proposed
 first bridge is a Unix socket on the
 runner, reached by an `attach` command over Tailscale SSH that copies
 its standard input and output to the socket: ACP stays a byte stream,

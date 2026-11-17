@@ -522,8 +522,7 @@ These are **designed here but not implemented**: the runner profile map
 and its resolution, dispatch record creation/dispatch and the wrapper's
 external mode. No external caller has been enabled or credentialed, and no
 live cross-run apply has been demonstrated.
-The [implementation slices](plan.md#external-runner-implementation-slices)
-list them in order.
+The [implementation slices](#implementation-slices) list them in order.
 
 These are **unverified deployment prerequisites**, and each is the
 operator's decision:
@@ -534,6 +533,89 @@ operator's decision:
   who holds it;
 - broker admission for the external repository and workflow identity;
 - whether ostree or any other fork joins the midstream bounds.
+
+### Implementation slices
+
+This contract's follow-ups, in dependency order, each one implement-sized
+pull request under
+[tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
+Slices 3, 4 and 5 are built and off by default; none has run on an
+external runner, and no caller enables them. No slice enables a profile,
+changes credentials, broker admission or bounds, or adds ostree or any
+other target. Repositories without an owner are under `cgwalters-forge`.
+
+1. **tracker — Closed runner profile map, all disabled.**
+   `.github/agentic-job/runner-profiles.json` with the format and
+   resolution order of [runner profiles](#runner-profiles), and a `runner`
+   input to `dispatch.yml` defaulting to `hosted`. That input picks where
+   the job runs; the existing `config` choice keeps picking a hosted run's
+   configuration and must be `hosted` with an external profile. The map is
+   a protected path in the caller's bounds and may hold the disabled
+   `devspace-rhel10-64` example. Acceptance: a hosted dispatch is unchanged
+   and does not read the map; an unknown or disabled name, a malformed map,
+   and an external request that is not `implement`, targets a non-midstream
+   repository, or sets `pool`, `effort` or another `config` are each
+   refused before any workflow starts, with a test for each.
+2. **agent-board — Carry the profile name in job plans.** In
+   `docs/job-plans.md` and plan, manual and scheduled dispatch, `runner`
+   accepts `hosted` or a name of `pool`'s character set and is forwarded
+   as the caller's `runner` input without resolving it. `hosted` stays the
+   default planners write. Acceptance: hosted plans dispatch exactly as
+   today; an ill-formed name is refused; an accepted name survives dispatch,
+   dedupe and in-flight tracking, and the caller's refusal of an unknown or
+   disabled name is reported, not retried as hosted. Depends on 1.
+3. **agentic-job — KVM and session-libvirt preflight.** Built as
+   `[preflight]` and `sandbox preflight` ([capability
+   preflight](#capability-preflight)), with its refusals tested against
+   stand-ins; the positive path on a KVM host is unverified. It runs in the
+   agent job, before the setup script and any model request, but after the
+   `github-oidc` register job, which runs on another machine: a refusal
+   leaves that run token unused, not unissued.
+4. **agentic-job — `test-evidence.json`.** Built and off by default
+   ([test evidence](safe-outputs.md#repeated-test-evidence)). Check binds
+   the base and head; apply's trial binds the tree, because check has no
+   repository. Tracker's bounds still need `[github.test_evidence]` before
+   slice 7 can use it.
+5. **agentic-job — Correlate, fetch and re-check an external run.** Built
+   and off by default, tested against offline fixtures only ([binary
+   interface](#binary-correlation-interface)); slice 7 still has to pass
+   the receipt.
+6. **actions — External mode of the wrapper.** In
+   `.github/workflows/cgwalters-agentic-job.yml`, a mode that runs policy,
+   agent and check only: no apply job, no `SAFE_OUTPUTS_PAT`, the kind,
+   target, base commit and `dispatch-id` as inputs, and the id as the run
+   name's bracketed suffix. It runs the profile's preflight (3), fixed
+   limits and cleanup. Acceptance: workflow lint and a mocked run show no
+   write credential or apply job in the mode, refusal before inference
+   when a capability is missing, and cleanup on cancellation. Depends on 3.
+7. **tracker — Dispatch record, waiting job and trusted apply.** Write the
+   record, start the external workflow from the one step that holds the
+   dispatch credential, and call 5 from a waiting job with read access only.
+   Then upload the hand-back again and compose agentic-job's `policy.yml`,
+   `check.yml` and `apply.yml` directly, not through the wrapper, passing
+   that upload's ID and digest, with the midstream bounds and the
+   `agent-apply` environment. Acceptance: a staged apply against a fixture
+   run; a hosted dispatch unchanged; the dispatch credential absent from
+   every other job. Depends on 1, 4, 5 and 6. The credential itself is the
+   operator's to provision.
+8. **bootc-dev/cgwalters-devspace-sandbox** stays
+   [#589](https://github.com/cgwalters-forge/agentic-job/issues/589)'s:
+   the caller's move to the external mode (6) at a new commit, calling the
+   wrapper by commit rather than `@main`, broker admission for its workflow
+   and the RHEL KVM smoke run. Its `dispatch.toml` names only bootc-dev
+   repositories, so its policy stage refuses a `cgwalters-forge` midstream
+   target until those forks are added there. These slices do not edit the
+   sandbox.
+9. **Operator enablement and runtime acceptance.** After the
+   [prerequisites](#status) are settled, a reviewed tracker change enables
+   the entry with approved limits and new pins. Runtime acceptance is the
+   contract's [list](#repeated-test-evidence-and-acceptance); documentation
+   checks do not stand in for it.
+10. **Later: `fix` on an external profile.** Pin the pull request's head
+    from dispatch to apply for a pushed fix, as review pins its head today,
+    and add `fix` to the devspace workflow (#589). Acceptance: a moved head
+    is refused as stale, not rebased onto. Until then rule 5 of
+    [runner profiles](#runner-profiles) refuses it.
 
 ### Runner profiles
 
@@ -933,7 +1015,7 @@ credential. Inference endpoints come from deployment environment
 configuration, not task text. Broker admission for the exact external
 repository/workflow identity is a separate prerequisite; existing RHEL runs
 do not prove admission for a new identity or runner-only credential safety
-(see [current refusals](plan.md#breaking-keys-and-safe-refusals)).
+(see [current refusals](interface.md#removed-keys-and-runner-mode-refusals)).
 Registration and lifecycle authority stay off the agent/test host, and
 evidence and transport metadata are bounded data, never executable code.
 

@@ -452,7 +452,7 @@ jobs:
   # crates/agentic-job/tests/corpus: `collect` and `check` against gh-aw's
   # pinned handlers, with a mocked forge, and the old tree's check and the
   # new one on the same requests and hand-backs. The old tree is fetched
-  # at the commit docs/plan.md names, and gh-aw's scripts at the commit
+  # at the commit pinned below, and gh-aw's scripts at the commit
   # the old tree vendored them from; neither is copied here.
   corpus:
     needs: changes
