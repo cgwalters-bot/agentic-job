@@ -1,9 +1,8 @@
 //! Experimental, read-only validation of an ordered stack proposal.
 //!
 //! [`crate::apply::stack`] builds each commit on its predecessor and compares
-//! its actual changed paths; a later publisher must bind the checked bytes to
-//! trusted artifacts and apply the ordinary publication gates. This is not a
-//! publishable receipt and is not accepted by the CLI or workflows. Secret
+//! its actual changed paths. [`artifact`] binds the checker result for trusted
+//! local replay, not publication. Neither is used by the CLI or workflows. Secret
 //! scanning belongs to the caller, as for the ordinary library checker;
 //! `inspect` must check each step's entire content before it can enter the
 //! accepted prefix.
@@ -15,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::replacement::read_mail;
-use crate::contract::{COMMIT_RE, PatchRules, Policy};
+use crate::Forge;
+use crate::contract::{COMMIT_RE, Kind, PatchRules, Policy, handler_patch_size_kib};
+
+pub mod artifact;
 
 /// Hard ceilings, independent of the trusted caller's opt-in count.
 pub const MAX_STEPS: u32 = 10;
@@ -76,12 +78,25 @@ pub fn check_policy(
     base_commit: &str,
     inspect: impl FnMut(&Step) -> Result<()>,
 ) -> Result<CheckedStack> {
+    check_policy_up_to(content, policy, base_commit, MAX_STEPS, inspect)
+}
+
+fn check_policy_up_to(
+    content: &[u8],
+    policy: &Policy,
+    base_commit: &str,
+    max_steps: u32,
+    inspect: impl FnMut(&Step) -> Result<()>,
+) -> Result<CheckedStack> {
     policy.validate()?;
     ensure!(
-        policy.secondary_pull_request.is_none()
+        policy.forge == Forge::Github
+            && policy.kind == Kind::Branch
+            && policy.continuation.is_none()
+            && policy.secondary_pull_request.is_none()
             && policy.external.is_none()
             && policy.advisory.is_none(),
-        "stack requires an ordinary new-pull-request policy"
+        "stack requires an ordinary new GitHub pull-request policy"
     );
     let pr = policy
         .safe_outputs
@@ -94,9 +109,15 @@ pub fn check_policy(
     };
     check(
         content,
-        policy.safe_outputs.stack_max_steps.min(policy.max_outputs),
+        policy
+            .safe_outputs
+            .stack_max_steps
+            .min(policy.max_outputs)
+            .min(max_steps),
         base_commit,
-        policy.max_patch_bytes,
+        policy
+            .max_patch_bytes
+            .min(handler_patch_size_kib(pr.max_patch_size).saturating_mul(1024)),
         &rules,
         inspect,
     )
@@ -218,7 +239,7 @@ mod tests {
         })
     }
 
-    fn proposal() -> Value {
+    pub(super) fn proposal() -> Value {
         json!({"base_commit": BASE, "steps": [
             step(1, "one.rs"), step(2, "two.rs"), step(3, "three.rs")
         ]})
@@ -263,6 +284,39 @@ mod tests {
             let refusal = checked.refused.unwrap();
             assert_eq!(refusal.position, 1);
             assert!(refusal.reason.contains(reason), "{}", refusal.reason);
+        }
+    }
+
+    #[test]
+    fn handler_patch_size_refuses_only_the_oversized_step_and_above() {
+        let mut input = proposal();
+        let patch = input["steps"][1]["patch"].as_str().unwrap();
+        input["steps"][1]["patch"] = json!(patch.replace("Why it changes.", &"x".repeat(1024)));
+        let mut policy = policy();
+        policy.max_outputs = 3;
+        policy.safe_outputs.stack_max_steps = 3;
+        for (kib, accepted) in [(1, &[1][..]), (0, &[1, 2, 3][..])] {
+            policy
+                .safe_outputs
+                .create_pull_request
+                .as_mut()
+                .unwrap()
+                .max_patch_size = kib;
+            let mut inspected = Vec::new();
+            let checked = check_policy(input.to_string().as_bytes(), &policy, BASE, |step| {
+                inspected.push(step.issue);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(inspected, accepted);
+            assert_eq!(checked.accepted.len(), accepted.len());
+            if kib == 1 {
+                let refusal = checked.refused.unwrap();
+                assert_eq!(refusal.position, 2);
+                assert!(refusal.reason.contains("patch byte limit"));
+            } else {
+                assert!(checked.refused.is_none());
+            }
         }
     }
 

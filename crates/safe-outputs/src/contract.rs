@@ -1161,6 +1161,11 @@ pub struct PullRequest {
     pub max_patch_files: u32,
 }
 
+/// Patch handlers treat an omitted or zero size as their default, in KiB.
+pub(crate) fn handler_patch_size_kib(configured: u64) -> u64 {
+    if configured == 0 { 4096 } else { configured }
+}
+
 /// `push_to_pull_request_branch`'s configuration, in gh-aw's names but
 /// for `head`, which its handler does not read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

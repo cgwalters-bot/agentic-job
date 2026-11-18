@@ -61,7 +61,7 @@ use crate::collect::markdown::outside_code;
 use crate::collect::sanitize::{
     JS_SPACE, Mentions, is_js_space, js_trim, sanitize_with, utf16_len, utf16_prefix,
 };
-use crate::contract::Policy;
+use crate::contract::{Policy, handler_patch_size_kib};
 use crate::{CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, PUSH_TO_PULL_REQUEST_BRANCH};
 
 /// What this publishes of one type, as gh-aw's handler does.
@@ -1700,7 +1700,7 @@ fn positive(config: &Map<String, Value>, key: &str, default: u64) -> u64 {
 /// Why the handlers that carry a patch fail BYTES for its size under
 /// CONFIG, if they do.
 fn patch_size_failure(config: &Map<String, Value>, bytes: &[u8]) -> Option<String> {
-    let max_kb = positive(config, "max_patch_size", 4096);
+    let max_kb = handler_patch_size_kib(positive(config, "max_patch_size", 0));
     let kb = (bytes.len() as u64).div_ceil(1024);
     (kb > max_kb)
         .then(|| format!("Patch size ({kb} KB) exceeds maximum allowed size ({max_kb} KB)"))
@@ -1870,7 +1870,7 @@ fn branch_push(
         head: head.to_owned(),
         patch: bytes,
         files: patch.files.clone(),
-        max_kb: positive(config, "max_patch_size", 4096),
+        max_kb: handler_patch_size_kib(positive(config, "max_patch_size", 0)),
         allow_workflows: config.get("allow_workflows") == Some(&Value::Bool(true)),
         early,
     })

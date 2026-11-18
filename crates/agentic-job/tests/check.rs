@@ -570,6 +570,81 @@ impl Run {
 }
 
 #[test]
+fn collected_pull_requests_require_one_patch_bound_to_their_branch_and_base() {
+    for (case, refusal) in [
+        ("valid", None),
+        ("missing patch", Some("needs exactly one patch")),
+        ("extra patch", Some("needs exactly one patch")),
+        ("renamed patch", Some("needs exactly one patch")),
+        ("other branch", Some("needs exactly one patch")),
+        ("no request", Some("patch without a create_pull_request")),
+        ("missing base", Some("base.json is not")),
+        ("other repository", Some("base.json is not")),
+        ("other ref", Some("base.json is not")),
+        ("other commit", Some("X-GH-AW-Base-Commit")),
+    ] {
+        let run = Run::new();
+        let patch = run.path("out/aw-agent-run-7.patch");
+        let base = run.path("out/base.json");
+        let outputs = run.path("out/outputs.jsonl");
+        let change = |path: &Path, key: &str, value: &str| {
+            let mut json: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            json[key] = value.into();
+            std::fs::write(path, json.to_string()).unwrap();
+        };
+        match case {
+            "valid" => {}
+            "missing patch" => std::fs::remove_file(&patch).unwrap(),
+            "extra patch" => {
+                std::fs::copy(&patch, run.path("out/aw-other.patch")).unwrap();
+            }
+            "renamed patch" => std::fs::rename(&patch, run.path("out/aw-other.patch")).unwrap(),
+            "other branch" => change(&outputs, "branch", "other"),
+            "no request" => std::fs::write(&outputs, "").unwrap(),
+            "missing base" => std::fs::remove_file(&base).unwrap(),
+            "other repository" => change(&base, "repo", "example/other"),
+            "other ref" => change(&base, "ref", "other"),
+            "other commit" => change(&base, "commit", &"0".repeat(40)),
+            _ => unreachable!(),
+        }
+        // Collection must succeed: these are association refusals in check,
+        // not malformed request refusals from the collector.
+        let collected = run.path("collected.json");
+        let ingest = Command::new(BIN)
+            .args(["collect", "--policy"])
+            .arg(run.path("policy.json"))
+            .arg("--outputs")
+            .arg(run.path("out"))
+            .arg("--collected")
+            .arg(&collected)
+            .output()
+            .unwrap();
+        assert_eq!(ingest.status.code(), Some(0), "{case}: {ingest:?}");
+        let output = run.check(&collected);
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(refusal.is_some())),
+            "{case}: {output:?}"
+        );
+        let verdict = run.verdict();
+        assert_eq!(verdict["ok"], refusal.is_none(), "{case}: {verdict}");
+        let errors = verdict["errors"].as_array().unwrap();
+        if let Some(refusal) = refusal {
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.as_str().unwrap().contains(refusal)),
+                "{case}: {verdict}"
+            );
+        } else {
+            assert!(errors.is_empty(), "{verdict}");
+            assert_eq!(verdict["items"].as_array().unwrap().len(), 1);
+            assert_eq!(verdict["patch"]["file"], "aw-agent-run-7.patch");
+        }
+    }
+}
+
+#[test]
 fn a_hand_back_within_the_policy_is_accepted() {
     let run = Run::new();
     let output = run.check(&data("check/collected.json"));

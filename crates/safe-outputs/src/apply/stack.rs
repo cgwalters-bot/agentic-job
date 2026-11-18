@@ -22,7 +22,7 @@ use anyhow::{Context, Result, ensure};
 
 use super::COMMIT_RE;
 use super::replacement::{Applied, Built, apply_mail, git};
-use crate::check::stack::{CheckedStep, MAX_STEPS, Refusal};
+use crate::check::stack::{CheckedStep, MAX_STEPS, Refusal, Step, artifact};
 
 const WORKTREE: &str = "stack-trial";
 
@@ -40,6 +40,30 @@ pub struct Stacked {
 pub fn build(repo: &Path, base: &str, steps: &[CheckedStep], temp: &Path) -> Result<Stacked> {
     let steps: Vec<_> = steps.iter().collect();
     replay(repo, base, &steps, temp)
+}
+
+/// Independently recheck a trusted receipt before allocating a worktree.
+/// This builds local commits only; it grants no permission to publish.
+/// Use a trusted checkout (including its Git configuration) and a fresh,
+/// private scratch directory. The receipt does not authenticate either path.
+pub fn build_verified(
+    repo: &Path,
+    content: &[u8],
+    receipt: &[u8],
+    admission: &artifact::Admission<'_>,
+    inspect: impl FnMut(&Step) -> Result<()>,
+    temp: &Path,
+) -> Result<Stacked> {
+    let checked = artifact::revalidate(content, receipt, admission, inspect)?;
+    if checked.accepted.is_empty() {
+        return Ok(Stacked {
+            steps: Vec::new(),
+            refused: checked.refused,
+        });
+    }
+    let mut built = build(repo, admission.base_commit, &checked.accepted, temp)?;
+    built.refused = built.refused.or(checked.refused);
+    Ok(built)
 }
 
 /// Rebuilds the stack of the accepted STEPS on BASE after a fix round
@@ -115,7 +139,6 @@ fn apply_steps(dir: &Path, file: &Path, steps: &[&CheckedStep]) -> Result<Stacke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check::stack::Step;
     use std::process::Command;
 
     fn run(dir: &Path, args: &[&str]) -> String {
@@ -217,6 +240,59 @@ mod tests {
 
     fn show(repo: &Path, revision: &str) -> String {
         run(repo, &["show", "-s", "--format=%P %s", revision])
+    }
+
+    #[test]
+    fn receipt_revalidation_keeps_only_the_checked_prefix() {
+        let fixture = fixture();
+        let repo = fixture.repo();
+        let temp = fixture.temp.path();
+        let mut policy = crate::check::fixtures::policy();
+        policy.max_outputs = 3;
+        policy.safe_outputs.stack_max_steps = 3;
+        let admission = artifact::Admission {
+            policy: &policy,
+            base_commit: &fixture.base,
+            issues: &[1, 2, 3],
+        };
+        let content = serde_json::json!({
+            "base_commit": fixture.base,
+            "steps": fixture.steps.iter().map(|step| &step.step).collect::<Vec<_>>(),
+        })
+        .to_string();
+        let refuse = |step: &Step| {
+            ensure!(step.issue != 2, "inspection refused step 2");
+            Ok(())
+        };
+        let (_, receipt) = artifact::check(content.as_bytes(), &admission, refuse).unwrap();
+        let error = build_verified(
+            &temp.join("not-a-repository"),
+            content.as_bytes(),
+            &receipt,
+            &admission,
+            |_| Ok(()),
+            temp,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "stack proposal, admission or checked prefix changed"
+        );
+        let prefix = build_verified(
+            &repo,
+            content.as_bytes(),
+            &receipt,
+            &admission,
+            refuse,
+            temp,
+        )
+        .unwrap();
+        assert_eq!(prefix.steps.len(), 1);
+        assert_eq!(
+            show(&repo, &prefix.steps[0].head),
+            format!("{} Step 1", fixture.base)
+        );
+        assert_eq!(prefix.refused.unwrap().position, 2);
     }
 
     #[test]

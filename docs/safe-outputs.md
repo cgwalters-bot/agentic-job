@@ -433,9 +433,11 @@ at most ten, only alongside `create_pull_request`). Policy compilation carries
 it as `safe_outputs.stack_max_steps`, taking the lower of both bounds files;
 omission in either disables policy-based stack checking. `check_policy` uses
 that ceiling and `policy.max_outputs` together, plus the policy's patch byte,
-path, file-count and pinned-author rules. It refuses secondary, external or
-advisory publication contexts. This field is stripped from gh-aw's handler
-configuration and never increases its ordinary one-PR limit. No workflow
+path, file-count and pinned-author rules. Each patch also fits the handler's
+`max_patch_size`. Policy-based checking accepts only ordinary GitHub branch
+policies, not continuation, secondary, external or advisory contexts. The
+stack ceiling is stripped from gh-aw's handler configuration and never
+increases its ordinary one-PR limit. No workflow
 consumes a stacked proposal yet.
 
 The concrete threats are unbounded publication fan-out and a forbidden edit
@@ -458,8 +460,20 @@ so that rebuilding a step gives the same commit. The checker supplies the root
 provenance header to the existing patch reader; it does not itself apply the
 mails. Invalid envelopes refuse the whole
 proposal. A step refusal returns the accepted prefix and the first refused
-position (one-based), never inspecting steps above it. No accepted prefix is
-itself a publishable receipt.
+position (one-based), never inspecting steps above it.
+
+To prevent substituting content between check and local replay,
+`safe_outputs::check::stack::artifact` binds the trusted policy, exact root,
+ordered issue plan, exact proposal bytes, checked paths and refusal position
+into a bounded receipt. The library caller supplies admission independently
+and must transfer the receipt through a trusted channel: the digest is not a
+signature and authorizes no publication. The plan cannot widen `stack-steps`
+or the total output ceiling; a step outside the admitted order stops the stack.
+`build_verified` reruns the same checks, including content inspection, and
+compares the receipt before allocating a Git worktree. A different accepted
+prefix needs a new receipt. Refusal diagnostics do not travel in the receipt.
+The caller must supply a trusted checkout and fresh, private scratch directory;
+the receipt does not authenticate their contents or Git configuration.
 
 The experimental `safe_outputs::apply::stack` module builds the accepted steps
 in the caller's repository, one commit per step on its predecessor, with
@@ -473,8 +487,8 @@ branch check did not read. A step that does not apply,
 or changes other paths, stops the stack at its position with a fixed reason, so
 a conflict never drops a step silently. Neither function pushes or publishes.
 
-Remaining slices must wire the producer, per-step secret scan and both library
-modules into digest-bound check/apply artifacts, then push each step's branch
+Remaining work must wire the producer, per-step secret scan and these library
+receipts into trusted check/apply artifact transport, then push each step's branch
 with a lease and open its PR against its
 predecessor, appending that step's closing line. Publication must stop on
 refusal without removing earlier PRs. The publisher must keep the stack rebased
