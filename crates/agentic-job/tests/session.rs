@@ -2008,6 +2008,24 @@ fn hand_back_near_a_limit() {
             handed_back: true,
         },
         Case {
+            name: "the timeout cancels a handback turn that already wrote output",
+            script: r#"[{"sleep": 60}]"#.to_owned(),
+            later: r#"[
+                {"write": {"title": "Checkpoint", "path": "{cwd}/checkpoint.json", "content": "{\"complete\":false}\n"}},
+                {"sleep": 60}, {"say": "Not reached."}
+            ]"#,
+            timeout_s: 20,
+            count_requests: false,
+            max_tasks: None,
+            max_repeats: None,
+            output: Some("work/checkpoint.json"),
+            status: 124,
+            result: "timeout",
+            message: "hit the timeout; cancelled",
+            notices: &["60%", "80%", "hand back"],
+            handed_back: false,
+        },
+        Case {
             name: "the timeout's cancel answered with end_turn and no output",
             script: ends_turn(""),
             later: HAND_BACK,
@@ -2071,6 +2089,13 @@ fn hand_back_near_a_limit() {
         );
         // What the agent wrote while handing back is there to collect.
         assert_eq!(r.path("work/partial.txt").exists(), c.handed_back, "{name}");
+        if c.output == Some("work/checkpoint.json") {
+            assert_eq!(
+                std::fs::read_to_string(r.path("work/checkpoint.json")).unwrap(),
+                "{\"complete\":false}\n"
+            );
+            assert!(r.log.contains("didn't hand back in time"), "{}", r.log);
+        }
         assert_eq!(
             r.log.contains("» Handed back."),
             c.handed_back,

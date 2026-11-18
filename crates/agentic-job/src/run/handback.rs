@@ -3937,6 +3937,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn timeout_collection_does_not_depend_on_finishing_the_handback_turn() {
+        for (handed_back, message) in [
+            (false, "hit the timeout; cancelled"),
+            (true, "hit the timeout; the agent handed back"),
+        ] {
+            // Inject the result of the session fixture here, so collector
+            // cases exercise the same stop without waiting on the clock.
+            let result = RunResult {
+                handed_back,
+                ..harness(Outcome::Timeout, Some(message))
+            };
+            assert_eq!(result.result.exit().code(), 124);
+            assert!(result.stopped_by_provider().is_none());
+            for artifact in ["replacement", "patch", "missing", "invalid"] {
+                let (home, mut policy, mail) = replacement_home();
+                policy
+                    .safe_outputs
+                    .push_to_pull_request_branch
+                    .as_mut()
+                    .unwrap()
+                    .ready_when_complete = true;
+                let series = json!({"base_commit": home.checkout.base_commit, "commits": [mail]});
+                match artifact {
+                    "replacement" => {
+                        std::fs::write(home.path(REPLACEMENT_PATH), series.to_string()).unwrap();
+                    }
+                    "patch" => {}
+                    "missing" => {
+                        sh(&home.checkout.dir, "git reset -q --hard HEAD^");
+                        std::fs::remove_file(home.path(AGENT_OUTPUTS)).unwrap();
+                    }
+                    "invalid" => {
+                        std::fs::write(home.path(REPLACEMENT_PATH), "{}").unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let checkpoint = json!({"complete": false, "done": "Edited the parser",
+                    "left": "Verify the final diff", "next": "Run the required checks"});
+                std::fs::write(
+                    home.path(AGENT_OUTCOME),
+                    json!({"stopped_early": null, "checkpoint": checkpoint}).to_string(),
+                )
+                .unwrap();
+
+                let change =
+                    home.collect_with_harness(&policy, &config::Commit::default(), Some(&result));
+                let context = format!("{artifact}, completed turn: {handed_back}");
+                assert_eq!(
+                    home.outcome()["stopped_early"],
+                    format!("the run was stopped at a limit: {message}"),
+                    "{context}"
+                );
+                assert_eq!(home.outcome()["checkpoint"], checkpoint, "{context}");
+                let files = match artifact {
+                    "replacement" => vec!["outputs.jsonl", "replacement.json"],
+                    "patch" => vec!["aw-agent-run-12.patch", "base.json", "outputs.jsonl"],
+                    _ => vec![],
+                };
+                assert_eq!(home.handed_back(), files, "{context}");
+                assert_eq!(change.handed_back_patch(), !files.is_empty(), "{context}");
+                if artifact == "invalid" {
+                    assert!(
+                        change
+                            .dropped
+                            .as_deref()
+                            .unwrap()
+                            .starts_with("replacement.json:"),
+                        "{context}"
+                    );
+                }
+                if files.is_empty() {
+                    continue;
+                }
+                if artifact == "replacement" {
+                    let captured: Value = serde_json::from_slice(
+                        &std::fs::read(home.path("safe-outputs/replacement.json")).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(captured, series, "{context}");
+                }
+                let verdict = home.verdict(&policy);
+                assert!(verdict.ok, "{context}: {:?}", verdict.errors);
+                let checked = verdict.checkpoint.unwrap();
+                assert_eq!(checked.reason, "incomplete", "{context}");
+                assert_eq!(checked.next, "Run the required checks", "{context}");
+            }
+        }
+    }
+
     /// What `$(git format-patch ...)` leaves: the mail without its final
     /// newline, which `git am` calls corrupt at apply.
     #[test]

@@ -1981,9 +1981,18 @@ A run that reaches its timeout or a request, task or spending limit is
 interrupted to hand back what it has, and `run` ends with exit state 124
 or 3. So does, with 3, one whose agent handed back after a turn that
 ended on an error, such as a model request the provider kept refusing
-([harness.md](harness.md#limits)). By default the agent job then fails and nothing is applied. With
-`apply-partial: true`, a stopped run that handed back is checked like
-any other and applied as a draft whose title starts with `[partial:
+([harness.md](harness.md#limits)). By default the agent job then fails and nothing is applied.
+
+Collection does not depend on the final hand-back turn completing. The
+collector can still take a valid patch or replacement series after that
+turn is cancelled, and records `stopped_early` if the report did not.
+The Run step's `HANDED_BACK=true` means a safe-outputs artifact was
+uploaded, not that the session completed its hand-back turn or that check
+accepted the outputs. The step's `PARTIAL` combines upload with the caller's
+`apply-partial` setting; `false` does not mean there was no recoverable work.
+
+With `apply-partial: true`, a stopped run that handed back is checked like
+any other. An eligible pull request opens as a draft whose title starts with `[partial:
 stopped at the timeout]` or `[partial: stopped at a limit]` and whose
 first line says the same; a comment it posts starts with that line
 too (gh-aw puts a note of its own before it when a pull request was
@@ -1995,8 +2004,19 @@ which of the request, task and spending limits or the error it was, so
 the marking does not either. `summary.json` does, and so does the commit's message
 where the agent gave no reason of its own for stopping; the
 `failure-class` output ([below](#why-a-run-failed)) says the kind. A stopped run that handed
-back neither a pull request nor a comment has nothing to carry them,
-and the apply job fails rather than apply it unmarked.
+back nothing that can carry that marking is not applied. Apply also refuses
+partial `push_to_pull_request_branch` requests, including replacement series,
+even with the opt-in. A fix run can therefore have exit 124, an accepted
+checkpoint and checked outputs, and still correctly publish nothing.
+
+For an authorized continuation, read `outcome.json` in the `agent-run`
+artifact for the checkpoint and what remains. Inspect the checked patch or
+[replacement series](safe-outputs.md#pushing-to-a-pull-requests-branch)
+against its recorded base and the current pull request head. Use it as input
+to a new scoped fix on the current head, keeping the work incomplete until
+the required checks and independent review finish. Do not rerun apply to
+bypass the timeout or push the retained series directly: the next handback
+still has to pass the normal head, check, review and publication gates.
 
 ### Why a run failed
 
