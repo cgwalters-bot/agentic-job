@@ -405,8 +405,16 @@ on:
         description: >-
           The exit state of `agentic-job run`: 0, 1 (failed), 3 (a limit, or a hand-back after an
           error), 4 (never started: `run`'s own, or the host check's before it, whose only failure
-          was a host outside the runner it could not reach), 124 (the timeout)
+          was a host outside the runner it could not reach), 5 (security-sensitive stop: no
+          public handback or automatic retry), 124 (the timeout)
         value: ${{ jobs.agent.outputs.exit }}
+      outcome:
+        description: >-
+          `publish` when the agent's run may be published, its failure included; `stop` for a
+          security-sensitive stop; empty when that is unknown, as for a run its timeout killed.
+          This workflow publishes nothing of an agent's run, a status included, unless it is
+          `publish`; a caller's own steps should do the same
+        value: ${{ jobs.agent.outputs.outcome }}
       failure-class:
         description: >-
           What a run that did not end well ended on, as one of the run action's fixed failure
@@ -600,7 +608,7 @@ jobs:
   check:
     needs: [policy, agent]
     # Also for a run that failed and still handed something back.
-    if: ${{ !cancelled() && needs.policy.result == 'success' && (inputs.proposals-artifact != '' || needs.agent.outputs.safe-outputs-artifact-id != '') }}
+    if: ${{ !cancelled() && needs.policy.result == 'success' && (inputs.proposals-artifact != '' || (needs.agent.outputs.outcome == 'publish' && needs.agent.outputs.safe-outputs-artifact-id != '')) }}
     permissions:
       contents: read
       # For check to read the proposals upload's digest.

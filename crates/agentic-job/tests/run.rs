@@ -2082,7 +2082,7 @@ fn taskless_sessions<'a>(cases: impl IntoIterator<Item = (Option<&'a str>, Optio
         assert_eq!(prompts.len(), 1, "{prompts:?}");
         let prompt = prompts[0].to_string();
         assert!(prompt.contains("Hello, agent."), "{prompt}");
-        assert!(prompt.contains("How this run hands back"), "{prompt}");
+        assert!(prompt.contains("security-sensitive-stop-v1"), "{prompt}");
         assert_eq!(proxy.run_states(), ["finished"]);
     }
 }
@@ -3555,6 +3555,93 @@ fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
     }
 }
 
+#[test]
+fn security_stop_withholds_capture_after_success_or_failed_cleanup_and_on_retry() {
+    const SUPPRESSED: &str = "synthetic-withheld-evidence";
+    // The command keeps `run`'s environment and only moves HOME.
+    let moved = format!("HOME=\"$HOME/other\" \"{BIN}\" handback stop");
+    // A tool that scrubs the environment: the command must refuse rather
+    // than confirm a stop under that HOME, and the brief's direct write of
+    // the marker stops the run instead.
+    let scrubbed = format!(
+        "! env -i HOME=\"$HOME/other\" \"{BIN}\" handback stop && \
+         printf 'security-sensitive-stop-v1\\n' > \"$HOME/out/security-sensitive-stop\""
+    );
+    for (name, stop, cleanup) in [
+        ("stop-unmarked", None, "ended"),
+        ("stop-marked", Some(&moved), "ended"),
+        ("stop-scrubbed", Some(&scrubbed), "ended"),
+        ("stop-cleanup-forgotten", Some(&moved), "forgotten"),
+        ("stop-cleanup-failed", Some(&moved), "active"),
+    ] {
+        let marked = stop.is_some();
+        let proxy = Proxy::start();
+        proxy.admit_unproven();
+        match cleanup {
+            "active" => drop(proxy.keep_runs_active()),
+            "forgotten" => drop(proxy.fail_endings([Fault::Status(401, SUPPRESSED)])),
+            _ => {}
+        }
+        let job = Job::new(name);
+        job.own_repository();
+        job.allow(pull_requests());
+        let mut steps = vec![
+            canary(),
+            json!({"say": "Already streamed before the stop"}),
+            json!({"write": {"title": "Outcome", "path": "{home}/out/outcome.json",
+                "content": json!({"summary": SUPPRESSED, "tests": [{"command": SUPPRESSED}]}).to_string()}}),
+            json!({"write": {"title": "Change", "path": "{cwd}/safe-name.txt", "content": SUPPRESSED}}),
+        ];
+        if let Some(command) = stop {
+            steps.push(json!({"execute": {"title": "Stop", "command": command}}));
+        }
+        steps.push(json!({"say": SUPPRESSED}));
+        job.script(&json!(steps));
+        let config = own_config(&plain(&proxy));
+        let result = job.own_run(&config);
+        assert!(result.stdout.contains("Already streamed before the stop"));
+        if !marked {
+            assert_eq!(result.code, Some(0), "{}", result.all());
+            assert!(job.text(PATCH).contains(SUPPRESSED));
+            assert!(result.stdout.contains(SUPPRESSED));
+            assert!(result.stderr.contains("Ended run "), "{}", result.all());
+            job.write(
+                "home/out/security-sensitive-stop",
+                "security-sensitive-stop-v1\n",
+            );
+            // A marker found before the run starts stops it all the same,
+            // and leaves what an earlier run left in its `--out` alone.
+            let retry = job.own_run(&config);
+            assert_eq!(retry.code, Some(5), "{}", retry.all());
+            for path in PUBLISHED {
+                assert!(job.path(path).exists(), "{path}: {}", retry.all());
+            }
+            assert!(job.text(PATCH).contains(SUPPRESSED));
+            assert!(!job.path("out/security-sensitive-stop").exists());
+            continue;
+        }
+        assert_eq!(result.code, Some(5), "{}", result.all());
+        assert!(result.stderr.contains("private submission is unavailable"));
+        assert!(!result.all().contains(SUPPRESSED), "{}", result.all());
+        // The broker's answer to the cleanup is not printed after the stop.
+        for note in [
+            "Ended run ",
+            "no longer knows",
+            "ending the run at the proxy",
+        ] {
+            assert!(!result.stderr.contains(note), "{}", result.all());
+        }
+        assert!(job.nothing_published());
+        assert!(!job.path("out/refused-handback").exists());
+        // The run root is the marker's one place: `run` writes no other.
+        assert!(!job.path("out/security-sensitive-stop").exists());
+        let retry = job.own_run(&config);
+        assert_eq!(retry.code, Some(5), "{}", retry.all());
+        assert!(!retry.all().contains(SUPPRESSED));
+        assert!(job.nothing_published());
+    }
+}
+
 /// Told to stop while it takes the run's results, `run` publishes none:
 /// what it leaves is not half a run's results under a summary that reads
 /// as a whole one. Without a sandbox user whose every process it kills,
@@ -3562,41 +3649,50 @@ fn a_run_that_fails_the_gate_leaves_nothing_to_upload() {
 /// timeout, so the agent's filter is kept short here.
 #[test]
 fn a_signal_during_the_hand_back_publishes_nothing() {
-    // A filter of the agent's own makes git slow on its checkout, as
-    // an agent could to hold the run here.
-    let slow = "git config filter.slow.clean 'sleep 5; cat' && \
-                echo '* filter=slow' > .gitattributes && echo x > FAKE.md";
-    let proxy = Proxy::start();
-    proxy.admit_unproven();
-    let job = Job::new("handing-back");
-    job.own_repository();
-    job.allow(pull_requests());
-    job.script(&json!([
-        canary(),
-        {"execute": {"title": "Bash", "command": slow}},
-        {"say": "Done."},
-    ]));
-    let child = job
-        .own_command(&own_config(&plain(&proxy)))
-        .spawn()
-        .unwrap();
-    // The run is ended at the proxy when the session is over, and its
-    // results are taken next.
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while !proxy.seen().iter().any(|r| r == "DELETE /v1/runs/self") {
-        assert!(Instant::now() < deadline, "{:?}", proxy.seen());
-        std::thread::sleep(Duration::from_millis(5));
+    for marked in [false, true] {
+        // Wait for the handback's Git command, not merely for proxy cleanup.
+        let slow = "git config filter.slow.clean 'touch \"$HOME/collecting\"; sleep 5; cat' && \
+                    echo 'FAKE.md filter=slow' > .gitattributes && echo x > FAKE.md";
+        let proxy = Proxy::start();
+        proxy.admit_unproven();
+        let job = Job::new("handing-back");
+        job.own_repository();
+        job.allow(pull_requests());
+        job.script(&json!([
+            canary(),
+            {"execute": {"title": "Bash", "command": slow}},
+            {"say": "Done."},
+        ]));
+        let child = job
+            .own_command(&own_config(&plain(&proxy)))
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !job.path("home/collecting").exists() {
+            assert!(Instant::now() < deadline, "{:?}", proxy.seen());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if marked {
+            job.write(
+                "home/out/security-sensitive-stop",
+                "security-sensitive-stop-v1\n",
+            );
+        }
+        let pid = rustix::process::Pid::from_child(&child);
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+        let got = Finished::of(child.wait_with_output().unwrap());
+        let (code, diagnostic) = if marked {
+            (5, "public handback suppressed")
+        } else {
+            (EXIT_FAILURE, "stopped by SIGTERM")
+        };
+        assert_eq!(got.code, Some(code), "{}", got.all());
+        assert!(got.stderr.contains(diagnostic), "{}", got.all());
+        assert!(job.nothing_published(), "{}", got.all());
+        let left = processes_in(&job.path(HOME_DIR));
+        assert!(left.is_empty(), "{left:?}: {}", got.all());
+        assert!(got.stdout.contains("Done."), "{}", got.all());
     }
-    std::thread::sleep(Duration::from_millis(1500));
-    let pid = rustix::process::Pid::from_child(&child);
-    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
-    let got = Finished::of(child.wait_with_output().unwrap());
-    assert_eq!(got.code, Some(EXIT_FAILURE), "{}", got.all());
-    assert!(got.stderr.contains("stopped by SIGTERM"), "{}", got.all());
-    assert!(job.nothing_published(), "{}", got.all());
-    let left = processes_in(&job.path(HOME_DIR));
-    assert!(left.is_empty(), "{left:?}: {}", got.all());
-    assert!(got.stdout.contains("Done."), "{}", got.all());
 }
 
 /// What the agent chooses to say, to call its tools, to print or to name

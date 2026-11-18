@@ -1393,6 +1393,18 @@ impl Run {
     /// Until this succeeds the token may still be live, and nothing the
     /// run produced may be uploaded.
     pub fn end(&self, retry: Retry) -> Result<Ended> {
+        let mut notes = Vec::new();
+        let ended = self.end_noting(retry, &mut notes);
+        for note in notes {
+            eprintln!("{note}");
+        }
+        ended
+    }
+
+    /// [`Run::end`], with what it would print added to NOTES instead: the
+    /// broker's answer is quoted there, and a caller that has since been
+    /// told to publish nothing does not print it.
+    pub fn end_noting(&self, retry: Retry, notes: &mut Vec<String>) -> Result<Ended> {
         if !self.has_run_api() {
             return Ok(Ended::NoRunApi);
         }
@@ -1400,18 +1412,18 @@ impl Run {
         // asked to end the run.
         if let Some(local) = self.local.as_ref().filter(|_| self.fronted()) {
             local.end();
-            eprintln!(
+            notes.push(format!(
                 "Closed the run's inference proxy in front of the broker: {} model request(s)",
                 local.requests()
-            );
+            ));
         }
         if let Some(local) = self.local.as_ref().filter(|_| !self.fronted()) {
             local.end();
             let record = Record::parse(local.record(RECORD_SCHEMA));
-            eprintln!(
+            notes.push(format!(
                 "Ended the run's inference proxy: {} model request(s)",
                 local.requests()
-            );
+            ));
             return Ok(Ended::Ended(record));
         }
         const LIVE: &str = "its token may still be live until the run expires";
@@ -1429,12 +1441,12 @@ impl Run {
             // the lookup that admits inference: the token admits nothing.
             // It keeps runs in memory and forgets them when it restarts.
             if answer.status == 401 {
-                eprintln!(
+                notes.push(format!(
                     "warning: the inference proxy at {} no longer knows this run's token (HTTP \
                      401; did it restart?), so the token admits nothing, but there is no usage \
                      record of the run",
                     self.url
-                );
+                ));
                 return Attempt::Done(Ended::Forgotten);
             }
             let why = |what: String| format!("ending the run at the proxy failed: {what}; {LIVE}");
@@ -1448,12 +1460,12 @@ impl Run {
             }
             match answer.json().and_then(Record::parse) {
                 Some(record) if record.state() != STATE_ACTIVE => {
-                    eprintln!(
+                    notes.push(format!(
                         "Ended run {} at the inference proxy ({}): {} model request(s)",
                         record.name(),
                         record.state(),
                         record.model_requests().unwrap_or_default()
-                    );
+                    ));
                     Attempt::Done(Ended::Ended(Some(record)))
                 }
                 Some(_) => Attempt::Failed(why("the proxy still has the run active".into())),

@@ -46,13 +46,41 @@ pub enum Command {
     /// Check what this run would hand back now, as the run checks it after
     /// the session: name each problem and how to fix it
     Check,
+    /// Stop public handback for this run; write no explanation or findings.
+    /// Refuses outside the environment `run` gave the agent
+    Stop,
     /// Print this run's rules for handing back, in full
     Guide,
 }
 
 impl Command {
     pub fn run(&self) -> Result<Exit> {
+        if matches!(self, Self::Stop) {
+            // Only the home `run` gave the agent is the run's: under a HOME a
+            // tool moved, or in a scrubbed environment, the marker would land
+            // where `run` never looks, and the confirmation would be false.
+            let home = std::env::var_os(crate::security_stop::HOME_VAR)
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute())
+                .with_context(|| {
+                    format!(
+                        "{} is not set to the run's home, so no stop was installed: write \
+                         the marker directly at the path the brief gives",
+                        crate::security_stop::HOME_VAR
+                    )
+                })?;
+            crate::security_stop::mark(&home.join(OUT_DIR))?;
+            eprintln!("{}", crate::security_stop::Stop::Marked.diagnostic());
+            return Ok(Exit::Success);
+        }
+        if !matches!(self, Self::Guide) {
+            let home = std::env::var_os(crate::security_stop::HOME_VAR)
+                .or_else(|| std::env::var_os("HOME"))
+                .context("HOME is not set")?;
+            crate::security_stop::refuse(&Path::new(&home).join(OUT_DIR))?;
+        }
         match self {
+            Self::Stop => unreachable!(),
             Self::Replace { base, range } => {
                 let home = std::env::var_os("HOME").context("HOME is not set")?;
                 let output = Path::new(&home).join("out/replacement.json");

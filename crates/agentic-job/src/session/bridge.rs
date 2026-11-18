@@ -866,12 +866,17 @@ struct Waiting {
     session_id: watch::Receiver<Option<String>>,
     closing: watch::Receiver<bool>,
     writer: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    security_stop: Option<Arc<crate::security_stop::Latch>>,
 }
 
 impl Bridge {
     /// Starts listening for the client. SESSION_ID is the agent's
     /// session, once there is one: the client attaches to it.
-    pub(super) fn start(self, session_id: watch::Receiver<Option<String>>) -> Result<Connected> {
+    pub(super) fn start(
+        self,
+        session_id: watch::Receiver<Option<String>>,
+        security_stop: Option<Arc<crate::security_stop::Latch>>,
+    ) -> Result<Connected> {
         let guard = if self.listen.on_tailnet() && std::path::Path::new(ENDPOINT_FILE).exists() {
             Some(crate::sandbox::session::Guard::start(&self.listener)?)
         } else {
@@ -899,6 +904,7 @@ impl Bridge {
             session_id,
             closing,
             writer: writer.clone(),
+            security_stop,
         };
         let reader = tokio::spawn(serve(waiting));
         Ok(Connected {
@@ -939,6 +945,7 @@ async fn serve(waiting: Waiting) {
         mut session_id,
         closing,
         writer,
+        security_stop,
     } = waiting;
     loop {
         let socket = admit(&listener, &admission).await;
@@ -956,6 +963,7 @@ async fn serve(waiting: Waiting) {
             outgoing,
             closing.clone(),
             hang_up.clone(),
+            security_stop.clone(),
         )));
         // The port stays owned until serve is revoked, even if reaping
         // fails: an agent that bound it once it was free would be handed
@@ -1077,6 +1085,7 @@ async fn write_lines(
     mut outgoing: mpsc::UnboundedReceiver<Line>,
     mut closing: watch::Receiver<bool>,
     hang_up: HangUp,
+    security_stop: Option<Arc<crate::security_stop::Latch>>,
 ) {
     let mut gone = hang_up.gone.subscribe();
     let mut closed = *closing.borrow();
@@ -1117,6 +1126,13 @@ async fn write_lines(
         let Some(line) = line else {
             break;
         };
+        if security_stop
+            .as_ref()
+            .is_some_and(|stop| stop.observe().is_some())
+        {
+            // In particular, don't drain queued transcript/replay on close.
+            break;
+        }
         let written = tokio::select! {
             r = write.send(Message::text(&*line.text)) => r.is_ok(),
             () = hung_up(&mut gone) => false,
@@ -1442,7 +1458,7 @@ mod tests {
             redact: Arc::new(str::to_owned),
         };
         let (_closing, closing) = watch::channel(false);
-        let writer = tokio::spawn(write_lines(sink, outgoing, closing, hang_up));
+        let writer = tokio::spawn(write_lines(sink, outgoing, closing, hang_up, None));
         let relay = Relay::new(Arc::new(str::to_owned), History::default());
         let (inbox, _from_client) = mpsc::channel(INBOX);
         let (_session_id, mut session_id) = watch::channel(None);

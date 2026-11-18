@@ -48,21 +48,35 @@ pub struct Condensed<W: Write> {
     log: W,
     file: File,
     redactor: Shared,
+    security_stop: Option<Arc<crate::security_stop::Latch>>,
     /// The line being written, until its newline.
     line: Vec<u8>,
 }
 
 impl<W: Write> Condensed<W> {
-    pub fn new(log: W, file: File, redactor: Shared) -> Self {
+    pub(crate) fn new(
+        log: W,
+        file: File,
+        redactor: Shared,
+        security_stop: Option<Arc<crate::security_stop::Latch>>,
+    ) -> Self {
         Self {
             log,
             file,
             redactor,
+            security_stop,
             line: Vec::new(),
         }
     }
 
     fn emit(&mut self, line: &[u8]) -> io::Result<()> {
+        if self
+            .security_stop
+            .as_ref()
+            .is_some_and(|stop| stop.observe().is_some())
+        {
+            return Ok(());
+        }
         let text = String::from_utf8_lossy(line);
         let clean = format!("{}\n", shown(&self.redactor, text.trim_end_matches('\n')));
         // The file first: it is what is uploaded, and a log nobody reads
@@ -135,7 +149,12 @@ mod tests {
         let path = dir.path().join("condensed.log");
         let (out, redactor) = (Buffer::default(), redactor());
         let token = format!("gh{}_{}", "p", "a1B2".repeat(10));
-        let mut log = Condensed::new(out.clone(), File::create(&path).unwrap(), redactor.clone());
+        let mut log = Condensed::new(
+            out.clone(),
+            File::create(&path).unwrap(),
+            redactor.clone(),
+            None,
+        );
         for piece in [
             "the token is praxis-run-",
             "abcdef, twice: praxis-run-abcdef\nand ",

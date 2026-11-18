@@ -70,6 +70,8 @@ on:
     outputs:
       exit:
         value: ${{ jobs.agent.outputs.exit }}
+      outcome:
+        value: ${{ jobs.agent.outputs.outcome }}
       failure-class:
         value: ${{ jobs.agent.outputs.failure-class }}
       over-budget:
@@ -106,6 +108,9 @@ jobs:
       actions: read
     outputs:
       exit: ${{ steps.run.outputs.exit }}
+      # `publish` or `stop` as `run` decided, or `publish` where the agent
+      # never started; empty, which publishes nothing, when it is unknown.
+      outcome: ${{ steps.run.outputs.outcome || (steps.run.outcome == 'skipped' && 'publish' || '') }}
       # One of the run action's fixed failure kinds, or empty: apply's
       # conclude puts it in the status comment, and a caller's
       # dispatcher decides on it (docs/workflow.md).

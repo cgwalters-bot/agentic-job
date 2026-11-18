@@ -24,6 +24,15 @@ a reusable-workflow input. Summaries and hand-back metadata distinguish declared
 from detected delegation, not proof of host controls; see
 [external host isolation](gitlab.md#explicit-external-host-isolation).
 
+`run` exit 5 means a [security-sensitive stop](safe-outputs.md#security-sensitive-stop):
+do not publish the handback or retry automatically. The run action and
+`agentic-job.yml` output `outcome`, `publish` or `stop`, empty when unknown;
+publish nothing of a run unless it is `publish`. `apply.yml` requires it of an
+agent job that ran, so an agent job of a caller's own must pass it on, as the
+[composition example](workflow.md#the-pieces-and-an-agent-job-of-your-own) does.
+This is not private execution
+and adds no workflow input or publication destination.
+
 The opt-in [external correlation interface](dispatch.md#binary-correlation-interface)
 is currently internal: `policy.yml`'s `external-receipt` input and
 `external-run-id` output, `check.yml`'s `detection-result` output, the
@@ -125,7 +134,7 @@ calling repository; architecture-specific and special runners are not remapped.
 
 Outputs `exit` and `failure-class` say how a run that did not end well
 ended ([why a run failed](workflow.md#why-a-run-failed)). `exit` is
-`agentic-job run`'s state (0, 1, 3, 4, 124), or 4 when the host check
+`agentic-job run`'s state (0, 1, 3, 4, 5, 124), or 4 when the host check
 before it failed only to reach a host outside the runner, so the agent
 never started. `failure-class` is empty or one fixed word: `timeout`,
 `budget`, `stall`, `agent_exit`, `inference_rate_limited`,

@@ -575,6 +575,13 @@ async fn drain_stderr(stderr: UnixStream, tap: Arc<Tap>) {
 /// and for a bridge whose serve could not be revoked. An agent that
 /// fails, or cannot be started, is a result.
 pub async fn run(opts: Options) -> Result<RunResult> {
+    run_with_security_stop(opts, None).await
+}
+
+pub(crate) async fn run_with_security_stop(
+    opts: Options,
+    security_stop: Option<Arc<crate::security_stop::Latch>>,
+) -> Result<RunResult> {
     let Options {
         name,
         agent: spec,
@@ -615,7 +622,7 @@ pub async fn run(opts: Options) -> Result<RunResult> {
     let (session_id, attach_to) = watch::channel(None);
     let (conversation, hang_up) = match bridge {
         Some(bridge) => {
-            let connected = bridge.start(attach_to)?;
+            let connected = bridge.start(attach_to, security_stop.clone())?;
             clients.attach(connected.send);
             let conversation = Conversation {
                 from_client: connected.from_client,
@@ -709,6 +716,12 @@ pub async fn run(opts: Options) -> Result<RunResult> {
             // Latch the stop before diagnostics, and log before killing it.
             let (mut ended, mut exited) = tokio::select! {
                 biased;
+                stop = async {
+                    match &security_stop {
+                        Some(stop) => stop.wait().await,
+                        None => std::future::pending().await,
+                    }
+                } => (Ended::failure(stop.diagnostic().to_owned()), None),
                 Ok(_) = deadline.wait_for(|why| *why == Some(Stop::NoRequests)) => {
                     (Ended::stopped(&Stop::NoRequests, false), None)
                 }

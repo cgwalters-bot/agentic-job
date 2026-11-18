@@ -419,7 +419,7 @@ jobs:
 
   check:
     needs: [policy, agent]
-    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.outcome == 'publish' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
       actions: read
@@ -449,7 +449,7 @@ jobs:
       ${{ !cancelled() && vars.AGENT_REAL_REVIEWS == 'true' && needs.policy.outputs.review-head != '' &&
           needs.policy.outputs.binary-artifact-id != '' && (needs.carry.outputs.from != '' ||
           (needs.check.result == 'success' && needs.check.outputs.artifact-id != '' &&
-          contains(fromJSON('["APPROVE", "CHANGES"]'), needs.check.outputs.verdict))) }}
+          contains(fromJSON('["APPROVE", "CHANGES"]'), needs.check.outputs.verdict) && needs.agent.outputs.outcome == 'publish')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     # The pull request, its files (to place inline comments), comments and
@@ -535,8 +535,9 @@ jobs:
   # Not where the record job ran instead: no review ran to report on.
   status:
     needs: [policy, carry, record, agent, check, submit, apply]
-    # Not without the binary's ID either, which would download every upload.
-    if: ${{ !cancelled() && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' && needs.record.result == 'skipped' }}
+    # Not without the binary's ID either, which would download every upload,
+    # nor for an agent that ran without a decision to publish.
+    if: ${{ !cancelled() && (needs.agent.result == 'skipped' || needs.agent.outputs.outcome == 'publish') && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' && needs.record.result == 'skipped' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:

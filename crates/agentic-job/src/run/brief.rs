@@ -209,6 +209,14 @@ fn test_evidence(text: &mut String, policy: &Policy, home: &Path, base: Option<&
     }
 }
 
+fn security_stop(home: &Path) -> String {
+    format!(
+        "For a sensitive finding, write only `security-sensitive-stop-v1` and a newline \
+         to `{}` before ending the turn without a report.\n\n",
+        home.join("out").join(crate::security_stop::FILE).display(),
+    )
+}
+
 /// What a run of POLICY is told before its task, as [`guide`] is: where
 /// it hands back, its limits, and the validator that names what `check`
 /// would refuse while the session can still fix it. The rest of the
@@ -229,10 +237,7 @@ pub fn hand_back(
         .push_to_pull_request_branch
         .as_ref()
         .filter(|_| carrier.is_some_and(|(kind, _)| kind == PUSH_TO_PULL_REQUEST_BRANCH));
-    let mut text = String::from(
-        "How this run hands back its results. All of it is published; nothing else leaves \
-         this machine.\n\n",
-    );
+    let mut text = security_stop(home);
     let _ = match (&carrier, push) {
         (Some((_, rules)), _) => writeln!(
             text,
@@ -344,11 +349,9 @@ pub fn hand_back(
          parts. Other credential-shaped strings are reported as warnings.\n\n\
          Checkpoint early rather than lose work; never abandon a finished change over a fixable \
          concern. Read inference addresses from the environment, not copied into code.\n\n\
-         Before you end your turn, run `agentic-job handback check` and fix what it reports \
-         until it exits 0. It makes the checks the run makes after your session, on your \
-         change, requests, report and checkpoint, and says how to fix each problem; run it as \
-         often as you like. `agentic-job handback guide` prints these rules in full: formats, \
-         protected paths, checkpoints, replacing a branch's commits, containers.\n\n",
+         Unless you installed a security-sensitive stop, before you end your turn, \
+           run `agentic-job handback check` and fix what it reports \
+          until it exits 0. `agentic-job handback guide` prints these rules in full.\n\n",
     );
     text
 }
@@ -394,8 +397,14 @@ pub fn guide(
         .as_ref()
         .filter(|_| carrier.is_some_and(|(kind, _)| kind == PUSH_TO_PULL_REQUEST_BRANCH));
     let mut text = String::from(
-        "How this run hands back its results. Nothing else leaves this machine, and all of it \
-         is published.\n\n",
+        "How this run hands back its results. Treat the run and its handback as public.\n\n",
+    );
+    text.push_str(&security_stop(home));
+    text.push_str(
+        "Writing that file is the stop, whatever `HOME` or environment a tool has. \
+         `agentic-job handback stop` installs the same marker atomically, but only in the \
+         environment the run gave you; where it fails or is unavailable, write the file. The \
+         stop cannot undo streaming or file a private report.\n\n",
     );
     let tree = if let Some((_, rules)) = &carrier {
         let proposed = match push {

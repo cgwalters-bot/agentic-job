@@ -33,6 +33,7 @@
 
 pub mod agents;
 pub mod bridge;
+pub(crate) use driver::run_with_security_stop;
 pub mod budget;
 pub mod clients;
 pub mod compaction;

@@ -155,6 +155,10 @@ impl Sandbox {
             .into_iter()
             .chain(ca)
             .chain(config.sandbox.env.clone())
+            .chain([(
+                crate::security_stop::HOME_VAR.to_owned(),
+                home_text.to_owned(),
+            )])
             .collect();
         // After the agent, the next check probes.
         crate::sandbox::check::forget_passed()?;
@@ -358,6 +362,7 @@ mod tests {
         got.sort_unstable();
         let user = crate::sandbox::host::User::current().unwrap().name;
         let want = [
+            format!("{}={}", crate::security_stop::HOME_VAR, home.display()),
             format!("HOME={}", home.display()),
             "LANG=en_US.UTF-8".to_owned(),
             format!("LOGNAME={user}"),
@@ -381,10 +386,10 @@ mod tests {
                 "REQUESTS_CA_BUNDLE=/etc/egress-proxy/ca-bundle.pem"
             ]
         );
-        // The five fixed ones (HOME, LANG, LOGNAME, PATH, USER) and these.
+        // The six fixed ones and these.
         assert_eq!(
             out.lines().filter(|line| !line.starts_with("PWD=")).count(),
-            5 + ca.len()
+            6 + ca.len()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

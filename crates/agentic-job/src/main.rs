@@ -31,7 +31,7 @@ fn main() -> ExitCode {
                 "error: {}",
                 agentic_job::run::enter::one_line(&format!("{err:#}"))
             );
-            ExitCode::from(exit::ERROR)
+            ExitCode::from(exit::Exit::error_code(&err))
         }
     }
 }

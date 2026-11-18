@@ -422,7 +422,10 @@ outputs as they are, with `toJSON(needs.policy.outputs)`: what is
 checked and applied is what that call decided. The agent job passes
 `prepare` only the policy call's two upload IDs, and check and apply
 take nothing from it but its proposals' upload ID and digest, its
-result and its exit state. Its actions come from the commit of the policy call, by
+result, its exit state and its `outcome`. Apply and its conclusion publish
+nothing of an agent job that ran unless its `outcome` is `publish`, so an
+agent job of your own must pass the run action's on as below
+([security-sensitive stop](safe-outputs.md#security-sensitive-stop)). Its actions come from the commit of the policy call, by
 the call's `source-repository` and `source-sha` outputs, so that one
 pin covers the binary, the actions and the three workflows: name all
 three by the same commit. Check and apply refuse, as their first step,
@@ -480,6 +483,7 @@ jobs:
       actions: read
     outputs:
       exit: ${{ steps.run.outputs.exit }}
+      outcome: ${{ steps.run.outputs.outcome || (steps.run.outcome == 'skipped' && 'publish' || '') }}
       failure-class: ${{ steps.run.outputs.failure-class }}
       over-budget: ${{ steps.run.outputs.over-budget }}
       stopped-early: ${{ steps.run.outputs.stopped-early }}
@@ -540,7 +544,7 @@ jobs:
 
   check:
     needs: [policy, agent]
-    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
+    if: ${{ !cancelled() && needs.policy.result == 'success' && needs.agent.outputs.outcome == 'publish' && needs.agent.outputs.safe-outputs-artifact-id != '' }}
     permissions:
       contents: read
       actions: read

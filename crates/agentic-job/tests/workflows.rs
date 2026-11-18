@@ -46,6 +46,176 @@ fn definition(file: &str) -> yaml_rust2::Yaml {
         .remove(0)
 }
 
+/// `run` alone reads the stop marker: its exit state is the outcome, and
+/// only a decision to publish lets the step read the run's summary. An exit
+/// state that is not `run`'s own, as when a signal killed it, is none.
+#[test]
+fn run_step_outcome_is_runs_decision() {
+    for (state, outcome) in [(0, "publish"), (2, "publish"), (5, "stop"), (137, "")] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("out/run")).unwrap();
+        std::fs::write(
+            dir.path().join("out/run/summary.md"),
+            "synthetic evidence\n",
+        )
+        .unwrap();
+        executable(
+            &dir.path().join("agentic-job"),
+            &format!("#!/bin/sh\nexit {state}\n"),
+        );
+        let (output, summary) = (dir.path().join("output"), dir.path().join("summary"));
+        let result = run_step(
+            "run/action.yml",
+            "Run the agent",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("RUNNER_HOME", path(&dir.path().join("agent-home"))),
+                ("GITHUB_OUTPUT", path(&output)),
+                ("GITHUB_STEP_SUMMARY", path(&summary)),
+            ],
+        );
+        let publish = outcome == "publish";
+        assert_eq!(result.status.success(), publish, "{state}: {result:?}");
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!("exit={state}\noutcome={outcome}\n")
+        );
+        assert_eq!(summary.exists(), publish, "{state}");
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("synthetic evidence"));
+    }
+}
+
+/// Every job that publishes something of an agent's run, a failure status
+/// included, requires that positive decision, so an empty or missing
+/// outcome publishes nothing; no job looks for a stop marker itself.
+#[test]
+fn public_jobs_require_a_publish_outcome() {
+    let decided =
+        "${{ steps.run.outputs.outcome || (steps.run.outcome == 'skipped' && 'publish' || '') }}";
+    let forwarded = "${{ jobs.agent.outputs.outcome }}";
+    assert_eq!(
+        definition("run/action.yml")["outputs"]["outcome"]["value"].as_str(),
+        Some(decided)
+    );
+    for file in ["agent.yml", "example-compose.yml"] {
+        assert_eq!(
+            definition(file)["jobs"]["agent"]["outputs"]["outcome"].as_str(),
+            Some(decided),
+            "{file}"
+        );
+    }
+    for file in ["agent.yml", "agentic-job.yml"] {
+        assert_eq!(
+            definition(file)["on"]["workflow_call"]["outputs"]["outcome"]["value"].as_str(),
+            Some(forwarded),
+            "{file}"
+        );
+    }
+    // The run action's outcome, for what the run step wrote and how it ended.
+    for (written, step, outcome) in [
+        ("publish", "success", "publish"),
+        ("publish", "failure", "publish"),
+        ("stop", "failure", "stop"),
+        // A signal or the step's timeout: no decision.
+        ("", "failure", ""),
+        // An earlier step failed, so `run` never started.
+        ("", "skipped", "publish"),
+    ] {
+        let context = [
+            ("steps.run.outputs.outcome", Expr::text(written)),
+            ("steps.run.outcome", Expr::text(step)),
+        ];
+        let value = &definition("run/action.yml")["outputs"]["outcome"]["value"];
+        assert_eq!(
+            evaluate(expression(value), &context).render(),
+            outcome,
+            "{written:?} {step}"
+        );
+    }
+    // Each gate with every other condition met, the exceptions that do not
+    // come from the agent's run named; apply.yml's inputs and functions are
+    // rewritten into the evaluator's paths.
+    let rewrites = [
+        (r"\bcancelled\(\)", "false"),
+        (r"\balways\(\)", "true"),
+        (r"fromJSON\(inputs\.(agent|check)\)", "needs.$1"),
+        (r"fromJSON\(inputs\.policy\)|\binputs", "policy"),
+        (r"format\('\{0\}', ([\w.-]+)\)", "$1"),
+        (r"contains\(fromJSON\('[^']*'\), [\w.-]+\)", "listed"),
+    ];
+    let ready = [
+        ("needs.policy.result", "success"),
+        ("needs.agent.outputs.safe-outputs-artifact-id", "1"),
+        ("needs.agent.outputs.exit", "0"),
+        ("vars.AGENT_REAL_REVIEWS", "true"),
+        ("needs.policy.outputs.review-head", "abc"),
+        ("needs.policy.outputs.binary-artifact-id", "1"),
+        ("needs.check.result", "success"),
+        ("needs.check.outputs.artifact-id", "1"),
+        ("listed", "true"),
+        ("needs.record.result", "skipped"),
+        ("policy.notify", "comment"),
+        ("policy.notified", "true"),
+    ];
+    let proposals: &[&str] = &["policy.proposals-artifact", "policy.external-run-id"];
+    for (file, job, without_agent, exceptions) in [
+        (
+            "agentic-job.yml",
+            "check",
+            false,
+            &["policy.proposals-artifact"][..],
+        ),
+        ("example-compose.yml", "check", false, &[]),
+        ("review.yml", "check", false, &[]),
+        ("review.yml", "submit", false, &["needs.carry.outputs.from"]),
+        ("review.yml", "status", true, &[]),
+        ("apply.yml", "apply", false, proposals),
+        ("apply.yml", "conclude", true, proposals),
+    ] {
+        let mut gate = expression(&definition(file)["jobs"][job]["if"]).to_owned();
+        for (pattern, with) in rewrites {
+            gate = Regex::new(pattern)
+                .unwrap()
+                .replace_all(&gate, with)
+                .into_owned();
+        }
+        // The agent job's result and outcome, and whether it runs.
+        for (result, outcome, runs) in [
+            ("success", Some("publish"), true),
+            ("failure", Some("publish"), true),
+            ("failure", Some("stop"), false),
+            ("failure", Some(""), false),
+            ("success", None, false),
+            ("skipped", None, without_agent),
+        ] {
+            for exception in [None].into_iter().chain(exceptions.iter().map(Some)) {
+                let mut context: Vec<_> = ready
+                    .iter()
+                    .map(|(path, value)| (*path, Expr::text(value)))
+                    .collect();
+                context.push(("needs.agent.result", Expr::text(result)));
+                if let Some(outcome) = outcome {
+                    context.push(("needs.agent.outputs.outcome", Expr::text(outcome)));
+                }
+                if let Some(path) = exception {
+                    context.push((path, Expr::text("1")));
+                }
+                assert_eq!(
+                    evaluate(&gate, &context).truthy(),
+                    runs || exception.is_some(),
+                    "{file} {job}: {result} {outcome:?} {exception:?}: {gate}"
+                );
+            }
+        }
+        let text = workflow(file);
+        assert!(
+            !text.contains("security-stop") && !text.contains("!= '5'"),
+            "{file}"
+        );
+    }
+}
+
 #[test]
 fn release_notes_use_github_defaults_without_a_changelog_bump() {
     let config = definition(".github/release.yml");
@@ -2341,7 +2511,7 @@ fn run_uses_policy_binary_captures_exit_and_gates_partial_results() {
         assert!(result.status.success(), "{result:?}");
         assert_eq!(
             std::fs::read_to_string(output).unwrap(),
-            format!("exit={exit}\n")
+            format!("exit={exit}\noutcome=publish\n")
         );
         let args = std::fs::read_to_string(record).unwrap();
         assert!(args.starts_with(&format!(
@@ -2414,7 +2584,7 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
         };
         assert_eq!(
             std::fs::read_to_string(output).unwrap(),
-            format!("exit=0\n{extra}")
+            format!("exit=0\noutcome=publish\n{extra}")
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout).contains(&format!(
@@ -2458,7 +2628,7 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
         let extra = if wanted { "stopped-early=true\n" } else { "" };
         assert_eq!(
             std::fs::read_to_string(output).unwrap(),
-            format!("exit=0\n{extra}"),
+            format!("exit=0\noutcome=publish\n{extra}"),
             "{outcome:?}"
         );
     }
@@ -2508,7 +2678,7 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
         };
         assert_eq!(
             std::fs::read_to_string(output).unwrap(),
-            format!("exit=1\n{extra}")
+            format!("exit=1\noutcome=publish\n{extra}")
         );
         assert_eq!(
             std::fs::read_to_string(summary).unwrap_or_default(),
@@ -2563,7 +2733,7 @@ open('writer-finished', 'w').close()
     assert!(dir.path().join("writer-finished").exists());
     assert_eq!(
         std::fs::read_to_string(output).unwrap(),
-        "exit=1\nsecret-at=safe-outputs/change.patch, line 3\n"
+        "exit=1\noutcome=publish\nsecret-at=safe-outputs/change.patch, line 3\n"
     );
 }
 
@@ -5166,12 +5336,14 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             r"VERDICT: \$\{\{ needs.check.outputs.verdict \}\}",
             r#""\$RUNNER_TEMP/bin/agentic-job" review status"#,
             r"REVIEW_URL: \$\{\{ needs.submit.outputs.review-url \}\}",
-            r"if: \$\{\{ !cancelled\(\) && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' && needs.record.result == 'skipped' \}\}",
+            r"if: \$\{\{ !cancelled\(\) && \(needs.agent.result == 'skipped' \|\| needs.agent.outputs.outcome == 'publish'\) && needs.policy.outputs.review-head != '' && needs.policy.outputs.binary-artifact-id != '' && needs.agent.result != 'cancelled' && needs.record.result == 'skipped' \}\}",
             "runs-on: ubuntu-26.04",
             r"HEAD_SHA: \$\{\{ needs.policy.outputs.review-head \}\}",
         ],
         &[
-            r"needs\.agent\.outputs|needs\.check\.outputs\.artifact|pull_request\.head|needs\.policy\.outputs\.ref\b",
+            // The agent's own outputs decide only whether the job runs.
+            r"(?s)runs-on:.*needs\.agent\.outputs",
+            r"needs\.check\.outputs\.artifact|pull_request\.head|needs\.policy\.outputs\.ref\b",
         ],
     ),
     (

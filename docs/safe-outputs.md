@@ -675,6 +675,64 @@ other bounds and check/apply refusals remain. Logs and transcripts keep their
 current redaction; see
 [inference address redaction](inference.md#what-run-does).
 
+### Security-sensitive stop
+
+Secret-pattern scanning cannot recognize a sensitive finding written in ordinary
+prose. To stop that material from being published as a patch, comment, evidence or
+fallback report, install the marker below as soon as you recognize it and end the
+turn without explaining what you found. There is no private submission
+destination and no public fallback. This is a stop, not an output type, and is
+off until requested; no caller setting is needed.
+
+The marker has one place, the run root: `out/security-sensitive-stop` in the
+agent's home as `run --runner-home` names it, the absolute path the brief gives.
+It is a regular file containing only `security-sensitive-stop-v1` and a final
+newline. Writing that file at the brief's path is the stop; a tool that changes
+`HOME` or scrubs the environment does not move it. `agentic-job handback stop`
+installs the same marker atomically, but only under the home `run` passes the
+agent in `AGENTIC_JOB_HANDBACK_HOME`: without it the command refuses rather than
+confirm a stop elsewhere. Where it fails, is missing or predates the stop, write
+the file.
+
+Do not put any finding or explanation in the marker. An absent marker means
+no stop; a malformed, oversized, symlinked or unreadable marker also stops
+publication. Marker contents, filenames from the handback, and agent-supplied
+reasons are not quoted. `run` is the only reader that decides publication
+(`handback check` also refuses a marked run, for the agent). Once observed, a
+marker cannot be cleared by removing or rewriting it during the run. `run`
+stops the session, attempts the normal inference cleanup, withdraws what it
+staged in `--out`, and exits 5, whatever else ended the run, an error included.
+Do not retry exit 5 automatically.
+
+The runner stops emitting condensed log lines and sending new or queued session
+bridge text once it observes the marker. It does not publish the transcript,
+tool logs, run or job summary derived from the session, outcome, patch or any
+other safe-output carrier, including memory and test evidence.
+
+Publication is gated on a positive decision, not on the absence of a stop.
+The run action's `outcome` output is `publish` for any other exit state of
+`run`'s own, `stop` for exit 5, and empty when `run` was started and did not
+decide, as when a signal or the step's timeout killed it. Every shipped job
+that publishes something of the run (check, apply and its conclusion, review
+submission and review status) requires `publish`, so an empty outcome fails
+closed: such a run posts no failure status either. Nothing after `run` looks
+for a marker. Jobs and fixed exit diagnostics remain visible.
+
+This is **not** private runner mode or a confidentiality boundary against code
+running as the runner user. It does not retract already streamed or in-flight
+logs, messages, comments (including a start notification), or artifacts. A
+stopped re-review neither posts a replacement status nor revokes an earlier
+approval of the same head. Do not use the stop to withdraw an approval. The
+prompt and requests already sent to inference or tools, provider and host logs,
+and local work files and transcripts are outside the publication gate. The
+marker is not a secure deletion or retention policy. Caller-owned steps and
+post-job collectors must not upload the work directory or publish failure
+details independently. A fresh runner or manually restarted workflow does not
+inherit the local record; a stop is not a durable cross-run block. Private
+intake, inference and evidence transport and retention, and retry coordination
+across runners require a separate design. Do not put known sensitive material
+into a public run in the first place.
+
 ### Endpoint-redacted patch replay
 
 The threat is a producer treating a placeholder as a wildcard for arbitrary

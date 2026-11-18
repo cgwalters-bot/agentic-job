@@ -1408,6 +1408,19 @@ fn missing(
 /// a change or a memory that cannot be handed back is dropped, with the
 /// reason in the result.
 pub fn collect(request: &Request<'_>) -> Result<Change> {
+    collect_with_stop(
+        request,
+        &crate::security_stop::Latch::new(request.home.join("out")),
+    )
+}
+
+/// Share the capture guard with `run`: a signal can discard this thread's
+/// result, but not a stop observed by the guard.
+pub(super) fn collect_with_stop(
+    request: &Request<'_>,
+    security_stop: &crate::security_stop::Latch,
+) -> Result<Change> {
+    security_stop.check()?;
     let mut change = collect_change(request)?;
     // Collected whatever became of the change, of an analysis run too.
     if let Some(rules) = &request.policy.memory {
@@ -2897,6 +2910,35 @@ mod tests {
             check::check_run_outputs(&self.path("safe-outputs"), &collected, policy, RUN_ID)
                 .unwrap()
         }
+    }
+
+    #[test]
+    fn security_stop_survives_discarding_the_finalization_result() {
+        let home = Home::new();
+        let out = home.path("out");
+        let latch = crate::security_stop::Latch::new(out.clone());
+        assert_eq!(latch.observe(), None); // `run` enters finalization.
+        crate::security_stop::mark(&out).unwrap();
+        let result = collect_with_stop(
+            &Request {
+                runner: &Unconfined,
+                home: home.dir.path(),
+                checkout: &home.checkout,
+                policy: &policy(Kind::Analysis, json!({})),
+                commit: &config::Commit::default(),
+                run_id: RUN_ID,
+                harness: None,
+                run_dir: &home.path("results"),
+                safe_outputs: &home.path("safe-outputs"),
+            },
+            &latch,
+        );
+        assert!(matches!(result, Err(err) if err.is::<crate::security_stop::Stop>()));
+        // A signal takes the other branch of the join. With no result or
+        // file left, the shared latch still decides the exit state.
+        std::fs::remove_file(out.join(crate::security_stop::FILE)).unwrap();
+        assert_eq!(latch.observe(), Some(crate::security_stop::Stop::Marked));
+        assert!(home.handed_back().is_empty());
     }
 
     /// What counts as the output a run requires, for the reminder: a

@@ -55,8 +55,16 @@ outputs:
     description: >-
       Exit state of agentic-job run, or 4 when the check of the host before it failed only to
       reach a host outside the runner, so that `run` never started. The check sets its outputs
-      only when it exits 4, which fails the job, so at most one of the two steps has any
+      only when it exits 4, which fails the job, so at most one of the two steps has any.
+      Exit 5 is a security-sensitive stop: no public handback and no automatic retry.
     value: ${{ steps.host.outputs.exit || steps.run.outputs.exit }}
+  outcome:
+    description: >-
+      `publish` when `run` exited with a state of its own other than 5, or never started because
+      an earlier step failed; `stop` for a security-sensitive stop (exit 5). Empty when `run`
+      was started and did not decide, as when a signal or the step's timeout ended it. A caller
+      publishes nothing of the run, a failure status included, unless it is `publish`
+    value: ${{ steps.run.outputs.outcome || (steps.run.outcome == 'skipped' && 'publish' || '') }}
   failure-class:
     description: >-
       For a run that did not end well, what it ended on, as one of the summary's failure kinds
@@ -269,7 +277,19 @@ runs:
         [ "$RUNNER_GATE" != true ] || set -- "$@" --runner-gate
         "$binary" run --runner-home "$RUNNER_HOME" --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
         echo '::endgroup::'
-        echo "exit=$state" >> "$GITHUB_OUTPUT"
+        # `run` alone reads the stop marker, and decides once: any exit state
+        # of its own but 5 is a decision to publish. Another one (a signal's)
+        # is no decision, and nothing of the run is read or uploaded.
+        case $state in
+          5) outcome=stop ;;
+          0 | 1 | 2 | 3 | 4 | 124) outcome=publish ;;
+          *) outcome= ;;
+        esac
+        printf 'exit=%s\noutcome=%s\n' "$state" "$outcome" >> "$GITHUB_OUTPUT"
+        if [ "$outcome" != publish ]; then
+          [ -n "$outcome" ] || echo "::error::agentic-job run ended with exit state $state, not one of its own: nothing of the run is published"
+          exit 1
+        fi
         [ ! -e "$JOB_DIR/out/run/summary.md" ] || cat "$JOB_DIR/out/run/summary.md" >> "$GITHUB_STEP_SUMMARY"
         # Scalar fields only, never agent text or a missing cost turned into zero.
         # Rounded to 1/10000 dollar and bounded, so jq prints plain decimals

@@ -22,6 +22,8 @@ pub enum Exit {
     /// phase to this itself: an `Err` out of a command is [`ERROR`].
     /// `sandbox check`: only a control that reaches outside the host failed.
     NotStarted,
+    /// A security-sensitive stop; no public handback or automatic retry.
+    SecurityStop,
     /// `run`: the timeout stopped the agent.
     Timeout,
     /// `sandbox timed`: the exit status of the command it ran, which is
@@ -30,12 +32,22 @@ pub enum Exit {
 }
 
 impl Exit {
+    /// Preserve the stop classification through command errors and their context.
+    pub fn error_code(error: &anyhow::Error) -> u8 {
+        if error.is::<crate::security_stop::Stop>() {
+            Self::SecurityStop.code()
+        } else {
+            ERROR
+        }
+    }
+
     pub const fn code(self) -> u8 {
         match self {
             Self::Success => 0,
             Self::Failure => 1,
             Self::Limit => 3,
             Self::NotStarted => 4,
+            Self::SecurityStop => 5,
             Self::Timeout => 124,
             Self::Command(code) => code,
         }
@@ -59,6 +71,7 @@ mod tests {
             (Exit::Failure, 1),
             (Exit::Limit, 3),
             (Exit::NotStarted, 4),
+            (Exit::SecurityStop, 5),
             (Exit::Timeout, 124),
         ];
         for (exit, code) in cases {

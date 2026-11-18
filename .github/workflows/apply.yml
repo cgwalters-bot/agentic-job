@@ -36,7 +36,7 @@ on:
         type: string
         required: true
       agent:
-        description: "`toJSON(needs.agent)` of the agent job (its result and its `exit` output); `{}` for proposals from a non-agent job"
+        description: "`toJSON(needs.agent)` of the agent job (its result and its `exit` and `outcome` outputs: nothing of an agent job that ran is published unless `outcome` is `publish`); `{}` for proposals from a non-agent job"
         type: string
         default: "{}"
       check:
@@ -99,8 +99,8 @@ jobs:
     # for partial work. The exit state comes from the agent's machine and
     # decides only this; the check job decided whether it may be applied.
     if: >-
-      ${{ !cancelled() && fromJSON(inputs.check).result == 'success' && (fromJSON(inputs.policy).external-run-id != '' || fromJSON(inputs.policy).proposals-artifact != '' || format('{0}', fromJSON(inputs.agent).outputs.exit) == '0' ||
-          (fromJSON(inputs.policy).apply-partial == 'true' && contains(fromJSON('["3", "124"]'), fromJSON(inputs.agent).outputs.exit))) && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
+      ${{ !cancelled() && fromJSON(inputs.check).result == 'success' && (fromJSON(inputs.policy).external-run-id != '' || fromJSON(inputs.policy).proposals-artifact != '' || (fromJSON(inputs.agent).outputs.outcome == 'publish' && (format('{0}', fromJSON(inputs.agent).outputs.exit) == '0' ||
+          (fromJSON(inputs.policy).apply-partial == 'true' && contains(fromJSON('["3", "124"]'), fromJSON(inputs.agent).outputs.exit))))) && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
     runs-on: ${{ fromJSON(fromJSON(inputs.policy).runner) }}
     timeout-minutes: 15
     environment: ${{ fromJSON(inputs.policy).apply-environment }}
@@ -1128,7 +1128,7 @@ jobs:
   # number are numbers.
   conclude:
     needs: apply
-    if: ${{ always() && ((fromJSON(inputs.policy).notify != 'none' && fromJSON(inputs.policy).notified == 'true') || needs.apply.outputs.missing-data == 'true') }}
+    if: ${{ always() && (fromJSON(inputs.policy).external-run-id != '' || fromJSON(inputs.policy).proposals-artifact != '' || fromJSON(inputs.agent).result == 'skipped' || fromJSON(inputs.agent).outputs.outcome == 'publish') && ((fromJSON(inputs.policy).notify != 'none' && fromJSON(inputs.policy).notified == 'true') || needs.apply.outputs.missing-data == 'true') }}
     concurrency:
       group: agentic-job-status-${{ fromJSON(inputs.policy).notify-repo }}-${{ fromJSON(inputs.policy).notify-item }}
       cancel-in-progress: false
