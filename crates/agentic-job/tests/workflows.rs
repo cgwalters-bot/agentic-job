@@ -2471,6 +2471,8 @@ fn documented_runner_configs_parse_and_obey_admission() {
 
 #[test]
 fn run_uses_policy_binary_captures_exit_and_gates_partial_results() {
+    let action = definition("run/action.yml");
+    let result_env = &named_step(&action, "The run's result")["env"];
     for exit in [0, 1, 3, 4, 124] {
         let dir = tempfile::tempdir().unwrap();
         executable(
@@ -2513,7 +2515,22 @@ fn run_uses_policy_binary_captures_exit_and_gates_partial_results() {
             home.display()
         )));
         assert!(args.contains("--review-head\nreview-head\n"));
-        for partial in ["false", "true"] {
+        for (opt_in, artifact_id) in [(false, ""), (false, "123"), (true, ""), (true, "123")] {
+            let inputs = [
+                (
+                    "steps.settings.outputs.apply_partial",
+                    Expr::text(if opt_in { "true" } else { "false" }),
+                ),
+                (
+                    "steps.safe-outputs.outputs.artifact-id",
+                    Expr::text(artifact_id),
+                ),
+            ];
+            let partial = evaluate(expression(&result_env["PARTIAL"]), &inputs).render();
+            let handed_back = evaluate(expression(&result_env["HANDED_BACK"]), &inputs).render();
+            assert_eq!(handed_back, (!artifact_id.is_empty()).to_string());
+            assert_eq!(partial, (opt_in && !artifact_id.is_empty()).to_string());
+            let class = if exit == 124 { "timeout" } else { "" };
             let gate = run_step(
                 "run/action.yml",
                 "The run's result",
@@ -2521,17 +2538,72 @@ fn run_uses_policy_binary_captures_exit_and_gates_partial_results() {
                 &[
                     ("JOB_DIR", path(dir.path())),
                     ("EXIT", &exit.to_string()),
-                    ("PARTIAL", partial),
-                    ("HANDED_BACK", "false"),
-                    ("CLASS", ""),
+                    ("PARTIAL", &partial),
+                    ("HANDED_BACK", &handed_back),
+                    ("CLASS", class),
                 ],
             );
             assert_eq!(
                 gate.status.success(),
-                exit == 0 || partial == "true" && [3, 124].contains(&exit),
-                "{exit} {partial}: {gate:?}"
+                exit == 0 || opt_in && !artifact_id.is_empty() && [3, 124].contains(&exit),
+                "{exit} {opt_in} {artifact_id}: {gate:?}"
             );
+            if exit == 124 && !gate.status.success() {
+                let reason = if artifact_id.is_empty() {
+                    "timed out without handing back a result"
+                } else {
+                    "run ended with exit state 124"
+                };
+                assert!(
+                    String::from_utf8_lossy(&gate.stdout).contains(reason),
+                    "{gate:?}"
+                );
+            }
         }
+    }
+}
+
+#[test]
+fn apply_requires_more_than_a_checked_timeout_handback() {
+    let apply = definition("apply.yml");
+    // Substitute only the calls the small expression evaluator does not
+    // implement. The job condition and its boolean structure come from YAML.
+    let gate = expression(&apply["jobs"]["apply"]["if"])
+        .replace("cancelled()", "run.cancelled")
+        .replace("fromJSON(inputs.check)", "check")
+        .replace("fromJSON(inputs.policy)", "policy")
+        .replace(
+            "format('{0}', fromJSON(inputs.agent).outputs.exit)",
+            "agent.exit",
+        )
+        .replace(
+            "contains(fromJSON('[\"3\", \"124\"]'), fromJSON(inputs.agent).outputs.exit)",
+            "agent.limit",
+        );
+    for (exit, opt_in, check, cancelled, want) in [
+        ("124", "false", "success", false, false),
+        ("124", "true", "failure", false, false),
+        ("124", "true", "skipped", false, false),
+        ("124", "true", "success", true, false),
+        // Admission to apply is not permission to push. The marking step
+        // refuses partial pushes (see partial_push_is_not_applied_whatever_else_it_posts).
+        ("124", "true", "success", false, true),
+        ("0", "false", "success", false, true),
+    ] {
+        assert_eq!(
+            evaluate(
+                &gate,
+                &[
+                    ("run.cancelled", Expr::Bool(cancelled)),
+                    ("check.result", Expr::text(check)),
+                    ("policy.apply-partial", Expr::text(opt_in)),
+                    ("agent.exit", Expr::text(exit)),
+                    ("agent.limit", Expr::Bool(matches!(exit, "3" | "124"))),
+                ]
+            ),
+            Expr::Bool(want),
+            "{exit} {opt_in} {check} {cancelled}"
+        );
     }
 }
 

@@ -1767,6 +1767,11 @@ Replaced 3 inference address or agent-facing token occurrence(s) in the hand-bac
                 None,
             ),
             (handed_back, "timeout", None),
+            (
+                ended(Outcome::Timeout, "hit the timeout; cancelled", None, 0, 0),
+                "timeout",
+                None,
+            ),
             // Nor one the provider stopped that handed back its tree.
             (
                 ended(
