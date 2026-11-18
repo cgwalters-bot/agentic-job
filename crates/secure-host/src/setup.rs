@@ -375,9 +375,10 @@ const INSTALL_ATTEMPTS: u32 = 4;
 
 const INSTALL_PAUSE: Duration = Duration::from_secs(20);
 
-/// One budget for apt's downloads and index refresh, including DNS waits.
-/// Leave five seconds for timeout's forced cleanup, below one minute total.
-const APT_DOWNLOAD_SECONDS: u64 = 45;
+/// One budget for apt's downloads and index refresh, including DNS waits:
+/// long enough for a slow but healthy mirror on a hosted runner (45 seconds
+/// refused many such runs), still bounded when DNS is down.
+const APT_DOWNLOAD_SECONDS: u64 = 180;
 
 /// Sets the host up. READ reads and checks the program's configuration
 /// as the preflight's first step; EGRESS_IMAGE is the podman image ID,
@@ -1380,14 +1381,14 @@ fn plain_deb_name(package: &str) -> bool {
 /// Bound acquisition, not dpkg: killing an install could leave half-configured
 /// packages. Both commands share a deadline, so a DNS failure cannot multiply
 /// the wait by the number of packages, mirrors or outer retries.
-fn download_apt_packages(download: &Command, refresh: &Command) -> Result<()> {
+fn download_apt_packages(download: &Command, refresh: &Command, budget: Duration) -> Result<()> {
     let started = Instant::now();
-    let budget = Duration::from_secs(APT_DOWNLOAD_SECONDS);
+    let seconds = budget.as_secs();
     for (command, is_download) in [(download, true), (refresh, false), (download, true)] {
         let remaining = budget.saturating_sub(started.elapsed());
         ensure!(
             !remaining.is_zero(),
-            "packages: apt download deadline exceeded ({APT_DOWNLOAD_SECONDS}s); check mirror name resolution/DNS and connectivity; not retrying"
+            "packages: apt download deadline exceeded ({seconds}s); check mirror name resolution/DNS and connectivity; not retrying"
         );
         let status = Command::new("timeout")
             .args(["--kill-after=5", &remaining.as_secs_f64().to_string()])
@@ -1402,7 +1403,7 @@ fn download_apt_packages(download: &Command, refresh: &Command) -> Result<()> {
             .context("packages: running bounded apt download/refresh")?;
         ensure!(
             started.elapsed() < budget && !matches!(status.code(), Some(124 | 137)),
-            "packages: apt download deadline exceeded ({APT_DOWNLOAD_SECONDS}s); check mirror name resolution/DNS and connectivity; not retrying"
+            "packages: apt download deadline exceeded ({seconds}s); check mirror name resolution/DNS and connectivity; not retrying"
         );
         if is_download && status.success() {
             return Ok(());
@@ -1428,7 +1429,11 @@ pub fn install_packages(packages: &[String]) -> Result<()> {
         return Ok(());
     }
     if manager == PackageManager::Apt {
-        download_apt_packages(&PackageManager::download(&packages), &manager.refresh())?;
+        download_apt_packages(
+            &PackageManager::download(&packages),
+            &manager.refresh(),
+            Duration::from_secs(APT_DOWNLOAD_SECONDS),
+        )?;
         let status = manager
             .install(&packages)
             .status()
@@ -1507,6 +1512,8 @@ pub fn install_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A short budget so the deadline tests finish quickly.
+    const TEST_BUDGET: Duration = Duration::from_secs(5);
 
     /// With `[host.prepared]` the helper is the program's file, and
     /// setup refuses rather than go on without one, or through a link:
@@ -1925,8 +1932,8 @@ mod tests {
         success.env("DEBIAN_FRONTEND", "noninteractive");
         let failure = Command::new("false");
         let unexpected_refresh = Command::new("/nonexistent/apt-refresh-must-not-run");
-        download_apt_packages(&success, &unexpected_refresh).unwrap();
-        let error = download_apt_packages(&failure, &success).unwrap_err();
+        download_apt_packages(&success, &unexpected_refresh, TEST_BUDGET).unwrap();
+        let error = download_apt_packages(&failure, &success, TEST_BUDGET).unwrap_err();
         assert!(error.to_string().contains("apt download failed"));
 
         let dir = tempfile::tempdir().unwrap();
@@ -1937,7 +1944,7 @@ mod tests {
             "download",
         ]);
         stale_index.arg(dir.path().join("attempted"));
-        download_apt_packages(&stale_index, &success).unwrap();
+        download_apt_packages(&stale_index, &success, TEST_BUDGET).unwrap();
     }
 
     #[test]
@@ -1959,28 +1966,32 @@ mod tests {
         ]);
         download.arg(dir.path().join("package.deb"));
         let started = Instant::now();
-        let error = download_apt_packages(&download, &Command::new("true")).unwrap_err();
+        let error =
+            download_apt_packages(&download, &Command::new("true"), TEST_BUDGET).unwrap_err();
         eprintln!(
             "Real apt DNS failure: {error}; stopped after {:.3?}",
             started.elapsed()
         );
         assert!(error.to_string().contains("name resolution/DNS"));
-        assert!(started.elapsed() < Duration::from_secs(55));
+        assert!(started.elapsed() < TEST_BUDGET + Duration::from_secs(10));
     }
 
-    /// Exercise the production deadline with a DNS-failing acquisition method
+    /// Exercise the deadline with a DNS-failing acquisition method
     /// that stays stuck and ignores TERM. Never run dpkg or change the host.
     #[test]
-    fn apt_download_dns_failure_harness_stops_within_a_minute() {
+    fn apt_download_dns_failure_harness_stops_within_its_budget() {
         let mut download = Command::new("sh");
         download.args(["-c", "trap '' TERM; printf \"Temporary failure resolving 'mirror.invalid' (harness)\\n\" >&2; exec sleep 120"]);
         let refresh = Command::new("false");
         let started = Instant::now();
-        let error = download_apt_packages(&download, &refresh).unwrap_err();
+        let error = download_apt_packages(&download, &refresh, TEST_BUDGET).unwrap_err();
         let elapsed = started.elapsed();
         eprintln!("DNS failure harness: {error}; stopped after {elapsed:.3?}");
         assert!(error.to_string().contains("apt download deadline exceeded"));
-        assert!(elapsed < Duration::from_secs(55), "{elapsed:?}");
+        assert!(
+            elapsed < TEST_BUDGET + Duration::from_secs(10),
+            "{elapsed:?}"
+        );
     }
 
     #[test]
