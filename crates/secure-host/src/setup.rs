@@ -375,10 +375,11 @@ const INSTALL_ATTEMPTS: u32 = 4;
 
 const INSTALL_PAUSE: Duration = Duration::from_secs(20);
 
-/// One budget for apt's downloads and index refresh, including DNS waits:
-/// long enough for a slow but healthy mirror on a hosted runner (45 seconds
-/// refused many such runs), still bounded when DNS is down.
-const APT_DOWNLOAD_SECONDS: u64 = 180;
+/// One budget for apt's downloads and index refresh, including DNS waits.
+/// A failed name lookup fails at once; this bounds a hung one while letting a
+/// slow but healthy mirror deliver a job's packages (the Rust toolchain is
+/// about 90 MB, and 45 and 180 seconds both refused such downloads mid-way).
+const APT_DOWNLOAD_SECONDS: u64 = 600;
 
 /// Sets the host up. READ reads and checks the program's configuration
 /// as the preflight's first step; EGRESS_IMAGE is the podman image ID,
