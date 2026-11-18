@@ -63,6 +63,8 @@ fn finish(args: &Args, transition: impl FnOnce(&str, u64, bool) -> Result<Value>
             .as_array()
             .is_some_and(|items| items.iter().any(|item| item["type"] == PUSH))
     };
+    // Checked unchanged evidence is diagnostic-only: GitHub cannot condition
+    // the readiness write on both the checked head and absence of `hold`.
     if !["made", "already_applied"]
         .iter()
         .any(|key| pushed(&applied[*key]))

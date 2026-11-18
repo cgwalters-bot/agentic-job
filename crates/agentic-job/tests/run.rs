@@ -2290,12 +2290,12 @@ fn unchanged_claims_survive_only_as_diagnostics_across_the_cli_handoff() {
 }
 
 /// A real producer upload, not a checker-only invented receipt. The API fixture
-/// requires authentication and serves only the bounded read-only endpoints.
+/// requires authentication and detects any unexpected readiness write.
 #[test]
-fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
+fn unchanged_candidate_crosses_producer_collector_checker_and_apply() {
     use base64::Engine;
     use std::io::{BufRead, BufReader, Write};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     let proxy = Proxy::start();
@@ -2308,6 +2308,7 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
     ));
     job.allow(json!({"noop": {"max": 1}, "push_to_pull_request_branch": {
         "max": 1, "target": "7", "head": head, "protected_files": [],
+        "ready_when_complete": true,
         "protect_top_level_dot_folders": true, "protected_files_policy": "blocked",
         "max_patch_size": 65536, "max_patch_files": 10}}));
     let mut policy = job.json("policy.json");
@@ -2346,7 +2347,8 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
         "head_repository": {"full_name": repository},
         "event": "push", "head_sha": source, "path": ".github/workflows/verify.yml",
         "status": "completed", "conclusion": "success", "pull_requests": []});
-    let pull = json!({"number": 7, "state": "open", "head": {"sha": head, "repo": {"full_name": repository}},
+    let pull = json!({"number": 7, "state": "open", "draft": true, "node_id": "PR_fixture", "labels": [],
+        "head": {"sha": head, "repo": {"full_name": repository}},
         "base": {"sha": source, "repo": {"full_name": repository}}});
     let jobs = json!({"total_count": 1, "jobs": [{"name": "test", "run_id": 81, "run_attempt": 2,
         "head_sha": source, "status": "completed", "conclusion": "success", "steps": [
@@ -2354,11 +2356,14 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
             {"name": "Verify", "status": "completed", "conclusion": "success"}]}]});
     let mode = Arc::new(Mutex::new(String::new()));
     let stop = Arc::new(AtomicBool::new(false));
+    let mutations = Arc::new(AtomicUsize::new(0));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let root = format!("http://{}", listener.local_addr().unwrap());
     let server_mode = mode.clone();
     let server_stop = stop.clone();
+    let server_mutations = mutations.clone();
+    let pull_request = format!("GET /repos/{repository}/pulls/7 ");
     let server = std::thread::spawn(move || {
         let mut last_mode = String::new();
         let mut run_reads = 0;
@@ -2374,7 +2379,8 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request = String::new();
             reader.read_line(&mut request).unwrap();
-            assert!(request.starts_with("GET /repos/"), "{request}");
+            let mutation = request.starts_with("POST /graphql ");
+            assert!(mutation || request.starts_with("GET /repos/"), "{request}");
             let mut authenticated = false;
             loop {
                 let mut line = String::new();
@@ -2396,10 +2402,14 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
             if mode == "wrong-checkout" {
                 workflow["jobs"]["test"]["steps"][0]["with"]["ref"] = json!("b".repeat(40));
             }
-            let mut value = if request.contains("/contents/") {
+            let mut value = if mutation {
+                server_mutations.fetch_add(1, Ordering::SeqCst);
+                json!({"data": {"markPullRequestReadyForReview": {"pullRequest": {"isDraft": false}}}})
+            } else if request.contains("/contents/") {
                 json!({"type": "file", "path": ".github/workflows/verify.yml", "encoding": "base64",
                     "content": base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec_pretty(&workflow).unwrap())})
             } else if request.contains("/pulls/") {
+                assert!(request.starts_with(&pull_request), "{request}");
                 let mut pull = pull.clone();
                 if mode == "stale-pr" {
                     pull["head"]["sha"] = json!("b".repeat(40));
@@ -2480,7 +2490,8 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
         }
     });
     let check = |context: &str| {
-        Finished::of(
+        let before = mutations.load(Ordering::SeqCst);
+        let result = Finished::of(
             Command::new(BIN)
                 .args([
                     "check",
@@ -2506,7 +2517,13 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
                 .current_dir(&job.dir)
                 .output()
                 .unwrap(),
-        )
+        );
+        assert_eq!(
+            mutations.load(Ordering::SeqCst),
+            before,
+            "check must not write"
+        );
+        result
     };
     let got = check(&identity.to_string());
     assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
@@ -2517,6 +2534,119 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
         json!(["test"])
     );
     assert!(report["patch"].is_null());
+
+    // Supply the serialized checker report and the apply metadata for a noop.
+    // The completion step says ready, but finish must still require a push.
+    job.write("report.json", &report.to_string());
+    job.write("config.json", &policy["safe_outputs"].to_string());
+    job.write(
+        "agent_output.json",
+        &json!({"items": report["items"], "errors": []}).to_string(),
+    );
+    let applied = json!({"made": [], "already_applied": [], "pull_request": null});
+    job.write("applied.json", &applied.to_string());
+
+    let workflow = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/apply.yml");
+    let yaml = std::fs::read_to_string(workflow).unwrap();
+    let docs = yaml_rust2::YamlLoader::load_from_str(&yaml).unwrap();
+    let steps = docs[0]["jobs"]["apply"]["steps"].as_vec().unwrap();
+    let run_step = |key: &str, value: &str, ready: &str| {
+        let step = steps
+            .iter()
+            .find(|step| step[key].as_str() == Some(value))
+            .unwrap();
+        if !ready.is_empty() {
+            assert_eq!(
+                step["env"]["READY"].as_str(),
+                Some("${{ steps.complete.outputs.ready }}")
+            );
+        }
+        let script = step["run"].as_str().unwrap();
+        let output = job.path("step-output");
+        std::fs::write(&output, "").unwrap();
+        let mut bash = Command::new("bash");
+        if let Some(context) = step["env"]["CONTINUATION"].as_str() {
+            assert_eq!(
+                context,
+                "${{ fromJSON(inputs.policy).continuation-context }}"
+            );
+            bash.env("CONTINUATION", identity.to_string());
+        } else {
+            bash.env_remove("CONTINUATION");
+        }
+        let got = Finished::of(
+            bash.args(["-euo", "pipefail", "-c", script])
+                .env("EXIT", "0")
+                .env("REPORT", job.path("report.json"))
+                .env("GH_AW_TMP", &job.dir)
+                .env("RUNNER_TEMP", &job.dir)
+                .env("GITHUB_OUTPUT", &output)
+                .env("GITHUB_STEP_SUMMARY", job.path("step-summary"))
+                .env("GH_AW_SAFE_OUTPUTS_URLS", "allowed-or-code-region")
+                .env("GH_AW_ALLOWED_DOMAINS", "github.com")
+                .env(
+                    "RUN_URL",
+                    format!("https://github.com/{repository}/actions/runs/{RUN_ID}"),
+                )
+                .env("CHECKED_ARTIFACT_ID", "42")
+                .env("OUTPUT_REPO", &repository)
+                .env("READY", ready)
+                .env("GITHUB_RUN_ID", RUN_ID)
+                .env("GITHUB_RUN_ATTEMPT", "1")
+                .env("GITHUB_API_URL", &root)
+                .env("GH_TOKEN", "fixture-read-token")
+                .env_remove("APPLY_ROLE_BINDINGS")
+                .current_dir(&job.dir)
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(got.code, Some(EXIT_SUCCESS), "{value}: {}", got.all());
+        std::fs::read_to_string(output).unwrap()
+    };
+    std::fs::create_dir(job.path("apply-binary")).unwrap();
+    std::fs::copy(BIN, job.path("apply-binary/agentic-job")).unwrap();
+    job.write("step-summary", "");
+    let complete = run_step("id", "complete", "");
+    let ready = complete
+        .lines()
+        .find_map(|line| line.strip_prefix("ready="))
+        .unwrap();
+    assert_eq!(ready, "true", "{complete}");
+    let result = run_step("id", "result", "");
+    assert!(
+        result.lines().any(|line| line == "no-result=true"),
+        "{result}"
+    );
+    assert!(result.lines().any(|line| line == "result-url="), "{result}");
+    run_step(
+        "name",
+        "Mark a continued pull request ready, or a draft at a checkpoint",
+        ready,
+    );
+    assert_eq!(
+        mutations.load(Ordering::SeqCst),
+        0,
+        "unchanged evidence must not cause a readiness write"
+    );
+    assert_eq!(job.json("applied.json"), applied);
+    // Control: the same finish script does mark an opted-in draft ready once
+    // a push is recorded, so the assertion above is not vacuous.
+    job.write(
+        "applied.json",
+        &json!({"made": [{"type": "push_to_pull_request_branch"}], "already_applied": [],
+            "pull_request": null})
+        .to_string(),
+    );
+    run_step(
+        "name",
+        "Mark a continued pull request ready, or a draft at a checkpoint",
+        ready,
+    );
+    assert_eq!(mutations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        job.json("applied.json")["readiness"],
+        json!({"draft": false})
+    );
     for failure in [
         "wrong-source",
         "wrong-workflow",
