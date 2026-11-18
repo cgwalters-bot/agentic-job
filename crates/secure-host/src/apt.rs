@@ -1,10 +1,12 @@
 //! `agentic-job secure-host apt`: bound apt's network waits and keep it
-//! off the Azure mirror, as root, before any package is installed. For a
+//! off the cloud-region mirrors, as root, before any package is installed. For a
 //! disposable CI host only: it rewrites the runner's apt sources in place.
 //!
-//! Package bodies from `azure.archive.ubuntu.com` stalled, and mirror-list
-//! fallback alone did not prevent it, so that endpoint is replaced rather
-//! than reordered (which mirror+file would pick at random); suites,
+//! Package bodies from `azure.archive.ubuntu.com` stalled, and on 2026-11-18
+//! the EC2 regional mirrors (`us-east-2.ec2.archive.ubuntu.com`) delivered
+//! tens of kB/s where `archive.ubuntu.com` gave 23 MB/s (#4342). Mirror-list
+//! fallback alone did not prevent either, so those endpoints are replaced
+//! rather than reordered (which mirror+file would pick at random); suites,
 //! components, signing and the other mirrors are left as they are
 //! (cgwalters-forge/actions's secure-host/docs/setup.md). A host without
 //! `/etc/apt`, a dnf one, is left
@@ -35,10 +37,12 @@ const SOURCES: &[&str] = &[
 ];
 const SOURCES_DIR: &str = "sources.list.d";
 
-/// The Azure host as a whole name: followed by a path, a space or the end,
-/// so that `azure.archive.ubuntu.com.example` is not it.
-static AZURE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?-u:\b)(https?://)azure\.archive\.ubuntu\.com(/|\s|$)").expect("a valid pattern")
+/// A cloud-region archive mirror (Azure's, or an EC2 region's) as a whole
+/// name: followed by a path, a space or the end, so that
+/// `azure.archive.ubuntu.com.example` is not it.
+static CLOUD_MIRROR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?-u:\b)(https?://)(?:azure|[a-z0-9-]+\.ec2)\.archive\.ubuntu\.com(/|\s|$)")
+        .expect("a valid pattern")
 });
 
 /// The mirror lists apt's `mirror+file:` method reads, in priority order.
@@ -78,7 +82,7 @@ pub fn configure(apt: &Path) -> Result<()> {
         }
         let old =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let mut updated = AZURE
+        let mut updated = CLOUD_MIRROR
             .replace_all(&old, "${1}archive.ubuntu.com${2}")
             .into_owned();
         if MIRROR_LISTS.iter().any(|name| path == apt.join(name))
@@ -146,6 +150,16 @@ mod tests {
                 "sources.list.d/backup.sources.disabled",
                 "http://azure.archive.ubuntu.com/ubuntu",
                 "http://azure.archive.ubuntu.com/ubuntu",
+            ),
+            (
+                "sources.list.d/ec2.list",
+                "deb http://us-east-2.ec2.archive.ubuntu.com/ubuntu resolute main\n",
+                "deb http://archive.ubuntu.com/ubuntu resolute main\n",
+            ),
+            (
+                "sources.list.d/ec2-lookalike.list",
+                "deb http://us-east-2.ec2.archive.ubuntu.com.example/ubuntu resolute main\n",
+                "deb http://us-east-2.ec2.archive.ubuntu.com.example/ubuntu resolute main\n",
             ),
             (
                 "sources.list.d/adjacent.list",
