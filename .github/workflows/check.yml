@@ -200,11 +200,21 @@ jobs:
             safe-outputs
             workflow
           persist-credentials: false
+      # A reused checker must not read an earlier policy's title or body
+      # if this run's upload is missing. A single-ID download fails on a
+      # missing upload; a multi-ID download can warn and keep going.
+      - name: Clear previous check inputs
+        run: rm -rf "$JOB_DIR"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }},${{ fromJSON(inputs.policy).policy-artifact-id }}
+          artifact-ids: ${{ fromJSON(inputs.policy).binary-artifact-id }}
           path: .agentic-job
-          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ fromJSON(inputs.policy).policy-artifact-id }}
+          path: .agentic-job
+          digest-mismatch: error
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: ${{ fromJSON(inputs.policy).proposals-artifact == '' }}
         with:
@@ -239,13 +249,31 @@ jobs:
       # A refusal is written as check's report, for the refusal step below.
       - name: Validate the review verdict
         id: verdict
-        if: ${{ fromJSON(inputs.policy).review == 'true' }}
+        if: ${{ fromJSON(inputs.policy).review == 'true' || fromJSON(inputs.policy).review-draft-classifier != '' }}
         env:
           TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           REVIEW_LABEL_BOUND: ${{ fromJSON(inputs.policy).review-label-bound }}
           REVIEW_REPO: ${{ fromJSON(inputs.policy).repo }}
+          REVIEW: ${{ fromJSON(inputs.policy).review }}
+          REVIEW_DRAFT_CLASSIFIER: ${{ fromJSON(inputs.policy).review-draft-classifier }}
+          REVIEW_HEAD: ${{ fromJSON(inputs.policy).review-head }}
+          BASE: ${{ fromJSON(inputs.policy).base }}
         run: |
-          verdict=$("$JOB_DIR/agentic-job" review verdict --collected "$GH_AW_TMP/agent_output.json" --target "$TARGET" --report "$GH_AW_TMP/report.json")
+          snapshot=$JOB_DIR/dispatch-review.json
+          if [ "$REVIEW_DRAFT_CLASSIFIER" = true ]; then
+            [ "$REVIEW" = true ] || { echo '::error::draft classification requires a policy review'; exit 1; }
+            set -- --pull-request "$snapshot"
+          elif [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
+            echo '::error::unexpected draft classifier snapshot without policy opt-in'; exit 1
+          fi
+          verdict=$("$JOB_DIR/agentic-job" review verdict --collected "$GH_AW_TMP/agent_output.json" --target "$TARGET" --report "$GH_AW_TMP/report.json" "$@")
+          # The verdict command bounded the snapshot and matched the exact
+          # text. Also bind the snapshot to policy routing, even for a noop.
+          if [ "$REVIEW_DRAFT_CLASSIFIER" = true ]; then
+            jq -e --arg repo "$REVIEW_REPO" --arg pr "$TARGET" --arg head "$REVIEW_HEAD" --arg base "$BASE" \
+              '.base.repo.full_name == $repo and (.number | tostring) == $pr and .head.sha == $head and .base.ref == $base' "$snapshot" > /dev/null ||
+              { echo '::error::draft classifier snapshot does not match the policy review target'; exit 1; }
+          fi
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
       - name: Check the outputs against the policy
         id: checked

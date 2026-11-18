@@ -70,10 +70,14 @@ on:
         default: ""
       review-head:
         description: >-
-          With `review-item`, the full commit SHA its pull request must still be at, not a draft;
+          With `review-item`, the full commit SHA its pull request must still be at, not a draft unless `review-draft-classifier` is set;
           the review's task is then `review-task`, and `agent` and `model` must be set
         type: string
         default: ""
+      review-draft-classifier:
+        description: Trusted caller opt-in for an exact-head draft review with one add_comment or noop; never forward a dispatch input
+        type: boolean
+        default: false
       push-item:
         description: >-
           Positive pull request number in `repo` whose branch a branch run starts from and pushes one
@@ -340,6 +344,9 @@ on:
       review-label-bound:
         description: Effective add_labels safe-output bound, for review validation; null when disabled
         value: ${{ jobs.policy.outputs.review-label-bound }}
+      review-draft-classifier:
+        description: True only for an admitted classifier dispatch; its snapshot is in the policy artifact
+        value: ${{ jobs.policy.outputs.review-draft-classifier }}
       continuation-context:
         description: Trusted admitted continuation repository, PR, head, run and attempt; empty by default
         value: ${{ jobs.policy.outputs.continuation-context }}
@@ -487,6 +494,7 @@ jobs:
     outputs:
       binary-artifact-id: ${{ steps.binary.outputs.artifact-id }}
       review-label-bound: ${{ steps.request.outputs.review-label-bound }}
+      review-draft-classifier: ${{ steps.dispatch-review.outputs.review-draft-classifier }}
       external-run-id: ${{ steps.request.outputs.external-run-id }}
       continuation-context: ${{ steps.request.outputs.continuation-context }}
       policy-artifact-id: ${{ steps.policy.outputs.artifact-id }}
@@ -723,7 +731,7 @@ jobs:
       # body fenced as untrusted text, as for an event review.
       - name: Resolve a dispatched review
         id: dispatch-review
-        if: ${{ inputs.review-item != '' || inputs.review-head != '' }}
+        if: ${{ inputs.review-item != '' || inputs.review-head != '' || inputs.review-draft-classifier }}
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_HEAD: ${{ inputs.review-head }}
@@ -742,13 +750,25 @@ jobs:
           BASE: ${{ inputs.base }}
           OUTPUT_REPO: ${{ inputs.output-repo }}
           APPLY_PARTIAL: ${{ inputs.apply-partial }}
+          REVIEW_DRAFT_CLASSIFIER: ${{ inputs.review-draft-classifier }}
+          PUSH_ITEM: ${{ inputs.push-item }}
         run: |
+          if [ "$REVIEW_DRAFT_CLASSIFIER" = true ]; then
+            [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ -z "$PUSH_ITEM" ] || { echo '::error::draft classification requires a review dispatch, not an event review or a push'; exit 1; }
+            export OUTPUT_REPO=${OUTPUT_REPO:-$GITHUB_REPOSITORY}
+          fi
           target=$("$JOB_DIR/bin/agentic-job" review dispatch-target)
           gh api "$(jq -r '"repos/\(.owner)/\(.repo)/pulls/\(.pull_number)"' <<< "$target")" > "$RUNNER_TEMP/dispatch-review.json"
           head=$("$JOB_DIR/bin/agentic-job" review resolve-dispatch --pull-request "$RUNNER_TEMP/dispatch-review.json")
           echo "review-head=$head" >> "$GITHUB_OUTPUT"
           [ -z "$REQUESTED_HEAD" ] ||
             "$JOB_DIR/bin/agentic-job" review task "$REVIEW_TASK" --pull-request "$RUNNER_TEMP/dispatch-review.json" > "$RUNNER_TEMP/review-task.md"
+          # Retain the very snapshot used to write the task. A producer must
+          # not be able to replace the title or body check holds its verdict to.
+          if [ "$REVIEW_DRAFT_CLASSIFIER" = true ]; then
+            cp "$RUNNER_TEMP/dispatch-review.json" "$JOB_DIR/dispatch-review.json"
+            echo 'review-draft-classifier=true' >> "$GITHUB_OUTPUT"
+          fi
       # A run that pushes to a pull request starts from its branch at the
       # head read here with the read-only token, never from agent text or
       # the caller's task; the binary checks the branch against the bounds
@@ -1027,6 +1047,7 @@ jobs:
             .agentic-job/config.toml
             .agentic-job/public-base.json
             .agentic-job/run.json
+            .agentic-job/dispatch-review.json
           retention-days: 30
           if-no-files-found: error
 

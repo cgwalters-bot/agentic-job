@@ -603,15 +603,18 @@ head, title and description. So the binary carries the result through
 the review's existing stages, off by default, and nothing here turns it
 on.
 
-The trusted caller opts in by setting `REVIEW_DRAFT_CLASSIFIER=true` in
-the environment of every stage below, from its own configuration, never
-an input a dispatcher sets; anything but `true`, `false` or unset fails.
-It applies only to review.yml's dispatch of a requested head (`pr`,
-`head`, `pool`) asking for the verdict alone (`outputs: add_comment,noop`,
-`max-outputs: 1`), as an inline comment would take findings out of the
-body the pass reads; an event review, a dispatch without a head or one
-asking for inline comments fails with it set, so a caller sets it only
-on a classifier run, never job-wide. With it:
+The trusted caller opts in with the `policy.yml` boolean input
+`review-draft-classifier: true` (default `false`). Choose it in trusted
+caller configuration, never from `workflow_dispatch` fields, head code
+or agent output. This is for a `workflow_dispatch` exact-head review:
+`event: false`, `review: true`, `kind: analysis`, `review-item` and
+`comment-target` both the PR number, `review-head` the requested SHA,
+`repo` and `base` the target, and the trusted task and resolved agent/model
+as for an ordinary exact-head dispatch. Use `outputs: add_comment,noop`,
+`max-outputs: '1'`, `notify: none` and `apply-partial: false`. Do not set
+`push-item` or redirect the output repository. Inline comments would take
+findings out of the body the pass reads. The existing `review.yml` caller
+does not opt in. With it:
 
 - `review resolve-dispatch` admits a draft, and only a draft, open on the
   configured base at the requested head, with a title. Without it a draft
@@ -664,16 +667,32 @@ unchanged; it grants no fix, ready, promotion or merge authority beyond
 the approval any review submits. The pass still applies its own file,
 size, CI and run provenance checks.
 
-For actions#200, a caller needs a release of this binary with this
-change; this change publishes none and names no revision. The wrapper
-then pins `policy.yml`, `check.yml` and the binary together at it, sets
-the variable on the policy job's dispatch step, check's verdict step and
-the submit step of a classifier dispatch only, asks that dispatch for
-the verdict alone, passes the policy job's `dispatch-review.json` to the
-check job (as an artifact of the policy job, by ID) for
-`--pull-request`, passes `BASE` to submit, and names the submit job
-`agent-board-review-result-v1` only where the variable is set. Those
-workflow changes are not made here.
+### Checked handoff to a wrapper
+
+Pin `policy.yml`, `check.yml` and their binary together at a revision that
+supports the input. Pass `policy: ${{ toJSON(needs.policy.outputs) }}` to
+check, as for ordinary reviews. An admitted classifier dispatch emits
+`review-draft-classifier: 'true'` and includes `dispatch-review.json` in
+`policy-artifact-id`. The file is the same GitHub API snapshot policy used
+to write the task, not another read after the agent runs. Check downloads
+it by the trusted policy artifact ID, separately from proposals. It binds
+the snapshot's repository, PR, head and base to the policy outputs, and
+the verdict command matches the result's exact title and description to
+that snapshot. Mode and evidence are not separate check inputs.
+
+For the downstream wrapper's submit path, require the policy opt-in, a
+successful agent exit (`0`), successful check, a nonempty released check
+artifact ID and a checked `APPROVE` or `CHANGES`; a verdict word alone is
+not evidence that check finished. Download `agent_output.json` from that
+checked artifact by ID in the same run, never from the agent or from a
+previous run. Run `review submit --accepted` on that file with the existing
+submit environment, taking `PULL`, `HEAD_SHA` and `BASE` from policy's
+`comment-target`, `review-head` and `base` in the target repository. Set
+`REVIEW_DRAFT_CLASSIFIER: 'true'` from policy's opt-in, not dispatch, and
+name the submit job `agent-board-review-result-v1` only in that mode. Do not
+use the carried approval path. Submit revalidates the live PR as described
+above, and the poller must revalidate again before using the result. No
+caller pin, release, publication setting or write permission changes here.
 
 ## Configuration
 
@@ -802,8 +821,9 @@ Dispatched reviews use `agentic-job review dispatch-target` before the policy
 job's read-only API call, then `review resolve-dispatch --pull-request FILE`
 to bind the response to the selected open PR, configured repository and base,
 and exact head SHA; with `REQUESTED_HEAD` (`review-head`), also a pull request
-that is not a draft and is still at that head, and a pool that resolved to a
-supported agent and a model. Neither command uses the fork's branch name. The
+that is still at that head and not a draft (unless opted into draft
+classification), and a pool that resolved to a supported agent and a model.
+Neither command uses the fork's branch name. The
 record job's `review status` with `RECORD=true` sets only a pending status,
 and none over an existing one. An event
 review's admission is narrowed by `review admit`, and its task, with the

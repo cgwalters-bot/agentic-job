@@ -3067,6 +3067,9 @@ fn wrapper_forwards_policy_settings_without_reinterpretation() {
     // Cross-run output must use the caller's explicit policy/check/apply
     // composition, never the wrapper's same-run agent production path.
     assert!(wrapper["on"]["workflow_call"]["inputs"]["external-receipt"].is_badvalue());
+    // A classifier needs a caller's checked submit gate; the generic
+    // wrapper does not offer classifier admission on its own.
+    assert!(wrapper["on"]["workflow_call"]["inputs"]["review-draft-classifier"].is_badvalue());
     let own = [
         "agent-runner",
         "github-reads",
@@ -3079,7 +3082,7 @@ fn wrapper_forwards_policy_settings_without_reinterpretation() {
             .unwrap()
             .keys()
             .map(|key| key.as_str().unwrap().to_owned())
-            .filter(|key| key != "external-receipt")
+            .filter(|key| !matches!(key.as_str(), "external-receipt" | "review-draft-classifier"))
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -4427,6 +4430,391 @@ fn refusals_reach_the_conclusion_comment() {
     }
 }
 
+/// Run the shipped dispatch and verdict steps with a local forge response.
+/// Model inputs are the collected JSON and the producer's own upload directory;
+/// neither can supply the classifier opt-in or its snapshot.
+#[test]
+fn draft_classifier_uses_only_the_policy_dispatch_snapshot() {
+    use serde_json::json;
+    use std::fs;
+
+    let policy = definition("policy.yml");
+    let check = definition("check.yml");
+    let dispatch = named_step(&policy, "Resolve a dispatched review");
+    let verdict = named_step(&check, "Validate the review verdict");
+    assert_eq!(
+        policy["on"]["workflow_call"]["inputs"]["review-draft-classifier"]["default"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        dispatch["env"]["REVIEW_DRAFT_CLASSIFIER"].as_str(),
+        Some("${{ inputs.review-draft-classifier }}")
+    );
+    assert_eq!(
+        verdict["env"]["REVIEW_DRAFT_CLASSIFIER"].as_str(),
+        Some("${{ fromJSON(inputs.policy).review-draft-classifier }}")
+    );
+    assert_eq!(
+        policy["jobs"]["policy"]["outputs"]["review-draft-classifier"].as_str(),
+        Some("${{ steps.dispatch-review.outputs.review-draft-classifier }}")
+    );
+    assert_eq!(
+        policy["on"]["workflow_call"]["outputs"]["review-draft-classifier"]["value"].as_str(),
+        Some("${{ jobs.policy.outputs.review-draft-classifier }}")
+    );
+    assert!(steps(&policy).iter().any(|step| {
+        step["id"].as_str() == Some("policy")
+            && step["with"]["path"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .any(|line| line == ".agentic-job/dispatch-review.json")
+    }));
+    let check_steps = check["jobs"]["check"]["steps"].as_vec().unwrap();
+    let download = |ids| {
+        check_steps
+            .iter()
+            .find(|step| step["with"]["artifact-ids"].as_str() == Some(ids))
+            .unwrap()
+    };
+    let trusted = download("${{ fromJSON(inputs.policy).policy-artifact-id }}");
+    let proposals = download("${{ inputs.safe-outputs-artifact-id }}");
+    assert_eq!(trusted["with"]["path"].as_str(), Some(".agentic-job"));
+    assert_eq!(trusted["with"]["digest-mismatch"].as_str(), Some("error"));
+    assert_eq!(
+        proposals["with"]["path"].as_str(),
+        Some(".agentic-job/safe-outputs")
+    );
+    // An early verdict word is not the checked handoff: a failed
+    // check (or an expected refusal) cannot upload accepted output.
+    let upload = check_steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("upload"))
+        .unwrap();
+    assert_eq!(
+        upload["if"].as_str(),
+        Some("${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}")
+    );
+    assert_eq!(
+        check["jobs"]["detect"]["if"].as_str(),
+        Some("${{ needs.check.outputs.artifact-id != '' }}")
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let job = root.join(".agentic-job");
+    fs::create_dir_all(job.join("bin")).unwrap();
+    std::os::unix::fs::symlink(BIN, job.join("bin/agentic-job")).unwrap();
+    executable(
+        &root.join("gh"),
+        "#!/bin/bash\n[ \"$*\" = 'api repos/example-org/example/pulls/12' ] || exit 9\ncat \"$RESPONSE\"\n",
+    );
+    let search = format!("{}:/usr/local/bin:/usr/bin:/bin", root.display());
+    let head = "a".repeat(40);
+    let repo = "example-org/example";
+    let pr = json!({"number": 12, "state": "open", "draft": true,
+        "base": {"ref":"main", "repo":{"full_name":repo}}, "head":{"sha":head},
+        "title":"docs: Correct spelling", "body":"First line\n\nLast line.\n"});
+    let response = root.join("pull.json");
+    let snapshot = job.join("dispatch-review.json");
+    let task = root.join("task.md");
+    let output = root.join("outputs");
+    fs::write(&task, "Trusted base task\n").unwrap();
+    let resolve = |mode, event| {
+        fs::write(&output, "").unwrap();
+        run_step(
+            "policy.yml",
+            "Resolve a dispatched review",
+            root,
+            &[
+                ("PATH", &search),
+                ("RESPONSE", path(&response)),
+                ("JOB_DIR", path(&job)),
+                ("RUNNER_TEMP", path(root)),
+                ("GITHUB_OUTPUT", path(&output)),
+                ("REVIEW_DRAFT_CLASSIFIER", mode),
+                ("REQUESTED_HEAD", &head),
+                ("REVIEW_TASK", "task.md"),
+                ("AGENT", "opencode"),
+                ("MODEL", "test"),
+                ("REVIEW", "true"),
+                ("EVENT", "false"),
+                ("KIND", "analysis"),
+                ("OUTPUTS", "add_comment,noop"),
+                ("MAX_OUTPUTS", "1"),
+                ("NOTIFY", "none"),
+                ("TARGET", "12"),
+                ("ITEM", "12"),
+                ("REPO", repo),
+                ("BASE", "main"),
+                ("APPLY_PARTIAL", "false"),
+                ("GITHUB_REPOSITORY", repo),
+                ("GITHUB_EVENT_NAME", event),
+            ],
+        )
+    };
+    fs::write(&response, pr.to_string()).unwrap();
+    for (mode, event, reason) in [
+        ("false", "workflow_dispatch", "not a draft"),
+        ("true", "pull_request_target", "requires a review dispatch"),
+    ] {
+        let got = resolve(mode, event);
+        assert!(!got.status.success(), "{got:?}");
+        assert!(
+            String::from_utf8_lossy(&got.stderr).contains(reason)
+                || String::from_utf8_lossy(&got.stdout).contains(reason),
+            "{reason}: {got:?}"
+        );
+        assert!(!snapshot.exists());
+        assert_eq!(fs::read_to_string(&output).unwrap(), "");
+    }
+    let mut ready = pr.clone();
+    ready["draft"] = json!(false);
+    fs::write(&response, ready.to_string()).unwrap();
+    let got = resolve("false", "workflow_dispatch");
+    assert!(got.status.success(), "{got:?}");
+    assert!(!snapshot.exists());
+    assert_eq!(
+        fs::read_to_string(&output).unwrap(),
+        format!("review-head={head}\n")
+    );
+
+    fs::write(&response, pr.to_string()).unwrap();
+    let got = resolve("true", "workflow_dispatch");
+    assert!(got.status.success(), "{got:?}");
+    assert_eq!(fs::read(&snapshot).unwrap(), fs::read(&response).unwrap());
+    let settings = fs::read_to_string(&output).unwrap();
+    let settings: std::collections::HashMap<_, _> = settings
+        .lines()
+        .map(|line| line.split_once('=').unwrap())
+        .collect();
+    assert!(
+        fs::read_to_string(root.join("review-task.md"))
+            .unwrap()
+            .contains("## Draft classifier result")
+    );
+
+    let fields = json!({"schema":"agent-board/draft-review/v1", "repository":repo, "pr":12,
+        "reviewed_head":head, "title":pr["title"], "description":pr["body"],
+        "semantic_diff":"pass", "description_assessment":"matches", "change_category":"docs",
+        "risk":"none", "evidence":"Inspected the README diff", "reason":"Spelling only"});
+    let comment = |fields: &serde_json::Value| {
+        json!({"type":"add_comment",
+        "body":format!("VERDICT: APPROVE\n\n```agent-board-draft-review\n{fields}\n```\n")})
+    };
+    let mode = settings["review-draft-classifier"];
+    let checked_head = settings["review-head"];
+    // Model the two downloads into a different runner's workspace, first
+    // with the policy upload missing and a stale file left by an earlier run.
+    let checker = tempfile::tempdir().unwrap();
+    let check_root = checker.path();
+    let check_job = check_root.join(".agentic-job");
+    let evidence = check_job.join("dispatch-review.json");
+    fs::create_dir(&check_job).unwrap();
+    fs::write(&evidence, pr.to_string()).unwrap();
+    let cleared = run_step(
+        "check.yml",
+        "Clear previous check inputs",
+        check_root,
+        &[("JOB_DIR", path(&check_job))],
+    );
+    assert!(cleared.status.success(), "{cleared:?}");
+    assert!(!evidence.exists());
+    fs::create_dir(&check_job).unwrap();
+    std::os::unix::fs::symlink(BIN, check_job.join("agentic-job")).unwrap();
+    let raw = check_job.join("safe-outputs");
+    fs::create_dir(&raw).unwrap();
+
+    let validate = |items: Option<serde_json::Value>, overrides: &[(&str, &str)]| {
+        if let Some(items) = items {
+            fs::write(
+                check_root.join("agent_output.json"),
+                json!({"items":items,"errors":[]}).to_string(),
+            )
+            .unwrap();
+        }
+        fs::write(&output, "").unwrap();
+        let mut env = vec![
+            ("JOB_DIR", path(&check_job)),
+            ("GH_AW_TMP", path(check_root)),
+            ("GITHUB_OUTPUT", path(&output)),
+            ("REVIEW_DRAFT_CLASSIFIER", mode),
+            ("REVIEW", "true"),
+            ("REVIEW_REPO", repo),
+            ("TARGET", "12"),
+            ("REVIEW_HEAD", checked_head),
+            ("BASE", "main"),
+        ];
+        env.extend_from_slice(overrides);
+        run_step("check.yml", "Validate the review verdict", check_root, &env)
+    };
+    let result = json!([comment(&fields)]);
+    let noop = json!([{"type":"noop", "message":"No verdict"}]);
+    let refuse = |got: Output| {
+        assert!(!got.status.success(), "{got:?}");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "");
+    };
+    fs::copy(&snapshot, raw.join("dispatch-review.json")).unwrap();
+    refuse(validate(Some(result.clone()), &[]));
+    fs::remove_file(check_root.join("agent_output.json")).unwrap();
+    fs::remove_file(raw.join("dispatch-review.json")).unwrap();
+    fs::copy(&snapshot, &evidence).unwrap();
+
+    // The binary sees a real verdict line from the untrusted upload, not
+    // just a fixture pre-shaped to match the collector's output.
+    fs::write(
+        root.join("bounds.toml"),
+        format!(
+            r#"
+hosts = ["github.com"]
+repos = ["{repo}"]
+bases = ["main"]
+max_outputs = 1
+max_patch_bytes = 1024
+max_patch_files = 1
+[github.outputs]
+add_comment = {{ max = 1 }}
+noop = {{ max = 1 }}
+"#
+        ),
+    )
+    .unwrap();
+    let request = run_step(
+        "policy.yml",
+        "Check the request against the caller's bounds",
+        root,
+        &[
+            ("JOB_DIR", path(&job)),
+            ("ALLOW", "bounds.toml"),
+            ("REPO", repo),
+            ("BASE", "main"),
+            ("KIND", "analysis"),
+            ("OUTPUTS", "add_comment,noop"),
+            ("MAX_OUTPUTS", "1"),
+            ("TARGET", "12"),
+            ("GITHUB_OUTPUT", path(&output)),
+        ],
+    );
+    assert!(request.status.success(), "{request:?}");
+    let captured = run_step(
+        "policy.yml",
+        "Capture opted-in public base secret evidence",
+        root,
+        &[("JOB_DIR", path(&job)), ("GITHUB_RUN_ID", "42")],
+    );
+    assert!(captured.status.success(), "{captured:?}");
+    for file in ["policy.json", "public-base.json"] {
+        fs::copy(job.join(file), check_job.join(file)).unwrap();
+    }
+    fs::write(raw.join("outputs.jsonl"), format!("{}\n", result[0])).unwrap();
+    let summary = check_root.join("summary");
+    let env = [
+        ("JOB_DIR", path(&check_job)),
+        ("GH_AW_TMP", path(check_root)),
+        ("GITHUB_OUTPUT", path(&output)),
+        ("COMMENT_REPO", repo),
+        ("COMMENT_TARGET", "12"),
+        ("EXPECT_REFUSAL", "false"),
+        ("GITHUB_RUN_ID", "42"),
+        ("GITHUB_STEP_SUMMARY", path(&summary)),
+    ];
+    for step in [
+        "Ingest the outputs with agentic-job collect",
+        "The collector refused nothing",
+    ] {
+        let got = run_step("check.yml", step, check_root, &env);
+        assert!(got.status.success(), "{step}: {got:?}");
+    }
+    let got = validate(None, &[]);
+    assert!(got.status.success(), "{got:?}");
+    assert_eq!(fs::read_to_string(&output).unwrap(), "verdict=APPROVE\n");
+    let got = run_step(
+        "check.yml",
+        "Check the outputs against the policy",
+        check_root,
+        &env,
+    );
+    assert!(got.status.success(), "{got:?}");
+    assert!(
+        fs::read_to_string(&output)
+            .unwrap()
+            .contains("has-patch=false")
+    );
+
+    let got = validate(Some(noop.clone()), &[]);
+    assert!(got.status.success(), "{got:?}");
+    assert_eq!(fs::read_to_string(&output).unwrap(), "verdict=\n");
+    let off = [("REVIEW_DRAFT_CLASSIFIER", "")];
+    refuse(validate(Some(result.clone()), &off));
+    refuse(validate(Some(result.clone()), &[("REVIEW", "false")]));
+    for setting in [
+        ("REVIEW_REPO", "example-org/other"),
+        ("TARGET", "13"),
+        ("REVIEW_HEAD", &"b".repeat(40)),
+        ("BASE", "other"),
+    ] {
+        // Policy scope must still match when there is no agent verdict to compare.
+        refuse(validate(Some(noop.clone()), &[setting]));
+    }
+    for field in ["title", "description"] {
+        let mut stale = fields.clone();
+        stale[field] = json!("Edited text");
+        refuse(validate(Some(json!([comment(&stale)])), &[]));
+    }
+    refuse(validate(Some(json!([comment(&fields), noop[0]])), &[]));
+
+    fs::remove_file(&evidence).unwrap();
+    refuse(validate(Some(result), &off));
+    let got = validate(
+        Some(json!([{"type":"add_comment", "body":"VERDICT: APPROVE"}])),
+        &off,
+    );
+    assert!(got.status.success(), "{got:?}");
+
+    // Exercise the existing submit step with the documented wrapper
+    // bindings. A failed or skipped check, a failed agent, and a noop
+    // all stop before the forge request, even with a plausible file.
+    fs::create_dir(root.join("bin")).unwrap();
+    std::os::unix::fs::symlink(BIN, root.join("bin/agentic-job")).unwrap();
+    fs::create_dir(root.join("checked")).unwrap();
+    fs::write(
+        root.join("checked/agent_output.json"),
+        json!({"items":[comment(&fields)],"errors":[]}).to_string(),
+    )
+    .unwrap();
+    for (check, agent, verdict) in [
+        ("failure", "0", "APPROVE"),
+        ("skipped", "0", "APPROVE"),
+        ("success", "1", "APPROVE"),
+        ("success", "0", ""),
+    ] {
+        fs::write(&output, "").unwrap();
+        let got = run_step(
+            "review.yml",
+            "Submit the checked verdict as the review",
+            root,
+            &[
+                ("RUNNER_TEMP", path(root)),
+                ("GITHUB_OUTPUT", path(&output)),
+                ("PULL", "12"),
+                ("GITHUB_REPOSITORY", repo),
+                ("HEAD_SHA", checked_head),
+                ("BASE", "main"),
+                ("REAL_REVIEWS", "true"),
+                ("REVIEW_DRAFT_CLASSIFIER", mode),
+                ("CHECK_RESULT", check),
+                ("AGENT_EXIT", agent),
+                ("VERDICT", verdict),
+                ("GH_TOKEN", "fixture"),
+                ("GITHUB_API_URL", "https://127.0.0.1:1"),
+                ("GITHUB_RUN_ID", "42"),
+            ],
+        );
+        assert!(got.status.success(), "{got:?}");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "review-url=\n");
+    }
+}
+
 /// The collector is agentic-job's, and gh-aw's is not set up: a line it
 /// refused fails the step after it, with the reason in agent_output.json,
 /// and an error of its own fails its own.
@@ -4743,8 +5131,8 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         &[
             r"failure\(\) \|\| steps.checked.outputs.refused == 'true'",
             r"\n {12}\$\{\{ env.GH_AW_TMP \}\}/folded.json\n",
-            r#"verdict=\$\("\$JOB_DIR/agentic-job" review verdict --collected "\$GH_AW_TMP/agent_output.json" --target "\$TARGET" --report "\$GH_AW_TMP/report.json"\)"#,
-            r"if: \$\{\{ fromJSON\(inputs.policy\).review == 'true' \}\}",
+            r#"verdict=\$\("\$JOB_DIR/agentic-job" review verdict --collected "\$GH_AW_TMP/agent_output.json" --target "\$TARGET" --report "\$GH_AW_TMP/report.json" "\$@"\)"#,
+            r"if: \$\{\{ fromJSON\(inputs.policy\).review == 'true' \|\| fromJSON\(inputs.policy\).review-draft-classifier != '' \}\}",
             r"name: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact \}\}",
             r"artifact-ids: \$\{\{ inputs.safe-outputs-artifact-id \}\}",
             r#"agentic-job" check --policy"#,
@@ -4914,7 +5302,7 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         "policy.yml",
         "policy",
         &[
-            r"if: \$\{\{ inputs.review-item != '' \|\| inputs.review-head != '' \}\}\n",
+            r"if: \$\{\{ inputs.review-item != '' \|\| inputs.review-head != '' \|\| inputs.review-draft-classifier \}\}\n",
             r"REQUESTED_HEAD: \$\{\{ inputs.review-head \}\}\n",
             r#"\[ -z "\$REQUESTED_HEAD" \] \|\|\n\s+"\$JOB_DIR/bin/agentic-job" review task "\$REVIEW_TASK" --pull-request "\$RUNNER_TEMP/dispatch-review.json" > "\$RUNNER_TEMP/review-task.md"\n"#,
             r#"elif \[ -n "\$REQUESTED_HEAD" \]; then cp "\$RUNNER_TEMP/review-task.md" "\$JOB_DIR/task.md"\n"#,

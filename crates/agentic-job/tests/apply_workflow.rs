@@ -503,9 +503,13 @@ fn advisory_uses_the_same_check_artifact_and_cancellation_gates() {
             .contains(".workflow_run.id")
     );
     let check = definition("check.yml");
+    // Advisory has neither switch: only verdict reviews and classifier
+    // claims (which must also prove they are reviews) take this step.
     assert_eq!(
         step(&check, "check", "Validate the review verdict")["if"].as_str(),
-        Some("${{ fromJSON(inputs.policy).review == 'true' }}")
+        Some(
+            "${{ fromJSON(inputs.policy).review == 'true' || fromJSON(inputs.policy).review-draft-classifier != '' }}"
+        )
     );
     let admission = step(&policy, "policy", "Check the proposals mode");
     let dir = TempDir::new().unwrap();

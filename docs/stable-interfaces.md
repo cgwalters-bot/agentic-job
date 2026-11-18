@@ -197,6 +197,13 @@ changes rulesets. See [review escalation](review.md#bounded-security-escalation)
 which a scheduler reads back; the repository variables `REVIEW_POOLS` and
 `REVIEW_RECORD_ONLY` configure it ([dispatched reviews](review.md#dispatched-reviews)).
 
+For a composed caller, `policy.yml` takes the trusted, default-off
+`review-draft-classifier` boolean. An admitted exact-head classifier dispatch
+returns `review-draft-classifier: 'true'` and includes `dispatch-review.json`
+in the policy artifact. `check.yml` takes both through its existing `policy`
+input, not through proposal inputs. See the [classifier handoff](review.md#checked-handoff-to-a-wrapper)
+for caller inputs and submission requirements.
+
 ## Configuration files
 
 Job TOML can opt into `agent.subagents = [{ name, model, description }]`
