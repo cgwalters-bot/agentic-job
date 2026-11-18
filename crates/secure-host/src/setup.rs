@@ -376,9 +376,11 @@ const INSTALL_ATTEMPTS: u32 = 4;
 const INSTALL_PAUSE: Duration = Duration::from_secs(20);
 
 /// One budget for apt's downloads and index refresh, including DNS waits.
-/// A failed name lookup fails at once; this bounds a hung one while letting a
-/// slow but healthy mirror deliver a job's packages (the Rust toolchain is
-/// about 90 MB, and 45 and 180 seconds both refused such downloads mid-way).
+/// Apt's own retries and idle timeout (from the host's apt configuration)
+/// handle a stalled connection; this bounds the whole acquisition while
+/// letting a slow but working mirror deliver a job's packages (the Rust
+/// toolchain is about 90 MB, and 45 and 180 seconds both cut such a download
+/// off mid-way).
 const APT_DOWNLOAD_SECONDS: u64 = 600;
 
 /// Sets the host up. READ reads and checks the program's configuration
