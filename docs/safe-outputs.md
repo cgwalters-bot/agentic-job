@@ -1287,12 +1287,20 @@ existing checker-owned, attempt-bound artifact above, not a parallel receipt.
 The #3381 consumer must authenticate that artifact and match the whole admitted
 repository/PR/head/producer run/attempt and verifier specification; an outcome,
 noop, missing checkpoint or `continuation` alone is never sufficient. Consumption
-and apply readiness remain unimplemented here. Agent-board #852 integration and
-tracker #1071's separately authorized live acceptance remain outside this change.
+and apply readiness remain unimplemented here, and the result stays
+diagnostic-only: GitHub's mark-ready mutation cannot enforce the checked head
+and absence of `hold` at write time, and either can change after a fresh read.
+Do not enable unchanged readiness without a write that enforces both
+conditions. Agent-board #852 integration and tracker #1071's separately
+authorized live acceptance remain outside this change.
 
 `tests/run.rs` exercises the serialized producer → collector → independent CLI
 checker with authenticated local API fixtures, including a positive control and
 adversarial identity, source, checkout, result, context and checkpoint cases.
+It passes a verified report through the apply workflow's completion, result
+and finish scripts and checks that no readiness mutation or result is reported;
+a control through the same finish script with a recorded push marks the draft
+ready.
 The pre-existing serialized fallback still proves that legacy complete-looking
 outcomes/noops are diagnostics and raw/invented evidence is refused. Artifact
 attempt/replay and apply identity regressions remain in the workflow tests.
