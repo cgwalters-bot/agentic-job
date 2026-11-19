@@ -1,6 +1,7 @@
 //! The image and the loader refuse a host that either runtime layout
-//! prepared before they change anything on it: the host keeps the binary
-//! it has, and no other layout's files appear beside it.
+//! prepared before they change anything on it, and the image one whose
+//! markers it cannot inspect: the host keeps the binary it has, and no
+//! other layout's files appear beside it.
 //!
 //! This plants each layout's markers as root through sudo: it is for a
 //! machine that is thrown away, BEFORE secure-host has run there.
@@ -79,37 +80,43 @@ fn installed() -> Vec<String> {
 /// Runs ARGS as root with MARKER planted, and checks that they are refused
 /// for it and change nothing installed or marked.
 fn refused_with(marker: &str, args: &[&str]) -> Result<(), String> {
+    refused(Some(marker), args, &format!("{marker} already exists"))
+}
+
+/// Runs ARGS as root with PLANTED, if any, planted, and checks that they
+/// fail saying WANT and change nothing installed or marked.
+fn refused(planted: Option<&str>, args: &[&str], want: &str) -> Result<(), String> {
     let before = installed();
-    assert!(
-        sudo(&["mkdir", marker]).status.success(),
-        "planting {marker}"
-    );
+    if let Some(marker) = planted {
+        assert!(
+            sudo(&["mkdir", marker]).status.success(),
+            "planting {marker}"
+        );
+    }
     let out = sudo(args);
     let after = installed();
     let present = markers();
-    assert!(
-        sudo(&["rmdir", marker]).status.success(),
-        "removing {marker}"
-    );
+    if let Some(marker) = planted {
+        assert!(
+            sudo(&["rmdir", marker]).status.success(),
+            "removing {marker}"
+        );
+    }
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let want = format!("{marker} already exists");
     let mut wrong = Vec::new();
-    if out.status.success() || !stderr.contains(&want) {
-        wrong.push(format!(
-            "{}: not refused for {marker}: {stderr}",
-            out.status
-        ));
+    if out.status.success() || !stderr.contains(want) {
+        wrong.push(format!("{}: not refused with {want}: {stderr}", out.status));
     }
     if before != after {
         wrong.push(format!("changed {before:?} to {after:?}"));
     }
-    if present != [marker] {
+    if present != Vec::from_iter(planted) {
         wrong.push(format!("left {present:?}"));
     }
     if wrong.is_empty() {
         Ok(())
     } else {
-        Err(format!("{args:?} with {marker}: {}", wrong.join("; ")))
+        Err(format!("{args:?} with {planted:?}: {}", wrong.join("; ")))
     }
 }
 
@@ -152,9 +159,21 @@ fn a_prepared_host_is_refused_before_anything_changes() {
         &image,
         config,
     ];
+    // Without --privileged nsenter cannot enter the host's namespace, so
+    // the image cannot inspect the markers and must not take that for a
+    // fresh host.
+    let unprivileged: Vec<&str> = run
+        .into_iter()
+        .filter(|&arg| arg != "--privileged")
+        .collect();
     let wrong: Vec<String> = MARKERS
         .into_iter()
         .flat_map(|marker| [refused_with(marker, &loader), refused_with(marker, &run)])
+        .chain([refused(
+            None,
+            &unprivileged,
+            "cannot tell that this host is a fresh one",
+        )])
         .filter_map(Result::err)
         .collect();
     if planted {

@@ -5,9 +5,7 @@
 //! image and their readers together. Never mix layouts on a running host:
 //! in particular a check record or a BPF pin from one is not proof for another.
 
-use std::path::Path;
-
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, bail};
 
 /// Each layout's setup marker, neutral then legacy: root's configuration
 /// directory, which setup creates.
@@ -44,10 +42,19 @@ pub(crate) fn refusal(path: &str) -> String {
 /// Refuse a host on which any of PATHS exists: a host a run of either
 /// layout already prepared, which a build of the other would otherwise
 /// take for a fresh one. Configuration and pins are still read only from
-/// this build's own layout.
+/// this build's own layout. Only a lookup that finds no entry, not even a
+/// dangling symbolic link, counts as absence; any other error refuses.
 pub(crate) fn refuse_prepared<'a>(paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
     for path in paths {
-        ensure!(!Path::new(path).exists(), refusal(path));
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => bail!(refusal(path)),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("inspecting {path}: cannot tell that this host is a fresh one")
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -77,6 +84,29 @@ mod tests {
             );
             std::fs::remove_dir(prior).unwrap();
         }
+    }
+
+    #[test]
+    fn a_dangling_or_uninspectable_marker_is_refused() {
+        let host = tempfile::tempdir().unwrap();
+        let link = host.path().join("link");
+        std::os::unix::fs::symlink(host.path().join("nowhere"), &link).unwrap();
+        let link = link.to_str().unwrap();
+        let err = refuse_prepared([link]).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with(&format!("{link} already exists"))
+        );
+        // Under a file, the lookup fails with something other than absence.
+        let file = host.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        let under = file.join("marker");
+        let under = under.to_str().unwrap();
+        let err = refuse_prepared([under]).unwrap_err();
+        assert!(
+            err.to_string().starts_with(&format!("inspecting {under}")),
+            "{err:#}"
+        );
     }
 
     #[test]

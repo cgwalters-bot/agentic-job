@@ -16,11 +16,14 @@ identity fields fail closed. UTF-8 inputs are capped at 16 KiB in the harness.
 Seed corpora cover supported releases, ambiguous and shell-like identities,
 default and legacy host tables, prepared settings and invalid combinations.
 
-From the repository root, replay the committed corpus and harness boundary
-tests with stable Rust (also part of `just check`):
+Run these commands from the crate's directory, which is the root of the
+extracted repository. Replay the committed corpus and harness boundary tests
+with stable Rust (in the parent checkout, `just fuzz-check` runs these and is
+part of `just check`):
 
 ```sh
-just fuzz-check
+CARGO_TARGET_DIR=target cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings
+CARGO_TARGET_DIR=target cargo test --manifest-path fuzz/Cargo.toml --lib --locked
 ```
 
 For coverage-guided fuzzing, install nightly Rust and `cargo install cargo-fuzz
@@ -30,8 +33,8 @@ or 10,000 inputs per target:
 
 ```sh
 mkdir -p /tmp/secure-host-fuzz/host_config /tmp/secure-host-fuzz/os_release
-CARGO_TARGET_DIR=target cargo +nightly fuzz run --fuzz-dir crates/secure-host/fuzz host_config /tmp/secure-host-fuzz/host_config crates/secure-host/fuzz/corpus/host_config -- -max_total_time=30 -runs=10000 -max_len=16384 -timeout=5 -rss_limit_mb=2048 -artifact_prefix=/tmp/secure-host-fuzz/
-CARGO_TARGET_DIR=target cargo +nightly fuzz run --fuzz-dir crates/secure-host/fuzz os_release /tmp/secure-host-fuzz/os_release crates/secure-host/fuzz/corpus/os_release -- -max_total_time=30 -runs=10000 -max_len=16384 -timeout=5 -rss_limit_mb=2048 -artifact_prefix=/tmp/secure-host-fuzz/
+CARGO_TARGET_DIR=target cargo +nightly fuzz run --fuzz-dir fuzz host_config /tmp/secure-host-fuzz/host_config fuzz/corpus/host_config -- -max_total_time=30 -runs=10000 -max_len=16384 -timeout=5 -rss_limit_mb=2048 -artifact_prefix=/tmp/secure-host-fuzz/
+CARGO_TARGET_DIR=target cargo +nightly fuzz run --fuzz-dir fuzz os_release /tmp/secure-host-fuzz/os_release fuzz/corpus/os_release -- -max_total_time=30 -runs=10000 -max_len=16384 -timeout=5 -rss_limit_mb=2048 -artifact_prefix=/tmp/secure-host-fuzz/
 ```
 
 Promote minimized findings to regression tests or seeds before fixing a bug.

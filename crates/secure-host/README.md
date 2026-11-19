@@ -63,6 +63,10 @@ host, with the object built above from the same trusted checkout, a minimal
 ```toml
 [host]
 deny-runner-reads = false
+
+[setup]
+# Setup always loads its network rules with nft.
+packages = ["nftables"]
 ```
 
 ```sh

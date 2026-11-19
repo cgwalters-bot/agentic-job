@@ -29,7 +29,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
 use crate::config::Host;
 use crate::{egress, host, platform};
@@ -197,30 +197,60 @@ pub fn run(config: &Path) -> Result<()> {
 /// (`container=podman`, its HOME and hostname) is not the host's; root's
 /// fixed path is all it gets.
 fn nsenter<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<std::process::ExitStatus> {
-    Command::new(NSENTER)
+    nsenter_command(args)
+        .status()
+        .with_context(|| format!("starting {NSENTER}"))
+}
+
+fn nsenter_command<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Command {
+    let mut command = Command::new(NSENTER);
+    command
         .args(args)
         .env_clear()
         .env("PATH", host::root_path())
         .env("HOME", "/root")
-        .stdin(Stdio::null())
-        .status()
-        .with_context(|| format!("starting {NSENTER}"))
+        .stdin(Stdio::null());
+    command
 }
 
 /// Refuses a host either layout prepared, before the install over its
 /// binary: the loader and setup would refuse it only after that, leaving
 /// a binary that reads another layout's files. Looked for in the host's
-/// mount namespace, whose bpffs holds the pins; `test` answers 1 for a
-/// missing path, and any other failure is a refusal too.
+/// mount namespace, whose bpffs holds the pins. A marker is absent only
+/// when `find` ran there, listed its directory and printed nothing:
+/// nsenter fails with the same status as `test` for a missing path, so
+/// any failure, of entry or of the listing, is a refusal.
 fn refuse_prepared_host() -> Result<()> {
     for marker in crate::runtime::markers() {
-        let args = ["--target", "1", "--mount", "--", "test", "-e", marker];
-        let status = nsenter(&args)?;
-        match status.code() {
-            Some(1) => {}
-            Some(0) => bail!(crate::runtime::refusal(marker)),
-            _ => bail!("{NSENTER} {}: {status}", args.join(" ")),
-        }
+        let (dir, name) = marker
+            .rsplit_once('/')
+            .with_context(|| format!("{marker} has no directory"))?;
+        let args = [
+            "--target",
+            "1",
+            "--mount",
+            "--",
+            "find",
+            dir,
+            "-mindepth",
+            "1",
+            "-maxdepth",
+            "1",
+            "-name",
+            name,
+            "-print",
+        ];
+        let out = nsenter_command(&args)
+            .stderr(Stdio::inherit())
+            .output()
+            .with_context(|| format!("starting {NSENTER}"))?;
+        ensure!(
+            out.status.success(),
+            "{NSENTER} {}: {}: cannot tell that this host is a fresh one",
+            args.join(" "),
+            out.status
+        );
+        ensure!(out.stdout.is_empty(), crate::runtime::refusal(marker));
     }
     Ok(())
 }
