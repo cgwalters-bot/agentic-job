@@ -150,10 +150,38 @@ their named failure; do not disable a probe to obtain a green first run.
 ## 4. Choose the next step
 
 **A real agent:** follow the [real agent checklist](workflow.md#real-agent-checklist)
-with your broker and runner operators. Supply the broker URL and audience
-from runtime configuration. Both register and agent need a route to the
-broker; only register gets the OIDC request credential. Do not switch to
-`plain` to bypass an admission failure or put a provider key on the runner.
+with your broker and runner operators. Then change the caller above in place;
+keep its dispatch input, `id`, `task`, `repo`, outputs, bounds, secret and
+apply environment, and leave `apply-partial` off:
+
+```diff
+       apply-environment: agent-apply
+-      agent: fake
+-      # Nothing counts model requests without a broker, and a cap that
+-      # nothing counts is refused.
+-      max-requests: "0"
++      agent: claude
++      inference-url: ${{ vars.INFERENCE_URL }}
++      inference-audience: ${{ vars.INFERENCE_AUDIENCE }}
++      # The workflow's default; a zero would leave requests uncapped.
++      max-requests: "150"
+```
+
+Use `150` or another positive cap agreed with the broker operator; do not
+keep `"0"`. Before dispatch you need the repository variables
+`INFERENCE_URL` and `INFERENCE_AUDIENCE`, broker admission of this
+workflow pin and repository, and a [route to the broker](workflow.md#real-agent-checklist)
+from the `agent-runner`, where both register and agent run. That runner is
+GitHub-hosted `ubuntu-26.04` unless you set it and a matching `config`,
+and a hosted runner cannot reach a private broker. Three jobs differ in
+credentials: register holds the OIDC request credential and registers the
+run; the agent job gets none, only the broker's run token beside its read-only
+GitHub token; and the optional [threat detector](workflow.md#optional-threat-detection),
+when `AGENTIC_JOB_DETECT_MODEL` is set, has its own OIDC permission and
+registers its own run from a hosted `ubuntu-26.04` runner, which then also
+needs a route to the broker. Do not switch to `plain` to bypass an admission
+failure or put a provider key on the runner. The checks below compose this
+change offline; no live broker run of it is shown here.
 
 **GitLab:** follow the [deterministic GitLab CI caller](gitlab.md#minimal-deterministic-pipeline)
 for a policy/produce/check/apply pipeline and its bounds, binary-verification
@@ -165,8 +193,11 @@ broker identity or work around that boundary with a provider key.
 
 `cargo test --locked -p agentic-job --test policy` parses the GitHub YAML,
 checks its inputs against the reusable workflow, composes its generic host
-configuration and admits its bounds. In CI the same test runs pinned
-actionlint on the guide's YAML to check workflow syntax and expressions.
+configuration and admits its bounds. It applies the real-agent change to
+that caller, checks its inputs again, and composes it with synthetic broker
+settings, requiring a positive request cap. In CI the same test runs pinned
+actionlint on the guide's YAML, before and after that change, to check
+workflow syntax and expressions.
 It also parses the GitLab pipeline,
 checks its command flags and job separation, and runs its deterministic
 producer through collect/check. The same suite executes the local script

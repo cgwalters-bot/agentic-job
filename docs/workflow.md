@@ -1162,6 +1162,10 @@ Before replacing `agent: fake` with a broker, ask the inference and network
 operator for the following. The broker must implement the
 [registration and lifecycle API](inference.md#what-a-broker-provides).
 Hosted Ubuntu alone cannot reach a private proxy.
+Coming from [Getting started](try-it.md#4-choose-the-next-step), apply its
+change to that caller rather than copying [the call above](#a-caller): that
+one reads `inputs.item` and `inputs.repo`, which the task-only dispatch does
+not define, and opts into `apply-partial`, which inference does not need.
 
 - **Proxy URL and audience:** set repository variables `INFERENCE_URL` and
   `INFERENCE_AUDIENCE`, and pass them as `inference-url` and
@@ -1172,8 +1176,12 @@ Hosted Ubuntu alone cannot reach a private proxy.
   the proxy's network, or a composed caller that joins it in both the
   register job and the agent job (before `secure-host`)
   ([above](#the-pieces-and-an-agent-job-of-your-own)), with whatever that
-  network's operator issues for it. The register job alone has an identity
-  token; the agent job must join without one. For example, `review.yml`'s
+  network's operator issues for it. Of the register and agent pair, the
+  register job alone has an identity token; the agent job must join
+  without one. The [optional detector](#optional-threat-detection), a
+  separate job of check, has its own `id-token: write` and registers its
+  own run when `AGENTIC_JOB_DETECT_MODEL` is set, from a hosted runner that
+  then also needs a route to the broker. For example, `review.yml`'s
   [network step](review.md#configuration) mints a single-use join key in
   register and passes it as a secret to the agent job.
 - **Broker admission:** the broker operator must enable a `called_workflows`
@@ -1193,7 +1201,10 @@ Hosted Ubuntu alone cannot reach a private proxy.
   anything, but does not detect musl. Set `npm` to exact
   `NAME@VERSION` pins to install with npm instead; those do not pin
   their transitive dependencies. Choose `model`, `max-requests`,
-  `budget` and `timeout` with the operator.
+  `budget` and `timeout` with the operator. Replace the scripted caller's
+  `max-requests: "0"` with the default `"150"` or another positive cap:
+  composition accepts a zero for a brokered agent with a budget, and the
+  run then has no request cap.
 
     `agent: vibe` installs `mistral-vibe==2.26.1` into a root-owned Python
     virtual environment before hardening; it does not use the `npm` input.

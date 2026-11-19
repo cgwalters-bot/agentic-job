@@ -237,7 +237,11 @@ see [runner requirements](workflow.md#what-a-caller-provides).
 Before real tasks, confirm [broker admission](inference.md#which-workflows-a-broker-admits)
 for the chosen audience, workflow pin and calling repository. Both the
 separate register job and the agent job need a network route to the broker;
-only register holds the OIDC request credential. Confirm per-run budgets.
+of the two, only register holds the OIDC request credential, and the agent
+job has none. Check's separate [threat detector](workflow.md#optional-threat-detection)
+has its own OIDC permission and registers its own run when
+`AGENTIC_JOB_DETECT_MODEL` is set, from a hosted runner that then also
+needs a route to the broker. Confirm per-run budgets.
 No model API key goes on the runner.
 
 For `implement`, and for cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment

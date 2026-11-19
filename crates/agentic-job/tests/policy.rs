@@ -515,6 +515,8 @@ fn documented_proposals_request_fits_shipped_and_small_bounds() {
 /// them: its request fits its bounds, and its configuration, read from
 /// this source as `config` names it, composes with the scripted agent's
 /// inputs, while the default request cap is refused without a broker.
+/// The guide's real-agent change to that caller keeps its wiring and
+/// composes with a broker and a positive request cap.
 #[test]
 fn try_it_caller_fits_its_bounds_and_configuration() {
     use yaml_rust2::YamlLoader;
@@ -532,59 +534,107 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
             .unwrap()
     };
     let caller = block("```yaml\n");
+    // The real-agent change to that caller: its context and removed lines
+    // are the caller's, in order, and its added lines replace them.
+    let (mut removed, mut added) = (String::new(), String::new());
+    for line in block("```diff\n").lines() {
+        let sign = line.get(..1).unwrap_or_default();
+        assert!([" ", "-", "+"].contains(&sign), "not a diff line: {line:?}");
+        let text = &line[1..];
+        if sign != "+" {
+            removed += &format!("{text}\n");
+        }
+        if sign != "-" {
+            added += &format!("{text}\n");
+        }
+    }
+    assert_eq!(caller.matches(&removed).count(), 1, "{removed}");
+    let broker = caller.replacen(&removed, &added, 1);
     // Ordinary CI supplies the same digest-verified analyzer as ingress.
     // Lint the actual example, not a checked-in copy of the caller.
     if let Some(actionlint) = std::env::var_os("ACTIONLINT") {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("agent.yml");
-        std::fs::write(&file, caller).unwrap();
-        let status = Command::new(actionlint).arg(file).status().unwrap();
-        assert!(status.success(), "actionlint refused the documented caller");
+        for text in [caller, &broker] {
+            std::fs::write(&file, text).unwrap();
+            let status = Command::new(&actionlint).arg(&file).status().unwrap();
+            assert!(status.success(), "actionlint refused {text}");
+        }
     }
-    let input = |name: &str| {
+    fn field<'a>(caller: &'a str, name: &str) -> &'a str {
         caller
             .lines()
             .find_map(|line| line.trim().strip_prefix(&format!("{name}: ")))
             .unwrap_or_else(|| panic!("no input {name}"))
             .trim_matches('"')
-    };
+    }
+    let input = |name: &str| field(caller, name);
     // The reusable workflow: an input's default, and the permissions its
     // agent job asks for, which GitHub refuses the whole call without.
     let workflow = std::fs::read_to_string(root.join(".github/workflows/agentic-job.yml")).unwrap();
-    let caller_yaml = YamlLoader::load_from_str(caller).unwrap().remove(0);
     let workflow_yaml = YamlLoader::load_from_str(&workflow).unwrap().remove(0);
     let declared = &workflow_yaml["on"]["workflow_call"]["inputs"];
-    let secrets = caller_yaml["jobs"]["run"]["secrets"].as_hash().unwrap();
-    assert_eq!(secrets.len(), 1);
-    assert_eq!(
-        caller_yaml["jobs"]["run"]["secrets"]["SAFE_OUTPUTS_PAT"].as_str(),
-        Some("${{ secrets.SAFE_OUTPUTS_PAT }}")
-    );
     assert!(!workflow_yaml["on"]["workflow_call"]["secrets"]["SAFE_OUTPUTS_PAT"].is_badvalue());
-    for (key, value) in caller_yaml["jobs"]["run"]["with"].as_hash().unwrap() {
-        let key = key.as_str().unwrap();
-        assert!(!declared[key].is_badvalue(), "unknown caller input {key:?}");
-        let valid_type = match declared[key]["type"].as_str().unwrap() {
-            "string" => value.as_str().is_some(),
-            "boolean" => value.as_bool().is_some(),
-            "number" => value.as_i64().is_some() || value.as_f64().is_some(),
-            other => panic!("unhandled input type {other}"),
-        };
-        assert!(valid_type, "wrong type for {key:?}: {value:?}");
+    let mut calls = Vec::new();
+    for text in [caller, &broker] {
+        let caller_yaml = YamlLoader::load_from_str(text).unwrap().remove(0);
+        let secrets = caller_yaml["jobs"]["run"]["secrets"].as_hash().unwrap();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(
+            caller_yaml["jobs"]["run"]["secrets"]["SAFE_OUTPUTS_PAT"].as_str(),
+            Some("${{ secrets.SAFE_OUTPUTS_PAT }}")
+        );
+        for (key, value) in caller_yaml["jobs"]["run"]["with"].as_hash().unwrap() {
+            let key = key.as_str().unwrap();
+            assert!(!declared[key].is_badvalue(), "unknown caller input {key:?}");
+            let valid_type = match declared[key]["type"].as_str().unwrap() {
+                "string" => value.as_str().is_some(),
+                "boolean" => value.as_bool().is_some(),
+                "number" => value.as_i64().is_some() || value.as_f64().is_some(),
+                other => panic!("unhandled input type {other}"),
+            };
+            assert!(valid_type, "wrong type for {key:?}: {value:?}");
+        }
+        for (key, value) in declared.as_hash().unwrap() {
+            let key = key.as_str().unwrap();
+            if value["required"].as_bool() == Some(true) && value["default"].is_badvalue() {
+                assert!(
+                    !caller_yaml["jobs"]["run"]["with"][key].is_badvalue(),
+                    "missing required input {key:?}"
+                );
+            }
+        }
+        assert_eq!(
+            caller_yaml["jobs"]["run"]["uses"].as_str().unwrap(),
+            "cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT"
+        );
+        calls.push(caller_yaml);
     }
-    for (key, value) in declared.as_hash().unwrap() {
+    // The change keeps the dispatch, permissions, task/run/target wiring,
+    // bounds and publication, and leaves partial runs unpublished.
+    let (scripted, brokered) = (&calls[0], &calls[1]);
+    assert_eq!(scripted["on"], brokered["on"]);
+    assert_eq!(
+        scripted["jobs"]["run"]["permissions"],
+        brokered["jobs"]["run"]["permissions"]
+    );
+    for (key, value) in scripted["jobs"]["run"]["with"].as_hash().unwrap() {
         let key = key.as_str().unwrap();
-        if value["required"].as_bool() == Some(true) && value["default"].is_badvalue() {
-            assert!(
-                !caller_yaml["jobs"]["run"]["with"][key].is_badvalue(),
-                "missing required input {key:?}"
-            );
+        if !["agent", "max-requests"].contains(&key) {
+            assert_eq!(&brokered["jobs"]["run"]["with"][key], value, "{key}");
         }
     }
-    assert_eq!(
-        caller_yaml["jobs"]["run"]["uses"].as_str().unwrap(),
-        "cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT"
-    );
+    // Only the broker's address and audience are new: no `apply-partial`,
+    // and registration stays the workflow's default.
+    let mut new_inputs: Vec<&str> = brokered["jobs"]["run"]["with"]
+        .as_hash()
+        .unwrap()
+        .keys()
+        .map(|key| key.as_str().unwrap())
+        .filter(|key| scripted["jobs"]["run"]["with"][*key].is_badvalue())
+        .collect();
+    new_inputs.sort();
+    assert_eq!(new_inputs, ["inference-audience", "inference-url"]);
     let default = |name: &str| {
         workflow
             .split(&format!("\n      {name}:\n"))
@@ -657,14 +707,15 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     assert_eq!(generic["setup"]["packages"], deployed["setup"]["packages"]);
     assert_eq!(generic.as_table().unwrap().len(), 2);
     assert_eq!(generic["setup"].as_table().unwrap().len(), 1);
-    let compose = |max_requests: &str| {
+    let compose = |agent: &str, max_requests: &str, inference: &[&str]| {
         Command::new(BIN)
             .arg("config")
             .arg("--from")
             .arg(root.join(config))
             .args(["--repo", "example-org/example"])
-            .args(["--string", &format!("agent.name={}", input("agent"))])
+            .args(["--string", &format!("agent.name={agent}")])
             .args(["--integer", &format!("limits.max-requests={max_requests}")])
+            .args(inference.iter().flat_map(|setting| ["--string", setting]))
             // The workflow's defaults for the inputs the caller leaves out;
             // without `inference-url` it passes no registration.
             .args([
@@ -679,7 +730,7 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
             .output()
             .unwrap()
     };
-    let output = compose(input("max-requests"));
+    let output = compose(input("agent"), input("max-requests"), &[]);
     assert!(
         output.status.success(),
         "{}",
@@ -687,10 +738,42 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     );
     // The workflow's default cap, as docs/workflow.md says: refused by the
     // policy job, naming the configuration keys.
-    let output = compose(&default("max-requests"));
+    let output = compose(input("agent"), &default("max-requests"), &[]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("limits.max-requests"), "{stderr}");
+    // The changed caller, with synthetic stand-ins for its repository
+    // variables and the workflow's registration default, keeps a positive
+    // cap. Composition accepts the scripted zero for it too, uncapped, as
+    // docs/workflow.md warns: the guide's change is what sets the cap.
+    let register = format!("inference.register={}", default("inference-register"));
+    let broker_compose = |max_requests: &str| {
+        let output = compose(
+            field(&broker, "agent"),
+            max_requests,
+            &[
+                "inference.url=http://192.0.2.1:8080",
+                &register,
+                "inference.audience=example-audience",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let composed: toml::Value =
+            toml::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+        assert_eq!(
+            composed["inference"]["register"].as_str(),
+            Some("github-oidc")
+        );
+        composed["limits"]["max-requests"].as_integer().unwrap()
+    };
+    assert_eq!(broker_compose(input("max-requests")), 0);
+    let cap = broker_compose(field(&broker, "max-requests"));
+    assert!(cap > 0);
+    assert_eq!(cap.to_string(), default("max-requests"));
 }
 
 /// Execute the documented local entrypoint, without a forge, model or host
