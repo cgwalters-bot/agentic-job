@@ -61,10 +61,10 @@ NAMES=(agentic-job fake-agent secure-host)
 TARGET=x86_64-unknown-linux-musl
 
 # The access-time world-write policy, compiled once with the binaries and
-# taken by its checksum, so that a host loading it needs no compiler. CO-RE
-# relocates it to the running kernel; it is little-endian, as TARGET is.
+# taken by its checksum, so that a host loading it needs no compiler. Its
+# source and recipe are secure-host's, which builds it the same way alone.
 OBJECT=world_write.bpf.o
-OBJECT_SOURCE=crates/agentic-job/bpf/world_write.bpf.c
+OBJECT_RECIPE=crates/secure-host/bpf/build.sh
 
 SHA256='^[0-9a-f]{64}$'
 
@@ -346,7 +346,7 @@ fetch_artifact() {
 
 object() {
   mkdir -p -- "$1"
-  clang -O2 -g -target bpfel -Wall -Wextra -Werror -c "$ROOT/$OBJECT_SOURCE" -o "$1/$OBJECT"
+  bash "$ROOT/$OBJECT_RECIPE" "$1/$OBJECT"
 }
 
 # musl-gcc is for the C that dependencies bring with them, clang for the

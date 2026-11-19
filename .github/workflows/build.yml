@@ -48,7 +48,7 @@ jobs:
       - run: cargo build --release --locked --target "$TARGET" -p agentic-job -p secure-host
       - name: Check the world-write policy's predicate
         run: |
-          clang -std=c11 -O2 -Wall -Wextra -Werror crates/agentic-job/bpf/world_write_policy_test.c -o "$RUNNER_TEMP/world-write-test"
+          clang -std=c11 -O2 -Wall -Wextra -Werror crates/secure-host/bpf/world_write_policy_test.c -o "$RUNNER_TEMP/world-write-test"
           "$RUNNER_TEMP/world-write-test"
       # The scripted agent too: a run with `agent: fake` needs it; and
       # secure-host, the image's. The world-write policy object goes with

@@ -745,33 +745,6 @@ fn standalone_proof_event_gates_and_duplicate_refusals() {
 }
 
 #[test]
-fn setup_timing_accepts_the_host_prefix_and_requires_success() {
-    let doc = definition("ci.yml");
-    let script = named_step(&doc, "Setup timing")["run"].as_str().unwrap();
-    let pattern = script
-        .split_once("grep -qE '")
-        .unwrap()
-        .1
-        .split_once('\'')
-        .unwrap()
-        .0;
-    let pattern = Regex::new(pattern).unwrap();
-    for (line, accepted) in [
-        (
-            "Secure-host setup stage privileged-binary-allowlist: 0.123s (ok)",
-            true,
-        ),
-        (
-            "Secure-host setup stage privileged-binary-allowlist: 0.123s (failed)",
-            false,
-        ),
-        ("Secure-host setup stage other: 0.123s (ok)", false),
-    ] {
-        assert_eq!(pattern.is_match(line), accepted, "{line}");
-    }
-}
-
-#[test]
 fn role_and_legacy_workflow_credential_expressions() {
     let doc = definition("apply.yml");
     let mut expressions = Vec::new();

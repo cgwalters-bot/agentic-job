@@ -196,7 +196,10 @@ fn tailnet_name(status: &serde_json::Value) -> Result<&str> {
 
 /// Root's: the configuration `run` reads, and what else setup leaves for
 /// the supervisor. That it exists also says setup ran here before.
-pub const CONFIG_DIR: &str = crate::runtime::name("/etc/secure-host", "/etc/agentic-job");
+pub const CONFIG_DIR: &str = crate::runtime::name(
+    crate::runtime::CONFIG_DIRS[0],
+    crate::runtime::CONFIG_DIRS[1],
+);
 
 /// The copy of this program that the helper's sudo rule names, at the
 /// path callers know.
@@ -458,10 +461,7 @@ fn setup<P: Program>(
         rustix::process::umask(Mode::from_raw_mode(ROOT_UMASK));
         // Before anything else is decided: a machine that was set up before
         // is refused whoever asks, and however.
-        ensure!(
-            !Path::new(CONFIG_DIR).exists(),
-            "{CONFIG_DIR} already exists: `sandbox setup` ran on this machine before, and the sandbox needs a fresh one for every job"
-        );
+        crate::runtime::refuse_prepared(prepared_markers())?;
         // Every refusal comes before the first change.
         let runner = runner_user(config)?;
         plan.program.preflight()?;
@@ -794,6 +794,16 @@ fn close_private_dirs(config: &Sandbox, runner: &User) -> Result<()> {
             .with_context(|| format!("closing {}", dir.display()))?;
     }
     Ok(())
+}
+
+/// What setup refuses to find: either layout's setup marker, and the other
+/// layout's policy pins. Its own pins are the loader's, which it requires.
+fn prepared_markers() -> impl Iterator<Item = &'static str> {
+    crate::runtime::CONFIG_DIRS.into_iter().chain(
+        crate::runtime::PIN_DIRS
+            .into_iter()
+            .filter(|pin| *pin != WORLD_WRITE_PIN),
+    )
 }
 
 /// Nothing in setup takes world write away: the world-write policy,
@@ -1522,6 +1532,19 @@ pub fn install_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_refuses_either_layouts_setup_and_the_other_layouts_pins() {
+        let other_pins = if cfg!(feature = "legacy-runtime") {
+            "/sys/fs/bpf/secure-host-world-write"
+        } else {
+            "/sys/fs/bpf/agentic-job-world-write"
+        };
+        assert_eq!(
+            prepared_markers().collect::<Vec<_>>(),
+            ["/etc/secure-host", "/etc/agentic-job", other_pins]
+        );
+    }
 
     /// With `[host.prepared]` the helper is the program's file, and
     /// setup refuses rather than go on without one, or through a link:

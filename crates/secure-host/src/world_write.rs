@@ -30,10 +30,8 @@ use crate::{host, platform, worker_diagnostics};
 
 /// Where the loader pins the world-write policy: a link for each of its
 /// programs, and its map.
-pub const WORLD_WRITE_PIN: &str = crate::runtime::name(
-    "/sys/fs/bpf/secure-host-world-write",
-    "/sys/fs/bpf/agentic-job-world-write",
-);
+pub const WORLD_WRITE_PIN: &str =
+    crate::runtime::name(crate::runtime::PIN_DIRS[0], crate::runtime::PIN_DIRS[1]);
 
 /// The policy's programs, each pinned as a link under `WORLD_WRITE_PIN/links`.
 pub const WORLD_WRITE_LINKS: &[&str] = &[
@@ -495,6 +493,16 @@ pub fn restrict_ptrace() -> Result<()> {
     Ok(())
 }
 
+/// What the loader refuses to find: either layout's policy pins, and the
+/// other layout's setup marker. Its own layout's setup comes after it.
+fn prepared_markers() -> impl Iterator<Item = &'static str> {
+    crate::runtime::PIN_DIRS.into_iter().chain(
+        crate::runtime::CONFIG_DIRS
+            .into_iter()
+            .filter(|dir| *dir != crate::setup::CONFIG_DIR),
+    )
+}
+
 /// With SOLE_WORKER, the Worker the runner-read rule exempts is
 /// [`sole_worker`] on the host rather than an ancestor.
 pub fn load(object: &Path, deny_runner_reads: bool, sole_worker: bool) -> Result<()> {
@@ -503,6 +511,8 @@ pub fn load(object: &Path, deny_runner_reads: bool, sole_worker: bool) -> Result
         platform::REFUSAL
     );
     ensure!(host::is_root(), "world-write loading requires root");
+    // Before the first change: a host either layout prepared is refused.
+    crate::runtime::refuse_prepared(prepared_markers())?;
     ensure!(
         fs::symlink_metadata(object).is_ok_and(|meta| meta.is_file()),
         "policy object {} is not a regular file",
@@ -595,6 +605,23 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    #[test]
+    fn the_loader_refuses_either_layouts_pins_and_the_other_layouts_setup() {
+        let other_setup = if cfg!(feature = "legacy-runtime") {
+            "/etc/secure-host"
+        } else {
+            "/etc/agentic-job"
+        };
+        assert_eq!(
+            prepared_markers().collect::<Vec<_>>(),
+            [
+                "/sys/fs/bpf/secure-host-world-write",
+                "/sys/fs/bpf/agentic-job-world-write",
+                other_setup,
+            ]
+        );
+    }
 
     /// As `bpftool -j -f link show` prints them (not `link show pinned`).
     fn links() -> Vec<Value> {

@@ -7,13 +7,16 @@ use std::time::Instant;
 
 use anyhow::Result;
 
+/// The first word of each line; the legacy layout's readers match its own.
+const PREFIX: &str = crate::runtime::name("Secure-host", "Sandbox");
+
 /// Log a stage's duration and preserve its result, including failures.
 /// Consumers may parse these informational lines, but timing is not a check record.
 pub fn stage<T>(kind: &str, name: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
     let started = Instant::now();
     let result = run();
     println!(
-        "Secure-host {kind} stage {name}: {:.3}s ({})",
+        "{PREFIX} {kind} stage {name}: {:.3}s ({})",
         started.elapsed().as_secs_f64(),
         if result.is_ok() { "ok" } else { "failed" }
     );

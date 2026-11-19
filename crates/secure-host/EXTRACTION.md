@@ -11,9 +11,11 @@ git clone --no-local https://github.com/cgwalters-forge/agentic-job secure-host-
 test "$(git -C secure-host-export rev-parse --is-shallow-repository)" = false
 git -C secure-host-export filter-repo \
   --path crates/secure-host/ --path egress/ \
+  --path crates/agentic-job/bpf/ \
   --path secure-host/default-config.sh \
   --path LICENSE --path LICENSE-MIT --path LICENSE-APACHE \
   --path-rename crates/secure-host/ci/ci.yml:.github/workflows/ci.yml \
+  --path-rename crates/agentic-job/bpf/:bpf/ \
   --path-rename crates/secure-host/: \
   --path-rename secure-host/default-config.sh:default-config.sh
 ```
@@ -21,12 +23,13 @@ git -C secure-host-export filter-repo \
 The old `egress/` path is deliberately retained: before this preparation its
 files lived there. At the tip they now live inside the crate, which is mapped
 to the root. Both eras consequently become `egress/` in the extracted history.
-The selector's old path is similarly mapped to its new root path. This keeps
+The selector's old path is similarly mapped to its new root path, and the
+world-write policy's old `crates/agentic-job/bpf/` to `bpf/`. This keeps
 history since the crate split; `filter-repo` does not automatically follow
 renames back into older mixed-purpose source files.
 
 The three license files are retained from the source repository. Inspect the
-tip and `git log -- egress/ src/` before publishing. In the export checkout,
+tip and `git log -- egress/ src/ bpf/` before publishing. In the export checkout,
 run the README's build/test commands; there must be no parent workspace.
 Generate and retain the export's own `Cargo.lock` before publishing, then
 repeat build, Clippy and tests with `--locked`. The parent workspace's

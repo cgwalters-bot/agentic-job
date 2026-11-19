@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 const INPUTS: &[&str] = &[
     "secure-host/binary.sh",
-    "crates/agentic-job/bpf/world_write.bpf.c",
-    "crates/agentic-job/bpf/world_write_policy.h",
+    "crates/secure-host/bpf/build.sh",
+    "crates/secure-host/bpf/world_write.bpf.c",
+    "crates/secure-host/bpf/world_write_policy.h",
 ];
 const OBJECT: &str = "world_write.bpf.o";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);

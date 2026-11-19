@@ -13,8 +13,9 @@ it does not separate successive steps of a job from one another. Read the
 
 ## Build and test
 
-Linux, Rust 1.88 or newer (edition 2024), a C compiler/linker, Python 3.11+
-and Bash are required. From this directory in an independent checkout:
+Linux, Rust 1.88 or newer (edition 2024), a C compiler/linker, clang,
+Python 3.11+ and Bash are required. From this directory in an independent
+checkout:
 
 ```sh
 cargo build
@@ -22,7 +23,13 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 python3 -B -m unittest discover -s egress -v
+clang -std=c11 -O2 -Wall -Wextra -Werror bpf/world_write_policy_test.c -o target/world-write-test
+target/world-write-test
+bash bpf/build.sh target/world_write.bpf.o
 ```
+
+The last command builds the world-write policy object from
+[`bpf/`](bpf/); the test before it checks the policy's predicate natively.
 
 Cargo creates a lockfile on the first build; retain it and use `--locked` for
 subsequent builds. Ordinary tests need no root and use loopback services or
@@ -30,7 +37,8 @@ fixtures. They do **not** prove the privileged hardening paths. Tests requiring
 a prepared host must run only on a fresh disposable VM.
 
 Cargo needs registry access on a cold cache. The host crate only emits
-informational `Secure-host setup stage` / `Secure-host check stage` timings;
+informational `Secure-host setup stage` / `Secure-host check stage` timings
+(`Sandbox ...` in the `legacy-runtime` layout);
 summary adapters and their fixed consumer commands belong to consumers, not
 this library. Timing never substitutes for a passing probe.
 
@@ -47,12 +55,16 @@ The authoritative keys, defaults and validation are in
 `secure-host config --from FILE` composes a configuration, and `supported`
 checks the host without changing it.
 
-On a fresh supported host, with a **matching, trusted** BPF object:
+`cargo build` does not install the CLI: run it by its path, and give sudo
+that path rather than relying on sudo's search path. On a fresh supported
+host, with the object built above from the same trusted checkout:
 
 ```sh
-sudo secure-host world-write /path/to/world_write.bpf.o
-sudo secure-host setup --config /path/to/host.toml
-secure-host check
+cargo build --release --locked
+bash bpf/build.sh target/world_write.bpf.o
+sudo ./target/release/secure-host world-write target/world_write.bpf.o
+sudo ./target/release/secure-host setup --config /path/to/host.toml
+./target/release/secure-host check
 ```
 
 This minimal sequence leaves the runner-read rule off: set
@@ -98,7 +110,9 @@ CLI compatibility aliases remain accepted but are not required by standalone
 setup. No layout is selected from job-controlled environment or configuration,
 and no missing file or pin falls back to another layout.
 
-Do not upgrade an already hardened host between layouts. On fresh disposable
+Do not upgrade an already hardened host between layouts: setup and the
+loader refuse a host with either layout's configuration directory or policy
+pins from an earlier run, before changing anything. On fresh disposable
 hosts, migrate the image, its action and all consumers together, then remove
 the consumer's feature opt-in. Never reuse an old layout's check record as
 evidence for a new one. Publication and privileged deployment remain separate

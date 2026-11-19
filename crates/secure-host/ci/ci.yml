@@ -18,3 +18,7 @@ jobs:
       - run: cargo test --locked
       - run: cargo test --locked --features legacy-runtime
       - run: python3 -B -m unittest discover -s egress -v
+      - run: |
+          clang -std=c11 -O2 -Wall -Wextra -Werror bpf/world_write_policy_test.c -o "$RUNNER_TEMP/world-write-test"
+          "$RUNNER_TEMP/world-write-test"
+          bash bpf/build.sh "$RUNNER_TEMP/world_write.bpf.o"
