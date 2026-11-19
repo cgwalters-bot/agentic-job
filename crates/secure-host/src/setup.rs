@@ -236,8 +236,10 @@ const VISUDO_CHECK: &[&str] = &["visudo", "-q", "-c", "-f"];
 /// that also covers `pkexec`, and lingering, which is a polkit action.
 const POLKIT_RULES_DIR: &str = "/etc/polkit-1/rules.d";
 
+/// polkit sorts rule files by name, bytewise; the neutral name sorts before
+/// the legacy one, so it precedes every host rule that one preceded.
 const POLKIT_DENY: &str = crate::runtime::name(
-    "/etc/polkit-1/rules.d/00-secure-host-sandbox.rules",
+    "/etc/polkit-1/rules.d/00-0-secure-host-sandbox.rules",
     "/etc/polkit-1/rules.d/00-agentic-job-sandbox.rules",
 );
 
@@ -1825,6 +1827,9 @@ mod tests {
             polkit_deny(&["runner"]),
             "polkit.addRule(function(action, subject) {\n  if (subject.user == \"runner\") return polkit.Result.NO;\n});\n"
         );
+        // A host's allow rule the legacy deny preceded must not answer first.
+        assert!(POLKIT_DENY <= "/etc/polkit-1/rules.d/00-agentic-job-sandbox.rules");
+        assert!(POLKIT_DENY < "/etc/polkit-1/rules.d/00-ci-allow.rules");
     }
 
     #[test]

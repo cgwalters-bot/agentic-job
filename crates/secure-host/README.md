@@ -57,20 +57,30 @@ checks the host without changing it.
 
 `cargo build` does not install the CLI: run it by its path, and give sudo
 that path rather than relying on sudo's search path. On a fresh supported
-host, with the object built above from the same trusted checkout:
+host, with the object built above from the same trusted checkout, a minimal
+`host.toml` is:
+
+```toml
+[host]
+deny-runner-reads = false
+```
 
 ```sh
-cargo build --release --locked
-bash bpf/build.sh target/world_write.bpf.o
-sudo ./target/release/secure-host world-write target/world_write.bpf.o
-sudo ./target/release/secure-host setup --config /path/to/host.toml
+cargo build --release --locked &&
+bash bpf/build.sh target/world_write.bpf.o &&
+sudo ./target/release/secure-host world-write target/world_write.bpf.o &&
+sudo ./target/release/secure-host setup --config host.toml &&
 ./target/release/secure-host check
 ```
 
-This minimal sequence leaves the runner-read rule off: set
-`host.deny-runner-reads = false` in that configuration explicitly. For a
-GitHub runner with `host.deny-runner-reads = true`, instead load the object
-with `--deny-runner-reads`. If the loader was not started by the Worker (for
+Each step runs only if the one before it succeeded. If any step fails, discard
+the host: a partially prepared host is not ready, and rerunning the sequence
+does not repair it.
+
+This minimal sequence leaves the runner-read rule off, so the configuration
+turns it off explicitly. For a GitHub runner with
+`host.deny-runner-reads = true`, instead load the object with
+`--deny-runner-reads`. If the loader was not started by the Worker (for
 example, from a root container), also pass `--sole-worker`, which requires
 exactly one Worker on the host. The ordinary `check` command does not probe
 this rule; use the disposable-host confinement probes for runtime evidence.
