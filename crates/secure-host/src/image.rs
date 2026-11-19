@@ -219,8 +219,11 @@ fn nsenter_command<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Command {
 /// mount namespace, whose bpffs holds the pins. A marker is absent only
 /// when `find` ran there, listed its directory and printed nothing:
 /// nsenter fails with the same status as `test` for a missing path, so
-/// any failure, of entry or of the listing, is a refusal.
+/// any failure, of entry or of the listing, is a refusal. `find` runs as
+/// root, so it is the host's own, by its path and root's alone.
 fn refuse_prepared_host() -> Result<()> {
+    let find = host::trusted_program("find")?;
+    let find = find.to_str().context("the path of find is text")?;
     for marker in crate::runtime::markers() {
         let (dir, name) = marker
             .rsplit_once('/')
@@ -230,7 +233,7 @@ fn refuse_prepared_host() -> Result<()> {
             "1",
             "--mount",
             "--",
-            "find",
+            find,
             dir,
             "-mindepth",
             "1",

@@ -159,19 +159,23 @@ fn a_prepared_host_is_refused_before_anything_changes() {
         &image,
         config,
     ];
-    // Without --privileged nsenter cannot enter the host's namespace, so
-    // the image cannot inspect the markers and must not take that for a
-    // fresh host.
-    let unprivileged: Vec<&str> = run
+    // With an empty /proc under the host's root nsenter cannot open the
+    // host's mount namespace, so the image cannot inspect the markers and
+    // must not take that for a fresh host. Still privileged: Podman names
+    // the image in /run/.containerenv only then.
+    let uninspectable: Vec<&str> = run
         .into_iter()
-        .filter(|&arg| arg != "--privileged")
+        .flat_map(|arg| match arg {
+            "/:/host" => vec![arg, "--tmpfs=/host/proc"],
+            _ => vec![arg],
+        })
         .collect();
     let wrong: Vec<String> = MARKERS
         .into_iter()
         .flat_map(|marker| [refused_with(marker, &loader), refused_with(marker, &run)])
         .chain([refused(
             None,
-            &unprivileged,
+            &uninspectable,
             "cannot tell that this host is a fresh one",
         )])
         .filter_map(Result::err)
