@@ -159,12 +159,17 @@ fn exact_match_and_returned_id_have_identical_checks() {
             ..record()
         };
         let mut fixture = Fixture::new(&record, archive(&[]));
-        let (receipt, bytes) = fetch(&mut fixture, &record).unwrap();
+        let Fetched {
+            receipt,
+            archive: bytes,
+            files,
+        } = fetch(&mut fixture, &record).unwrap();
         assert_eq!(receipt.run_id, 7);
         assert_eq!(receipt.attempt, 1);
         assert_eq!(receipt.raw.id, 11);
         assert_eq!(receipt.checked.id, 10);
         assert_eq!(bytes, fixture.bytes);
+        assert!(receipt.files.is_empty() && files.is_empty());
         assert!(
             fixture
                 .paths
@@ -228,10 +233,11 @@ fn actions_http_transport_fetches_raw_by_id() {
         root,
         token: "read-only-fixture".into(),
         deadline: record.deadline,
+        storage: STORAGE.into(),
     };
-    let (receipt, fetched) = fetch(&mut api, &record).unwrap();
-    assert_eq!(receipt.raw.id, 11);
-    assert_eq!(fetched, bytes);
+    let fetched = fetch(&mut api, &record).unwrap();
+    assert_eq!(fetched.receipt.raw.id, 11);
+    assert_eq!(fetched.archive, bytes);
     let paths: Vec<_> = requests.try_iter().collect();
     assert_eq!(paths.iter().filter(|p| p.ends_with("/zip")).count(), 1);
 }
@@ -367,9 +373,15 @@ fn fetched_raw_passes_real_collect_check_git_trial_and_staged_apply() {
         ("base.json", base.to_string().as_bytes()),
         (&name, patch.as_bytes()),
     ]);
-    let (receipt, bytes) = fetch(&mut Fixture::new(&record, bytes), &record).unwrap();
+    let fetched = fetch(&mut Fixture::new(&record, bytes), &record).unwrap();
+    let receipt = fetched.receipt;
     let outputs = root.path().join("raw");
-    extract(&bytes, &outputs).unwrap();
+    write_members(&outputs, &fetched.files).unwrap();
+    assert_eq!(receipt.files.len(), 3);
+    assert_eq!(
+        receipt.files[&name],
+        sha256(&std::fs::read(outputs.join(&name)).unwrap())
+    );
     let mut policy = crate::policy::tests::policy();
     policy.secondary_pull_request = None;
     policy.external = Some(crate::policy::ExternalRun {
@@ -380,6 +392,7 @@ fn fetched_raw_passes_real_collect_check_git_trial_and_staged_apply() {
         run_id: receipt.run_id,
         base_commit: record.base_commit.clone(),
         raw_digest: receipt.raw.digest,
+        files: receipt.files.clone(),
     });
     policy.validate().unwrap();
     record.policy(&policy).unwrap();
@@ -416,6 +429,46 @@ fn fetched_raw_passes_real_collect_check_git_trial_and_staged_apply() {
     wrong_policy.external.as_mut().unwrap().run_id = 8;
     assert!(
         !crate::check::check_run_outputs(&outputs, &collected, &wrong_policy, "90")
+            .unwrap()
+            .ok
+    );
+    // The checked files are the receipted ones: a file changed, dropped or
+    // added since fetch, or a receipt of another fetch, is refused.
+    let refused = |policy: &Policy, what: &str| {
+        let verdict = crate::check::check_run_outputs(&outputs, &collected, policy, "90").unwrap();
+        assert!(!verdict.ok, "{what}");
+        assert!(
+            verdict
+                .errors
+                .iter()
+                .any(|e| e.contains("external receipt")),
+            "{what}: {:?}",
+            verdict.errors
+        );
+    };
+    let original = std::fs::read(outputs.join("base.json")).unwrap();
+    std::fs::write(outputs.join("base.json"), [&original[..], b" "].concat()).unwrap();
+    refused(&policy, "changed");
+    std::fs::remove_file(outputs.join("base.json")).unwrap();
+    refused(&policy, "dropped");
+    std::fs::write(outputs.join("base.json"), &original).unwrap();
+    std::fs::write(
+        outputs.join(crate::check::HOST_ISOLATION_FILE),
+        br#"{"host_isolation":"external"}"#,
+    )
+    .unwrap();
+    refused(&policy, "added");
+    std::fs::remove_file(outputs.join(crate::check::HOST_ISOLATION_FILE)).unwrap();
+    wrong_policy = policy.clone();
+    wrong_policy
+        .external
+        .as_mut()
+        .unwrap()
+        .files
+        .insert("base.json".into(), sha256(b"other"));
+    refused(&wrong_policy, "another fetch");
+    assert!(
+        crate::check::check_run_outputs(&outputs, &collected, &policy, "90")
             .unwrap()
             .ok
     );
@@ -500,12 +553,80 @@ fn raw_archive_never_supplies_trusted_config_or_paths() {
         "../outputs.jsonl",
         "dir/outputs.jsonl",
     ] {
-        assert!(
-            extract(&archive(&[(name, b"{}")]), &root.path().join("raw")).is_err(),
-            "{name}"
-        );
-        assert!(!root.path().join("raw").exists());
+        assert!(members(&archive(&[(name, b"{}")])).is_err(), "{name}");
     }
+    // A receipt names only such members, with digests, at most 256 of them.
+    let mut receipt = serde_json::to_value(
+        &fetch(&mut Fixture::new(&record(), archive(&[])), &record())
+            .unwrap()
+            .receipt,
+    )
+    .unwrap();
+    let path = root.path().join("receipt.json");
+    let load = |receipt: &Value| {
+        std::fs::write(&path, receipt.to_string()).unwrap();
+        Receipt::load(&path)
+    };
+    assert!(load(&receipt).is_ok());
+    for (name, digest) in [
+        ("policy.json", sha256(b"")),
+        ("dir/outputs.jsonl", sha256(b"")),
+        ("outputs.jsonl", "sha256:short".to_owned()),
+    ] {
+        receipt["files"] = json!({name: digest});
+        assert!(load(&receipt).is_err(), "{name}");
+    }
+    let manifest = |count: usize| -> Value {
+        (0..count)
+            .map(|i| {
+                let branch = format!("agent-run-{i:0>60}");
+                (crate::check::patch_file_name(&branch), json!(sha256(b"")))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    };
+    receipt["files"] = manifest(MAX_EXTERNAL_FILES);
+    assert!(load(&receipt).is_ok());
+    receipt["files"] = manifest(MAX_EXTERNAL_FILES + 1);
+    assert!(load(&receipt).is_err());
+    receipt.as_object_mut().unwrap().remove("files");
+    assert!(load(&receipt).is_err());
+}
+
+#[test]
+fn fetch_receipt_round_trips_a_large_record_and_full_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let args = Args {
+        record: root.path().join("record.json"),
+        archive: root.path().join("raw.zip"),
+        outputs: root.path().join("raw"),
+        receipt: root.path().join("receipt.json"),
+    };
+    let mut record = record();
+    // Workflow filenames are validated but are bounded in size by the record.
+    let padding = MAX_RECORD as usize - serde_json::to_vec(&record).unwrap().len();
+    record.policy_workflow.insert_str(
+        record.policy_workflow.len() - ".yml".len(),
+        &"p".repeat(padding),
+    );
+    let record_json = serde_json::to_vec(&record).unwrap();
+    assert_eq!(record_json.len() as u64, MAX_RECORD);
+    std::fs::write(&args.record, record_json).unwrap();
+    let record = Record::load(&args.record).unwrap();
+    let names: Vec<_> = (0..MAX_EXTERNAL_FILES)
+        .map(|i| format!("aw-{i:0>100}.patch"))
+        .collect();
+    let files: Vec<_> = names.iter().map(|name| (name.as_str(), &b""[..])).collect();
+    run_with(&args, &record, &mut Fixture::new(&record, archive(&files))).unwrap();
+    let receipt = Receipt::load(&args.receipt).unwrap();
+    assert_eq!(receipt.record, record);
+    assert_eq!(receipt.files.len(), MAX_EXTERNAL_FILES);
+    assert!(names.iter().all(|name| receipt.files[name] == sha256(b"")));
+
+    let mut oversized = std::fs::read(&args.receipt).unwrap();
+    oversized.resize(MAX_RECEIPT as usize + 1, b' ');
+    std::fs::write(&args.receipt, oversized).unwrap();
+    assert!(Receipt::load(&args.receipt).is_err());
 }
 
 #[test]
@@ -555,11 +676,8 @@ fn raw_directory_is_bounded_before_zip_indexes_or_deduplicates_it() {
         footer[10..12].copy_from_slice(&(claimed as u16).to_le_bytes());
         footer[12..16].copy_from_slice(&((entry.len() * copies) as u32).to_le_bytes());
         bytes.extend_from_slice(&footer);
-        let root = tempfile::tempdir().unwrap();
-        let outputs = root.path().join("raw");
-        let error = extract(&bytes, &outputs).unwrap_err().to_string();
+        let error = members(&bytes).unwrap_err().to_string();
         assert!(error.contains(expected), "{copies}/{claimed}: {error}");
-        assert!(!outputs.exists());
     }
     assert_eq!(raw_directory_entries(&valid).unwrap(), 1);
     for length in 0..valid.len() {
@@ -577,4 +695,179 @@ fn raw_directory_is_bounded_before_zip_indexes_or_deduplicates_it() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("exceeds archive limit"), "{error}");
+}
+
+#[test]
+fn delayed_reader_finds_a_timely_run_until_the_deadline() {
+    let record = record();
+    let appearance = record.dispatched_at + chrono::Duration::seconds(APPEAR_SECONDS);
+    let late = appearance + chrono::Duration::minutes(1);
+    // The run appeared at once; the reader was queued past the window.
+    let mut fixture = Fixture::new(&record, archive(&[]));
+    fixture.now = late;
+    assert_eq!(fetch(&mut fixture, &record).unwrap().receipt.run_id, 7);
+    // A run created after the window is refused, whenever it is read.
+    for now in [record.dispatched_at, late] {
+        let mut fixture = Fixture::new(&record, archive(&[]));
+        fixture.now = now;
+        fixture.run["created_at"] = json!(late);
+        fixture.runs = vec![fixture.run.clone()];
+        let error = fetch(&mut fixture, &record).unwrap_err().to_string();
+        assert!(error.contains("outside dispatch window"), "{error}");
+    }
+    // None appeared: a late reader lists once and refuses without waiting.
+    let mut fixture = Fixture::new(&record, archive(&[]));
+    fixture.now = late;
+    fixture.runs.clear();
+    let error = fetch(&mut fixture, &record).unwrap_err().to_string();
+    assert!(error.contains("within ten minutes"), "{error}");
+    assert_eq!(
+        fixture
+            .paths
+            .iter()
+            .filter(|path| path.contains("/workflows/"))
+            .count(),
+        1
+    );
+    // An early one waits to the window's end, not the deadline.
+    let mut fixture = Fixture::new(&record, archive(&[]));
+    fixture.runs.clear();
+    let error = fetch(&mut fixture, &record).unwrap_err().to_string();
+    assert!(error.contains("within ten minutes"), "{error}");
+    assert_eq!(fixture.now, appearance);
+    // Past the deadline nothing is read.
+    let mut fixture = Fixture::new(&record, archive(&[]));
+    fixture.now = record.deadline;
+    assert!(fetch(&mut fixture, &record).is_err());
+    assert!(fixture.paths.is_empty());
+}
+
+/// The production download: the artifact API answers 302 to storage, which
+/// gets the request without the API credential and may not redirect again.
+#[test]
+fn storage_redirect_is_followed_once_without_the_credential() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::{Arc, Mutex};
+    let mut record = record();
+    record.dispatched_at = Utc::now();
+    record.deadline = record.dispatched_at + chrono::Duration::minutes(30);
+    let content = b"{\"type\":\"noop\",\"message\":\"Done\"}";
+    let bytes = archive(&[("outputs.jsonl", content)]);
+    let mut fixture = Fixture::new(&record, bytes.clone());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let root = format!("http://{}", listener.local_addr().unwrap());
+    let storage = format!("{root}/storage/");
+    let case = Arc::new(Mutex::new("ok"));
+    let (send, requests) = std::sync::mpsc::channel();
+    let served = (case.clone(), root.clone(), bytes.clone());
+    std::thread::spawn(move || {
+        let (case, root, bytes) = served;
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let path = line.split_whitespace().nth(1).unwrap().to_owned();
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line.to_ascii_lowercase());
+            }
+            let redirect = |to: String| (302, format!("Location: {to}\r\n"), Vec::new());
+            let (status, extra, body) = if path.ends_with("/zip") {
+                match *case.lock().unwrap() {
+                    "elsewhere" => redirect(format!("{root}/other/ok")),
+                    case => redirect(format!("{root}/storage/{case}")),
+                }
+            } else if path == "/storage/again" {
+                redirect(format!("{root}/storage/ok"))
+            } else if path == "/storage/ok" {
+                (200, String::new(), bytes.clone())
+            } else if path == "/storage/bad" {
+                (200, String::new(), [&bytes[..], &[0]].concat())
+            } else {
+                let value = fixture.get(&path).unwrap();
+                (200, String::new(), serde_json::to_vec(&value).unwrap())
+            };
+            // Recorded before the response, so that the client's read of
+            // its last response finds every request on the channel.
+            if send
+                .send((path, headers.contains("authorization: bearer ")))
+                .is_err()
+            {
+                break;
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status} X\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        }
+    });
+    let mut api = Api {
+        root,
+        token: "read-only-fixture".into(),
+        deadline: record.deadline,
+        storage,
+    };
+    for (name, refused) in [
+        ("ok", None),
+        ("again", Some("HTTP 302")),
+        ("bad", Some("digest mismatch")),
+        ("elsewhere", Some("storage over HTTPS")),
+    ] {
+        *case.lock().unwrap() = name;
+        let dir = tempfile::tempdir().unwrap();
+        let args = Args {
+            record: dir.path().join("record.json"),
+            archive: dir.path().join("raw.zip"),
+            outputs: dir.path().join("raw"),
+            receipt: dir.path().join("receipt.json"),
+        };
+        let result = run_with(&args, &record, &mut api);
+        match refused {
+            None => {
+                assert_eq!(result.unwrap(), Exit::Success);
+                let receipt = Receipt::load(&args.receipt).unwrap();
+                assert_eq!(receipt.raw.digest, sha256(&bytes));
+                assert_eq!(
+                    receipt.files,
+                    BTreeMap::from([("outputs.jsonl".to_owned(), sha256(content))])
+                );
+                assert_eq!(std::fs::read(&args.archive).unwrap(), bytes);
+                assert_eq!(
+                    std::fs::read(args.outputs.join("outputs.jsonl")).unwrap(),
+                    content
+                );
+            }
+            Some(message) => {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(message), "{name}: {error}");
+                for path in [&args.archive, &args.outputs, &args.receipt] {
+                    assert!(!path.exists(), "{name}: {}", path.display());
+                }
+            }
+        }
+    }
+    let requests: Vec<_> = requests.try_iter().collect();
+    for (path, authenticated) in &requests {
+        assert_eq!(
+            *authenticated,
+            !path.starts_with("/storage/"),
+            "{path}: credential sent {authenticated}"
+        );
+    }
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(path, _)| path.starts_with("/storage/"))
+            .count(),
+        3
+    );
 }

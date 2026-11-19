@@ -2,6 +2,7 @@
 //! not provenance; only the record and all the run identity checks do that.
 //! No dispatch, cancellation, credential creation or publication happens here.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -12,15 +13,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::exit::Exit;
-use crate::policy::{COMMIT_RE, Policy};
+use crate::policy::{COMMIT_RE, MAX_EXTERNAL_FILES, Policy, is_sha256_digest};
 
 const MAX_RECORD: u64 = 64 << 10;
+// Room for a full record, 256 names and their digests, and the receipt
+// envelope, while leaving room below Linux's per-environment-string limit
+// for policy.yml to pass the JSON to its shell step.
+const MAX_RECEIPT: u64 = 120 << 10;
 const MAX_PAGE: u64 = 4 << 20;
 const MAX_ARCHIVE: u64 = 128 << 20;
 const MAX_PAGES: usize = 10;
 const APPEAR_SECONDS: i64 = 600;
 const MAX_LIFETIME_SECONDS: i64 = 330 * 60;
 const POLL: Duration = Duration::from_secs(15);
+
+/// Where the artifact API's redirect may send the download in production:
+/// anywhere over HTTPS, without the API credential.
+const STORAGE: &str = "https://";
 
 #[cfg(test)]
 mod tests;
@@ -287,6 +296,53 @@ fn hex(text: &str, len: usize) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// BYTES' digest as the Actions API and the receipt write one.
+fn sha256(bytes: &[u8]) -> String {
+    let hex: String = digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("sha256:{hex}")
+}
+
+/// A name the raw archive may hold: a flat hand-back file, never a path.
+fn is_raw_member(name: &str) -> bool {
+    crate::check::is_handback_file(name) && !name.contains(['/', '\\'])
+}
+
+/// The outputs directory check reads, its file names PRESENT and the
+/// CONTENTS it accepted by name, held to the receipt's MANIFEST: the same
+/// names, each with the digest fetch wrote. A substituted, changed,
+/// dropped or added file refuses the hand-back, as does a receipt from
+/// another fetch. A file check refused to read is refused by that alone.
+pub fn bound(
+    present: &BTreeSet<&str>,
+    contents: &BTreeMap<String, Vec<u8>>,
+    manifest: &BTreeMap<String, String>,
+) -> Result<()> {
+    let receipted: BTreeSet<&str> = manifest.keys().map(String::as_str).collect();
+    let missing: Vec<_> = receipted.difference(present).copied().collect();
+    ensure!(
+        missing.is_empty(),
+        "files of the external receipt are missing from the outputs: {}",
+        missing.join(", ")
+    );
+    let extra: Vec<_> = present.difference(&receipted).copied().collect();
+    ensure!(
+        extra.is_empty(),
+        "files not in the external receipt: {}",
+        extra.join(", ")
+    );
+    for (name, content) in contents {
+        ensure!(
+            manifest.get(name) == Some(&sha256(content)),
+            "{name} differs from the external receipt's digest"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
@@ -302,11 +358,16 @@ pub struct Receipt {
     pub attempt: u64,
     pub checked: Artifact,
     pub raw: Artifact,
+    /// The extracted raw files by name, each with its digest: what check
+    /// binds the outputs directory to, so that nothing between fetch and
+    /// check can substitute, change, drop or add a file.
+    pub files: BTreeMap<String, String>,
 }
 
 impl Receipt {
     pub fn load(path: &Path) -> Result<Self> {
-        let receipt: Self = serde_json::from_slice(&crate::files::read_regular(path, MAX_RECORD)?)?;
+        let receipt: Self =
+            serde_json::from_slice(&crate::files::read_regular(path, MAX_RECEIPT)?)?;
         receipt.record.validate()?;
         ensure!(
             receipt.run_id > 0
@@ -318,13 +379,18 @@ impl Receipt {
         );
         for artifact in [&receipt.checked, &receipt.raw] {
             ensure!(
-                artifact
-                    .digest
-                    .strip_prefix("sha256:")
-                    .is_some_and(|s| hex(s, 64)),
+                is_sha256_digest(&artifact.digest),
                 "invalid API artifact digest"
             );
         }
+        ensure!(
+            receipt.files.len() <= MAX_EXTERNAL_FILES
+                && receipt
+                    .files
+                    .iter()
+                    .all(|(name, digest)| is_raw_member(name) && is_sha256_digest(digest)),
+            "invalid external receipt file manifest"
+        );
         if let Some(id) = receipt.record.returned_run_id {
             ensure!(
                 receipt.run_id == id,
@@ -507,10 +573,7 @@ fn artifacts(api: &mut impl Actions, record: &Record, run_id: u64) -> Result<(Ar
             .as_str()
             .context("missing API digest")?
             .to_owned();
-        ensure!(
-            digest.strip_prefix("sha256:").is_some_and(|d| hex(d, 64)),
-            "invalid API digest"
-        );
+        ensure!(is_sha256_digest(&digest), "invalid API digest");
         // The ID endpoint must agree with the run's list, not just its name.
         ensure!(
             api.get(&format!(
@@ -530,7 +593,16 @@ fn artifacts(api: &mut impl Actions, record: &Record, run_id: u64) -> Result<(Ar
     Ok((checked, raw))
 }
 
-fn fetch(api: &mut impl Actions, record: &Record) -> Result<(Receipt, Vec<u8>)> {
+/// What fetch verified: the receipt, the raw archive it names, and the
+/// archive's members, which the receipt's manifest digests.
+#[derive(Debug)]
+struct Fetched {
+    receipt: Receipt,
+    archive: Vec<u8>,
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+fn fetch(api: &mut impl Actions, record: &Record) -> Result<Fetched> {
     record.validate()?;
     timely(record, api.now())?;
     if let Some(id) = record.returned_run_id {
@@ -540,30 +612,20 @@ fn fetch(api: &mut impl Actions, record: &Record) -> Result<(Receipt, Vec<u8>)> 
             "returned run identity mismatch"
         );
     }
+    // The run must have been created within ten minutes of dispatch, which
+    // `identity` holds it to; a reader queued past them still finds such a
+    // run, and only stops waiting for one to appear, until the deadline.
+    let appearance = record.dispatched_at + chrono::Duration::seconds(APPEAR_SECONDS);
     let run_id = loop {
         timely(record, api.now())?;
-        let appearance = record.dispatched_at + chrono::Duration::seconds(APPEAR_SECONDS);
-        ensure!(
-            api.now() <= appearance,
-            "external correlation missed ten-minute appearance deadline"
-        );
-        let found = matched(api, record)?;
-        ensure!(
-            api.now() <= appearance,
-            "external correlation missed ten-minute appearance deadline"
-        );
-        if let Some(id) = found {
+        if let Some(id) = matched(api, record)? {
             break id;
         }
         ensure!(
-            api.now() < record.dispatched_at + chrono::Duration::seconds(APPEAR_SECONDS),
+            api.now() < appearance,
             "no external run appeared within ten minutes"
         );
-        api.wait(
-            record
-                .deadline
-                .min(record.dispatched_at + chrono::Duration::seconds(APPEAR_SECONDS)),
-        );
+        api.wait(record.deadline.min(appearance));
     };
     let path = format!("/repos/{}/actions/runs/{run_id}", record.repository);
     loop {
@@ -588,15 +650,11 @@ fn fetch(api: &mut impl Actions, record: &Record) -> Result<(Receipt, Vec<u8>)> 
         bytes.len() as u64 <= MAX_ARCHIVE,
         "raw artifact exceeds archive limit"
     );
-    let computed = digest(&SHA256, &bytes)
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
     ensure!(
-        raw.digest == format!("sha256:{computed}"),
+        raw.digest == sha256(&bytes),
         "raw artifact API digest mismatch"
     );
+    let files = members(&bytes)?;
     // Re-list as well as re-read after download: a late duplicate or rerun
     // must not be released. Artifacts carry run IDs, not attempt IDs.
     ensure!(
@@ -615,22 +673,31 @@ fn fetch(api: &mut impl Actions, record: &Record) -> Result<(Receipt, Vec<u8>)> 
         "external identity changed at release"
     );
     timely(record, api.now())?;
-    Ok((
-        Receipt {
-            record: record.clone(),
-            run_id,
-            attempt: 1,
-            checked,
-            raw,
-        },
-        bytes,
-    ))
+    let receipt = Receipt {
+        record: record.clone(),
+        run_id,
+        attempt: 1,
+        checked,
+        raw,
+        files: files
+            .iter()
+            .map(|(name, content)| (name.clone(), sha256(content)))
+            .collect(),
+    };
+    Ok(Fetched {
+        receipt,
+        archive: bytes,
+        files,
+    })
 }
 
 struct Api {
     root: String,
     token: String,
     deadline: DateTime<Utc>,
+    /// What a storage redirect must start with: [`STORAGE`], or a
+    /// fixture's loopback address.
+    storage: String,
 }
 
 impl Api {
@@ -691,8 +758,8 @@ impl Actions for Api {
         ensure!(status == 302, "artifact download failed with HTTP {status}");
         let url = location.context("artifact API omitted redirect")?;
         ensure!(
-            url.starts_with("https://"),
-            "artifact redirect must use HTTPS"
+            url.starts_with(&self.storage),
+            "artifact redirect must go to storage over HTTPS"
         );
         // Never send the API credential to blob storage (or follow another redirect).
         let (status, _, bytes) = self.request(&url, false, MAX_ARCHIVE)?;
@@ -726,21 +793,33 @@ pub fn run(args: &Args) -> Result<Exit> {
         root: root.trim_end_matches('/').to_owned(),
         token,
         deadline: record.deadline,
+        storage: STORAGE.to_owned(),
     };
-    let (receipt, bytes) = fetch(&mut api, &record)?;
-    extract(&bytes, &args.outputs)?;
+    run_with(args, &record, &mut api)
+}
+
+/// Fetch over API, then write the outputs, the archive and, last, the
+/// receipt that authorizes them. A refusal writes nothing.
+fn run_with(args: &Args, record: &Record, api: &mut impl Actions) -> Result<Exit> {
+    let fetched = fetch(api, record)?;
+    let receipt = serde_json::to_vec(&fetched.receipt)?;
+    ensure!(
+        receipt.len() as u64 <= MAX_RECEIPT,
+        "external receipt exceeds {MAX_RECEIPT} bytes"
+    );
+    write_members(&args.outputs, &fetched.files)?;
     // No partially verified result is written, and existing files are never replaced.
     use std::io::Write;
     let mut archive = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&args.archive)?;
-    archive.write_all(&bytes)?;
+    archive.write_all(&fetched.archive)?;
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&args.receipt)?;
-    serde_json::to_writer_pretty(&mut output, &receipt)?;
+    output.write_all(&receipt)?;
     Ok(Exit::Success)
 }
 
@@ -750,7 +829,6 @@ pub fn run(args: &Args) -> Result<Exit> {
 fn raw_directory_entries(bytes: &[u8]) -> Result<usize> {
     const FOOTER: usize = 22;
     const HEADER: usize = 46;
-    const MAX_FILES: usize = 256;
     ensure!(
         bytes.len() as u64 <= MAX_ARCHIVE,
         "raw archive exceeds 128 MiB"
@@ -784,7 +862,10 @@ fn raw_directory_entries(bytes: &[u8]) -> Result<usize> {
         "multi-disk ZIP refused"
     );
     let count = short(10);
-    ensure!(count <= MAX_FILES, "raw artifact has more than 256 files");
+    ensure!(
+        count <= MAX_EXTERNAL_FILES,
+        "raw artifact has more than {MAX_EXTERNAL_FILES} files"
+    );
     let start = word(16);
     ensure!(
         start.checked_add(word(12)) == Some(end),
@@ -797,7 +878,10 @@ fn raw_directory_entries(bytes: &[u8]) -> Result<usize> {
     let mut seen = 0;
     while !directory.is_empty() {
         seen += 1;
-        ensure!(seen <= MAX_FILES, "raw artifact has more than 256 files");
+        ensure!(
+            seen <= MAX_EXTERNAL_FILES,
+            "raw artifact has more than {MAX_EXTERNAL_FILES} files"
+        );
         ensure!(
             directory.len() >= HEADER && directory.starts_with(b"PK\x01\x02"),
             "invalid raw directory entry"
@@ -818,7 +902,9 @@ fn raw_directory_entries(bytes: &[u8]) -> Result<usize> {
     Ok(count)
 }
 
-fn extract(bytes: &[u8], outputs: &Path) -> Result<()> {
+/// The raw archive's members by name, the whole archive validated before
+/// any is returned.
+fn members(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
     use std::io::Read;
     let entries = raw_directory_entries(bytes)?;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
@@ -826,14 +912,13 @@ fn extract(bytes: &[u8], outputs: &Path) -> Result<()> {
         archive.len() == entries,
         "raw archive paths were deduplicated"
     );
-    let mut files = std::collections::BTreeMap::new();
+    let mut files = BTreeMap::new();
     let mut total = 0_u64;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
         let name = file.name().to_owned();
         ensure!(
-            crate::check::is_handback_file(&name)
-                && !name.contains(['/', '\\'])
+            is_raw_member(&name)
                 && file
                     .unix_mode()
                     .is_none_or(|m| m & 0o170000 == 0 || m & 0o170000 == 0o100000),
@@ -856,8 +941,13 @@ fn extract(bytes: &[u8], outputs: &Path) -> Result<()> {
             "duplicate raw archive path"
         );
     }
-    // Validate the entire archive before exposing any member; no paths, modes,
-    // symlinks or directories selected by the external producer are restored.
+    Ok(files)
+}
+
+/// FILES as the new directory OUTPUTS: flat names and contents alone; no
+/// paths, modes, symlinks or directories selected by the external
+/// producer are restored.
+fn write_members(outputs: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
     std::fs::create_dir(outputs)?;
     for (name, content) in files {
         std::fs::write(outputs.join(name), content)?;

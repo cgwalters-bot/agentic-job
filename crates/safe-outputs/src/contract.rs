@@ -921,6 +921,21 @@ pub struct Policy {
     pub native_handlers: Vec<String>,
 }
 
+/// The most files a raw external hand-back may hold, and so the most
+/// entries of an [`ExternalRun`]'s manifest.
+pub const MAX_EXTERNAL_FILES: usize = 256;
+
+/// `sha256:` and 64 lowercase hex digits, as the Actions API and the
+/// external receipt write a digest.
+pub fn is_sha256_digest(text: &str) -> bool {
+    text.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
 /// The trusted caller's external receipt, reduced to check/apply identities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -932,6 +947,11 @@ pub struct ExternalRun {
     pub run_id: u64,
     pub base_commit: String,
     pub raw_digest: String,
+    /// Each raw file the trusted fetch extracted, by name, with its
+    /// digest: the files check must find in the outputs directory, and
+    /// no others. Without it the caller's upload between fetch and check
+    /// could be substituted for the fetched hand-back.
+    pub files: BTreeMap<String, String>,
 }
 
 /// Admitted target and producer attempt supplied by the trusted caller.
@@ -1391,13 +1411,19 @@ impl Policy {
                     && external.caller_attempt > 0
                     && external.run_id > 0
                     && COMMIT_RE.is_match(&external.base_commit)
-                    && external
-                        .raw_digest
-                        .strip_prefix("sha256:")
-                        .is_some_and(|d| d.len() == 64
-                            && d.bytes()
-                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+                    && is_sha256_digest(&external.raw_digest),
                 "invalid trusted external identity"
+            );
+            ensure!(
+                external.files.len() <= MAX_EXTERNAL_FILES
+                    && external.files.iter().all(|(name, digest)| {
+                        !name.is_empty()
+                            && name.len() <= 255
+                            && !name.contains(['/', '\\'])
+                            && !name.chars().any(char::is_control)
+                            && is_sha256_digest(digest)
+                    }),
+                "invalid trusted external file manifest"
             );
             ensure!(
                 self.forge == Forge::Github

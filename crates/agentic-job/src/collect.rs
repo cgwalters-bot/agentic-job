@@ -58,8 +58,14 @@ pub fn collect_dir(outputs: &Path, policy: &Policy) -> Result<Collected> {
         Err(ReadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => bail!("{} {err}", path.display()),
     };
+    collect_text(&text, policy)
+}
+
+/// What [`collect`] makes of TEXT, an `outputs.jsonl` already read,
+/// under POLICY.
+pub fn collect_text(text: &str, policy: &Policy) -> Result<Collected> {
     let keeps_link = |host: &str| policy.keeps_link_to(host);
-    Ok(collect(&text, &config(policy)?, policy.forge, &keeps_link))
+    Ok(collect(text, &config(policy)?, policy.forge, &keeps_link))
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
