@@ -2014,6 +2014,11 @@ jobs:
           image=$(sudo podman load --quiet --input "$RUNNER_TEMP/image/secure-host.tar" | sed -n 's/^Loaded image: //p')
           id=$(sudo podman image inspect --format '{{.Id}}' "$image")
           echo "SECURE_HOST_IMAGE=$id" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Before the action: a host either layout prepared is refused by this
+      # image and by the neutral build's loader before they change it.
+      - name: A prepared host is refused before anything changes
+        run: cargo test --locked -p secure-host --test fresh_host -- --ignored --nocapture
       # No config: the forwarder's default is this repository's hosted
       # configuration, not the new action's, which has egress off; the
       # proxy from the image is what the next step tests.

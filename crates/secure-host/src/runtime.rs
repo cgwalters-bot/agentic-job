@@ -28,16 +28,26 @@ pub(crate) const fn name(neutral: &'static str, legacy: &'static str) -> &'stati
     }
 }
 
+/// Every layout's setup marker and policy pins. A fresh host has none of
+/// them, and what runs before both the loader and setup finds none.
+pub(crate) fn markers() -> impl Iterator<Item = &'static str> {
+    CONFIG_DIRS.into_iter().chain(PIN_DIRS)
+}
+
+/// Why a host on which PATH exists is refused.
+pub(crate) fn refusal(path: &str) -> String {
+    format!(
+        "{path} already exists: this host was prepared before, by this build or one of another runtime layout, and needs to be a fresh one"
+    )
+}
+
 /// Refuse a host on which any of PATHS exists: a host a run of either
 /// layout already prepared, which a build of the other would otherwise
 /// take for a fresh one. Configuration and pins are still read only from
 /// this build's own layout.
 pub(crate) fn refuse_prepared<'a>(paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
     for path in paths {
-        ensure!(
-            !Path::new(path).exists(),
-            "{path} already exists: this host was prepared before, by this build or one of another runtime layout, and needs to be a fresh one"
-        );
+        ensure!(!Path::new(path).exists(), refusal(path));
     }
     Ok(())
 }

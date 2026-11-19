@@ -120,9 +120,10 @@ CLI compatibility aliases remain accepted but are not required by standalone
 setup. No layout is selected from job-controlled environment or configuration,
 and no missing file or pin falls back to another layout.
 
-Do not upgrade an already hardened host between layouts: setup and the
-loader refuse a host with either layout's configuration directory or policy
-pins from an earlier run, before changing anything. On fresh disposable
+Do not upgrade an already hardened host between layouts: the image, the
+loader and setup refuse a host with either layout's configuration directory or
+policy pins from an earlier run, before changing anything. The image looks
+before it installs its binary over the host's. On fresh disposable
 hosts, migrate the image, its action and all consumers together, then remove
 the consumer's feature opt-in. Never reuse an old layout's check record as
 evidence for a new one. Publication and privileged deployment remain separate

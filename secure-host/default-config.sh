@@ -1,5 +1,6 @@
 # Bootstrap before the forwarded action installs a binary. Read os-release as
-# data, never source it. platform.rs tests this selector against host admission.
+# data, never source it. crates/agentic-job/tests/default_config.rs holds this
+# selector to host admission.
 set -euo pipefail
 id= version= seen_id= seen_version=
 field="^(ID|VERSION_ID)=(\"([a-z0-9.]+)\"|'([a-z0-9.]+)'|([a-z0-9.]+))$"

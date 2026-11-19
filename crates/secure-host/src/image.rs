@@ -29,7 +29,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::Host;
 use crate::{egress, host, platform};
@@ -177,6 +177,7 @@ pub fn run(config: &Path) -> Result<()> {
         platform::supported_file(Path::new(platform::OS_RELEASE)),
         platform::REFUSAL
     );
+    refuse_prepared_host()?;
     let steps = host_steps(config, &image, deny_runner_reads(config)?)?;
     install(&mut binary, HOST_BINARY, 0o755)?;
     if cfg!(feature = "legacy-runtime") {
@@ -185,19 +186,42 @@ pub fn run(config: &Path) -> Result<()> {
     fs::create_dir_all(HOST_OBJECT_DIR).with_context(|| format!("creating {HOST_OBJECT_DIR}"))?;
     install(&mut object, HOST_OBJECT, 0o644)?;
     for args in steps {
-        // The container's environment (`container=podman`, its HOME and
-        // hostname) is not the host's; root's fixed path is all it gets.
-        let status = Command::new(NSENTER)
-            .args(&args)
-            .env_clear()
-            .env("PATH", host::root_path())
-            .env("HOME", "/root")
-            .stdin(Stdio::null())
-            .status()
-            .with_context(|| format!("starting {NSENTER}"))?;
+        let status = nsenter(&args)?;
         ensure!(status.success(), "{NSENTER} {}: {status}", args.join(" "));
     }
     println!("secure-host: the host is set up; {HOST_BINARY} is installed");
+    Ok(())
+}
+
+/// Runs the host's nsenter with ARGS. The container's environment
+/// (`container=podman`, its HOME and hostname) is not the host's; root's
+/// fixed path is all it gets.
+fn nsenter<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<std::process::ExitStatus> {
+    Command::new(NSENTER)
+        .args(args)
+        .env_clear()
+        .env("PATH", host::root_path())
+        .env("HOME", "/root")
+        .stdin(Stdio::null())
+        .status()
+        .with_context(|| format!("starting {NSENTER}"))
+}
+
+/// Refuses a host either layout prepared, before the install over its
+/// binary: the loader and setup would refuse it only after that, leaving
+/// a binary that reads another layout's files. Looked for in the host's
+/// mount namespace, whose bpffs holds the pins; `test` answers 1 for a
+/// missing path, and any other failure is a refusal too.
+fn refuse_prepared_host() -> Result<()> {
+    for marker in crate::runtime::markers() {
+        let args = ["--target", "1", "--mount", "--", "test", "-e", marker];
+        let status = nsenter(&args)?;
+        match status.code() {
+            Some(1) => {}
+            Some(0) => bail!(crate::runtime::refusal(marker)),
+            _ => bail!("{NSENTER} {}: {status}", args.join(" ")),
+        }
+    }
     Ok(())
 }
 

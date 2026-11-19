@@ -20,9 +20,12 @@ on the root filesystem's device. Other mounted filesystems are outside that
 device-scoped policy and need their own permissions or isolation.
 Owner-writable controls must remain writable or the probe fails.
 
-The runner-read policy, when enabled, limits reads of other runner processes'
-environment and memory. Setup also closes diagnostic sockets and discards
-core dumps so a step cannot recover an ancestor's credentials from a dump.
+The runner-read policy, when enabled, refuses read-mode access to other
+runner processes, such as their environment. Memory access (`/proc/PID/mem`,
+process-VM reads) is an attach, which it leaves to the kernel's ptrace checks
+and Yama; the loader only raises a Yama scope of 0 to 1. Setup also closes
+diagnostic sockets and discards core dumps so a step cannot recover an
+ancestor's credentials from a dump.
 These controls do not make same-UID processes mutually isolated: files,
 inherited environment, permitted IPC and job tokens remain shared trust.
 

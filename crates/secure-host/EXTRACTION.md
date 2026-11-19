@@ -12,19 +12,16 @@ test "$(git -C secure-host-export rev-parse --is-shallow-repository)" = false
 git -C secure-host-export filter-repo \
   --path crates/secure-host/ --path egress/ \
   --path crates/agentic-job/bpf/ \
-  --path secure-host/default-config.sh \
   --path LICENSE --path LICENSE-MIT --path LICENSE-APACHE \
   --path-rename crates/secure-host/ci/ci.yml:.github/workflows/ci.yml \
   --path-rename crates/agentic-job/bpf/:bpf/ \
-  --path-rename crates/secure-host/: \
-  --path-rename secure-host/default-config.sh:default-config.sh
+  --path-rename crates/secure-host/:
 ```
 
 The old `egress/` path is deliberately retained: before this preparation its
 files lived there. At the tip they now live inside the crate, which is mapped
 to the root. Both eras consequently become `egress/` in the extracted history.
-The selector's old path is similarly mapped to its new root path, and the
-world-write policy's old `crates/agentic-job/bpf/` to `bpf/`. This keeps
+The world-write policy's old `crates/agentic-job/bpf/` similarly becomes `bpf/`. This keeps
 history since the crate split; `filter-repo` does not automatically follow
 renames back into older mixed-purpose source files.
 
@@ -43,8 +40,9 @@ has a 15-minute bound and performs no privileged host mutation or publication.
 It builds/tests this source, not the deployed image. Release signing, image
 publication and privileged runtime CI still need their own reviewed setup.
 
-The action remains in its existing repository for now; the forwarding action
-and binary fetcher outside this directory are not exported. Existing callers
+The action remains in its existing repository for now; the forwarding action,
+its default-configuration selector and binary fetcher outside this directory
+are not exported. Existing callers
 continue using the existing release. The exported crate's default layout is
 neutral; `legacy-runtime` is only for consumers still pinned to the old layout.
 Verify both `cargo test --locked` and `cargo test --locked --features legacy-runtime`

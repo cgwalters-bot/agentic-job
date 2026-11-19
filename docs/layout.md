@@ -29,10 +29,9 @@ inference, safe outputs, sessions or `run`), which `cargo tree -p
 secure-host` shows, and agentic-job depends on it, never the reverse.
 Its manifest declares its own package metadata, registry dependencies and
 lints, without inheriting from this workspace. The boundary test resolves
-that manifest in isolation. This is an extraction prerequisite, not yet a
-standalone source tree: embedded egress assets now live in
-`crates/secure-host/egress/`, but some tests read `secure-host/` and
-`.github/actions/confine-probe/` here.
+that manifest in isolation. It builds and tests as a standalone
+source tree, with its egress assets in `crates/secure-host/egress/`;
+[EXTRACTION.md](../crates/secure-host/EXTRACTION.md) describes moving it out.
 The split is under way ([#1623](https://github.com/cgwalters-forge/agentic-job/issues/1623)).
 So far it holds bounded file reads (`files.rs`), host users and the
 programs root may run (`host.rs`), the network rules (`network.rs`), the
