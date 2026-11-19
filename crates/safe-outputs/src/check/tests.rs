@@ -289,7 +289,7 @@ fn refusals() {
         .unwrap()
         .protected_paths = vec!["raw/**".into()];
     let mut small = policy();
-    small.max_patch_bytes = 64;
+    small.max_patch_bytes = Some(64);
     let noop = json!({"type": "noop", "message": "nothing"});
     // The name, the hand-back, the policy, and a part of a refusal.
     let cases: Vec<(&str, Case, Policy, &str)> = vec![
@@ -551,20 +551,26 @@ fn replacement_series_are_checked_commit_by_commit() {
         series(&["src/a.rs", "src/b.rs"]).check(&policy).errors
     };
     for (max_patch_files, replacement_max_files, want) in [
+        (None, 0, None),
         (
+            None,
             1,
+            Some("replacement: replacement exceeds the total file limit"),
+        ),
+        (
+            Some(1),
             0,
             Some("replacement: replacement exceeds the total file limit"),
         ),
         (
-            1,
+            Some(1),
             1,
             Some("replacement: replacement exceeds the total file limit"),
         ),
-        (1, 2, None),
-        (2, 0, None),
+        (Some(1), 2, None),
+        (Some(2), 0, None),
         (
-            2,
+            Some(2),
             1,
             Some("replacement: replacement exceeds the total file limit"),
         ),
@@ -573,9 +579,40 @@ fn replacement_series_are_checked_commit_by_commit() {
         assert_eq!(
             errors.first().map(String::as_str),
             want,
-            "{max_patch_files} {replacement_max_files}: {errors:?}"
+            "{max_patch_files:?} {replacement_max_files}: {errors:?}"
         );
     }
+
+    // One commit can exceed even the former native handler default, but
+    // only when the per-patch bound is absent. The series cap is independent.
+    let mut wide = mail("src/a.rs");
+    for index in 0..100 {
+        let extra = mail(&format!("src/file-{index}.rs"));
+        wide.push_str(&extra[extra.find("diff --git").unwrap()..]);
+    }
+    let wide = Case {
+        replacement: Some(json!({"base_commit": BASE, "commits": [wide]}).to_string()),
+        ..series(&["src/a.rs"])
+    };
+    policy.max_patch_bytes = None;
+    for limit in [None, Some(100)] {
+        let push = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap();
+        push.max_patch_files = limit;
+        push.replacement_max_files = 200;
+        let checked = wide.check(&policy);
+        if limit.is_none() {
+            assert!(checked.errors.is_empty(), "{:?}", checked.errors);
+            assert_eq!(checked.patch.unwrap().commit_files.unwrap()[0].len(), 101);
+        } else {
+            assert!(checked.errors[0].contains("the patch touches 101 files, over 100"));
+        }
+    }
+    policy.max_patch_bytes = Some(1024);
+    assert!(wide.check(&policy).errors[0].contains("replacement exceeds the patch byte limit"));
 }
 
 #[test]

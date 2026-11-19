@@ -126,7 +126,7 @@ impl Checked {
                     name.clone(),
                     read(
                         &dir.join(name),
-                        policy.max_patch_bytes.min(MAX_OUTPUTS_BYTES),
+                        policy.patch_read_limit().min(MAX_OUTPUTS_BYTES),
                     )?,
                 );
                 if !files.contains_key(check::BASE_FILE) {

@@ -64,10 +64,6 @@ const FETCHED: &str = "refs/agentic-job/target-base";
 /// own bound on the collector's result.
 const MAX_JSON: u64 = 4 << 20;
 
-/// The most of a checked patch read: a pull request whose patch is larger
-/// refuses the run.
-const MAX_PATCH_BYTES: u64 = 64 << 20;
-
 /// A page of 100 comments of up to 65,536 characters each.
 pub(super) const MAX_PAGE_BYTES: u64 = 32 << 20;
 
@@ -592,7 +588,10 @@ impl Guard<'_> {
         let base = Path::new(&file)
             .file_name()
             .with_context(|| format!("the patch file {file:?} has no name"))?;
-        read_regular(&self.args.dir.join(base), MAX_PATCH_BYTES)
+        read_regular(
+            &self.args.dir.join(base),
+            safe_outputs::contract::MAX_PATCH_ARTIFACT_BYTES,
+        )
     }
 
     fn api_repo(&self, repo: &str) -> String {

@@ -115,9 +115,9 @@ fn check_policy_up_to(
             .min(policy.max_outputs)
             .min(max_steps),
         base_commit,
-        policy
-            .max_patch_bytes
-            .min(handler_patch_size_kib(pr.max_patch_size).saturating_mul(1024)),
+        handler_patch_size_kib(pr.max_patch_size).map_or(policy.patch_read_limit(), |kib| {
+            policy.patch_read_limit().min(kib.saturating_mul(1024))
+        }),
         &rules,
         inspect,
     )
@@ -278,7 +278,7 @@ mod tests {
             (None, 1, "byte limit"),
         ] {
             policy.commit_author = author.map(str::to_owned);
-            policy.max_patch_bytes = max_bytes;
+            policy.max_patch_bytes = Some(max_bytes);
             let checked = check_policy(content.as_bytes(), &policy, BASE, |_| Ok(())).unwrap();
             assert!(checked.accepted.is_empty());
             let refusal = checked.refused.unwrap();
@@ -295,7 +295,11 @@ mod tests {
         let mut policy = policy();
         policy.max_outputs = 3;
         policy.safe_outputs.stack_max_steps = 3;
-        for (kib, accepted) in [(1, &[1][..]), (0, &[1, 2, 3][..])] {
+        for (kib, accepted) in [
+            (Some(1), &[1][..]),
+            (Some(0), &[1, 2, 3][..]),
+            (None, &[1, 2, 3][..]),
+        ] {
             policy
                 .safe_outputs
                 .create_pull_request
@@ -310,7 +314,7 @@ mod tests {
             .unwrap();
             assert_eq!(inspected, accepted);
             assert_eq!(checked.accepted.len(), accepted.len());
-            if kib == 1 {
+            if kib == Some(1) {
                 let refusal = checked.refused.unwrap();
                 assert_eq!(refusal.position, 2);
                 assert!(refusal.reason.contains("patch byte limit"));
@@ -612,7 +616,7 @@ mod tests {
         let pr = policy.safe_outputs.create_pull_request.unwrap();
         for rules in [
             PatchRules {
-                max_patch_files: 0,
+                max_patch_files: Some(0),
                 ..pr.rules()
             },
             PatchRules {

@@ -236,7 +236,9 @@ the next in the same major version.
   (`[forgejo.outputs.TYPE]` and `push_repo`) or `[gitlab]`
   (`[gitlab.outputs.TYPE]` and `push_repo`)
   ([the bounds and the policy](safe-outputs.md#the-bounds-and-the-policy),
-  [events](events.md)). `repos` accepts existing string globs and opt-in
+  [events](events.md)). `max_patch_bytes` and `max_patch_files` are optional;
+  omission imposes no caller limit, without overriding organization bounds
+  or artifact read ceilings. `repos` accepts existing string globs and opt-in
   `{org = "ORG", forks = false}` rules on GitHub, checked against live owner,
   fork and archived metadata at policy time. Rules may require `properties`
   (a table of exact string values) and `topics` (an array of exact names).

@@ -549,18 +549,24 @@ impl Run {
     }
 
     fn check(&self, collected: &Path) -> Output {
-        Command::new(BIN)
+        self.check_command(collected)
+            .arg("--report")
+            .arg(self.path("verdict.json"))
+            .output()
+            .expect("running agentic-job")
+    }
+
+    fn check_command(&self, collected: &Path) -> Command {
+        let mut command = Command::new(BIN);
+        command
             .arg("check")
             .arg("--policy")
             .arg(self.path("policy.json"))
             .arg("--outputs")
             .arg(self.path("out"))
             .arg("--collected")
-            .arg(collected)
-            .arg("--report")
-            .arg(self.path("verdict.json"))
-            .output()
-            .expect("running agentic-job")
+            .arg(collected);
+        command
     }
 
     fn verdict(&self) -> Value {
@@ -928,29 +934,52 @@ fn collected_patches_obey_exact_byte_and_file_limits() {
             1,
         );
     let bytes = patch.len();
-    for (name, max_bytes, max_files, refusal) in [
-        ("bytes below limit", bytes + 1, 2, None),
-        ("bytes at limit", bytes, 2, None),
+    // Within no caller limit, but its paths alone fill more than the
+    // report apply reads.
+    let wide = (0..18_000).fold(patch.clone(), |mut wide, n| {
+        let path = format!("wide/{}{n}", "x".repeat(240));
+        wide.push_str(&format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..587be6b\n\
+             --- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+x\n"
+        ));
+        wide
+    });
+    for (name, patch, max_bytes, max_files, refusal) in [
+        ("no caller limits", &patch, None, None, None),
+        ("bytes below limit", &patch, Some(bytes + 1), Some(2), None),
+        ("bytes at limit", &patch, Some(bytes), Some(2), None),
         (
             "bytes over limit",
-            bytes - 1,
-            2,
+            &patch,
+            Some(bytes - 1),
+            None,
             Some(format!("is {bytes} bytes, over {}", bytes - 1)),
         ),
-        ("files below limit", bytes + 1, 3, None),
-        ("files at limit", bytes + 1, 2, None),
+        ("files below limit", &patch, Some(bytes + 1), Some(3), None),
+        ("files at limit", &patch, Some(bytes + 1), Some(2), None),
         (
             "files over limit",
-            bytes + 1,
-            1,
+            &patch,
+            None,
+            Some(1),
             Some("the patch touches 2 files, over 1".to_owned()),
+        ),
+        (
+            "report over its limit",
+            &wide,
+            None,
+            None,
+            Some(format!(
+                "the check report exceeds {} bytes",
+                safe_outputs::apply::MAX_REPORT_BYTES
+            )),
         ),
     ] {
         let run = Run {
             dir: tempfile::tempdir().unwrap(),
         };
         std::fs::create_dir(run.path("out")).unwrap();
-        std::fs::write(run.path("out/aw-agent-run-7.patch"), &patch).unwrap();
+        std::fs::write(run.path("out/aw-agent-run-7.patch"), patch).unwrap();
         std::fs::copy(
             data("check/handback/outputs.jsonl"),
             run.path("out/outputs.jsonl"),
@@ -961,9 +990,19 @@ fn collected_patches_obey_exact_byte_and_file_limits() {
                 .unwrap();
         base["repo"] = json!("example/repo");
         std::fs::write(run.path("out/base.json"), base.to_string()).unwrap();
-        std::fs::write(run.path("bounds.toml"), format!(
-            "hosts = ['github.com']\nrepos = ['example/repo']\nbases = ['main']\nmax_outputs = 1\nmax_patch_bytes = {max_bytes}\nmax_patch_files = {max_files}\n[github.outputs]\ncreate_pull_request = {{ max = 1 }}\n"
-        )).unwrap();
+        let mut bounds =
+            "hosts = ['github.com']\nrepos = ['example/repo']\nbases = ['main']\nmax_outputs = 1\n"
+                .to_owned();
+        for (key, value) in [
+            ("max_patch_bytes", max_bytes),
+            ("max_patch_files", max_files),
+        ] {
+            if let Some(value) = value {
+                bounds.push_str(&format!("{key} = {value}\n"));
+            }
+        }
+        bounds.push_str("[github.outputs]\ncreate_pull_request = { max = 1 }\n");
+        std::fs::write(run.path("bounds.toml"), bounds).unwrap();
         let policy = Command::new(BIN)
             .args([
                 "policy",
@@ -986,10 +1025,20 @@ fn collected_patches_obey_exact_byte_and_file_limits() {
             .unwrap();
         assert_eq!(policy.status.code(), Some(0), "{name}: {policy:?}");
         let serialized: Value = serde_json::from_slice(&policy.stdout).unwrap();
-        assert_eq!(serialized["max_patch_bytes"], json!(max_bytes), "{name}");
+        let pr = &serialized["safe_outputs"]["create_pull_request"];
         assert_eq!(
-            serialized["safe_outputs"]["create_pull_request"]["max_patch_files"],
-            json!(max_files),
+            serialized.get("max_patch_bytes").cloned(),
+            max_bytes.map(|n| json!(n)),
+            "{name}"
+        );
+        assert_eq!(
+            pr.get("max_patch_size").cloned(),
+            max_bytes.map(|n| json!(n / 1024)),
+            "{name}"
+        );
+        assert_eq!(
+            pr.get("max_patch_files").cloned(),
+            max_files.map(|n| json!(n)),
             "{name}"
         );
         std::fs::write(run.path("policy.json"), policy.stdout).unwrap();
@@ -1005,11 +1054,19 @@ fn collected_patches_obey_exact_byte_and_file_limits() {
             .unwrap();
         assert_eq!(ingest.status.code(), Some(0), "{name}: {ingest:?}");
         let checked = run.check(&collected);
+        let without_report = run.check_command(&collected).output().unwrap();
+        assert_eq!(without_report.status, checked.status, "{name}");
+        assert_eq!(without_report.stderr, checked.stderr, "{name}");
         let verdict = run.verdict();
         assert_eq!(
             checked.status.code(),
             Some(i32::from(refusal.is_some())),
             "{name}: {checked:?}; {verdict}"
+        );
+        assert!(
+            std::fs::metadata(run.path("verdict.json")).unwrap().len()
+                < safe_outputs::apply::MAX_REPORT_BYTES,
+            "{name}"
         );
         assert_eq!(verdict["ok"], refusal.is_none(), "{name}: {verdict}");
         if let Some(refusal) = refusal {

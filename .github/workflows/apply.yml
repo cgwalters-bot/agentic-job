@@ -475,6 +475,10 @@ jobs:
         # only one policy admits; `protect_top_level_dot_folders` stays
         # true, so every other dot-folder stays protected there too. Push
         # additionally needs allow_workflows for this same exemption.
+        # A patch limit the bounds leave out is no limit: the pinned handlers
+        # would take a missing one for their own default (100 files, 4096
+        # KiB, also for the push's resulting files), so it is set to the
+        # largest integer they read exactly.
         # `checkout_mapping` tells the push handler that the output
         # repository's checkout is the workspace. From a caller in another
         # repository it would otherwise look for that checkout itself, and
@@ -528,7 +532,8 @@ jobs:
             exit 1
           fi
           jq --arg ready "${READY:-}" --arg repo "$OUTPUT_REPO" --arg base "$BASE" --arg branch "$BRANCH_PREFIX" --arg title "$PARTIAL$TITLE_PREFIX" \
-            --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" '
+            --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" \
+            --argjson unbounded 9007199254740991 '
             (if $fork == "" then del(.create_pull_request, .push_to_pull_request_branch) else . end)
             | del(.own_branch_repos, .stack_max_steps)
             | (select(has("create_pull_request")).create_pull_request) |= (.draft = ($ready != "true") | del(.ready_when_complete, .protected_paths))
@@ -539,6 +544,8 @@ jobs:
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) |=
                 ((.unprotected_dot_folders // [] | map(select(. == ".github"))) as $excludes | del(.unprotected_dot_folders, .protected_dot_folder_excludes, .allow_workflows)
                  | if $excludes != [] then .protected_dot_folder_excludes = $excludes | .allow_workflows = true else . end)
+            | reduce ("create_pull_request", "push_to_pull_request_branch") as $type (.;
+                if has($type) then .[$type] |= (.max_patch_size //= $unbounded | .max_patch_files //= $unbounded) else . end)
             | (select(has("create_pull_request")).create_pull_request) += $pr
               + {"target-repo": $repo, base_branch: $base, branch_prefix: $branch, title_prefix: $title,
                  "head-repo": $fork, allowed_repos: [$fork]}

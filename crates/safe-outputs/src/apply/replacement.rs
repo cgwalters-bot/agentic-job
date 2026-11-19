@@ -15,13 +15,9 @@ use std::process::{Command as Process, Stdio};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
-use super::COMMIT_RE;
+use super::{COMMIT_RE, MAX_REPORT_BYTES};
 
-/// The hand-back's bound on a series, with room for JSON's escaping.
-const MAX_SERIES_BYTES: u64 = 4 << 20;
-
-/// check's own bound on the collector's result, which the report repeats.
-const MAX_REPORT_BYTES: u64 = 4 << 20;
+use crate::contract::MAX_REPLACEMENT_ARTIFACT_BYTES;
 
 const MAX_CONFIG_BYTES: u64 = 1 << 20;
 
@@ -100,7 +96,7 @@ pub fn trial(
         report["replay"].is_null(),
         "endpoint replay is unsupported for replacement patches"
     );
-    let series = read_json(read, &args.series, MAX_SERIES_BYTES)?;
+    let series = read_json(read, &args.series, MAX_REPLACEMENT_ARTIFACT_BYTES)?;
     let config = &read_json(read, &args.config, MAX_CONFIG_BYTES)?["push_to_pull_request_branch"];
     let base = report["base_commit"].as_str().unwrap_or("");
     let pinned = config["replacement_base"].as_str().unwrap_or("");

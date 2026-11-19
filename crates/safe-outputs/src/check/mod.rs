@@ -1264,7 +1264,7 @@ pub fn check(
         } else if !patch_names.is_empty() || handback.base.is_some() || secondary_patch.is_some() {
             errors.push("a replacement alongside a patch or base.json".into());
         } else if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch {
-            match replacement::check(content, push, policy.max_patch_bytes) {
+            match replacement::check(content, push, policy.replacement_read_limit()) {
                 Ok(info) => patch = Some(info),
                 Err(error) => errors.push(format!("replacement: {error}")),
             }
@@ -1316,12 +1316,9 @@ pub fn check(
             ) {
                 ([_], Some(content), Some(base)) => {
                     // Read within the larger of the two patches' budgets.
-                    if content.len() as u64 > policy.max_patch_bytes {
-                        errors.push(format!(
-                            "{want} is {} bytes, over {}",
-                            content.len(),
-                            policy.max_patch_bytes
-                        ));
+                    let limit = policy.patch_read_limit();
+                    if content.len() as u64 > limit {
+                        errors.push(format!("{want} is {} bytes, over {limit}", content.len()));
                     }
                     // What is not UTF-8 in it is in a file's content, where
                     // the rules look only at the first byte of a line.

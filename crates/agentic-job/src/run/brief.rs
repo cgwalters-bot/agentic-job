@@ -90,14 +90,16 @@ fn patch_rules(rules: &PatchRules<'_>) -> String {
             globs.join(", ")
         );
     }
+    let file_refusal = rules.max_patch_files.map_or_else(String::new, |max| {
+        format!("a change to more than {max} files, and ")
+    });
     let _ = write!(
         text,
-        "{ALWAYS_PROTECTED}. So is a change to more than {} files, and one that \
+        "{ALWAYS_PROTECTED}. So is {file_refusal}one that \
          {REFUSED_KINDS}. Where the task asks for a change that would be refused, leave that \
          part out and say so in your report; but if it is all the task asks for, make it \
          anyway, so that the run fails naming the file instead of ending well with nothing \
-         handed back.",
-        rules.max_patch_files
+         handed back."
     );
     text
 }
@@ -238,7 +240,7 @@ pub fn hand_back(
             text,
             "- Change: what you change, add or delete in `{}` (ignored files excepted), left \
              uncommitted and unpushed, is {} as one patch against the commit you started \
-             from, of at most {} KiB and {} files. A protected path or a refused kind of file \
+             from, of at most {} KiB{}. A protected path or a refused kind of file \
              gets the whole change refused: leave that part out and say so, unless it is all \
              the task asks for.",
             checkout.display(),
@@ -246,8 +248,10 @@ pub fn hand_back(
                 Some(push) => format!("pushed to pull request #{}'s branch", push.target),
                 None => "proposed as a pull request".to_owned(),
             },
-            policy.max_patch_bytes / (KIB as u64),
-            rules.max_patch_files,
+            policy.patch_read_limit() / (KIB as u64),
+            rules
+                .max_patch_files
+                .map_or_else(String::new, |max| format!(" and {max} files")),
         ),
         _ => writeln!(
             text,
@@ -409,7 +413,7 @@ pub fn guide(
             "everything you change, add or delete in it (ignored files excepted) is collected \
              when you finish, as one patch of at most {} KiB against the commit you started \
              from, and {proposed}. Leave your changes uncommitted, and do not push.{}",
-            policy.max_patch_bytes / (KIB as u64),
+            policy.patch_read_limit() / (KIB as u64),
             patch_rules(rules)
         )
     } else {
@@ -495,12 +499,15 @@ pub fn guide(
     }
     if push.is_some() {
         if let Some(push) = push.filter(|push| push.replacement_max_commits > 0) {
+            let total_files = push.replacement_files().map_or_else(String::new, |max| {
+                format!(" The series touches at most {max} files in all.")
+            });
             let _ = writeln!(
                 text,
-                "  Alternatively, run `agentic-job handback replace --base {}` in your checkout (optional final argument: a revision range, default BASE..HEAD). Do not construct replacement mails or JSON by hand. The command builds `out/replacement.json` under your home, preserves format-patch bytes and validates the series with git am in a scratch repository before writing it. This replaces the entire branch with at most {} nonempty commits, including all original commits you want to keep. You may instead use the unique merge base of the run's pinned PR head and this target snapshot, or fetch a newer target-branch snapshot; trusted apply verifies its ancestry. For a fork-to-upstream PR, use the upstream target, not the fork's main. Every commit passes the same path rules and file limit, the series touches at most {} files in all, and the whole JSON fits the patch byte limit. Include a `push_to_pull_request_branch` request; do not also propose a working-tree patch. A moved branch is refused with an exact lease. Commit messages and existing trailers are preserved; no trailers are added.",
+                "  Alternatively, run `agentic-job handback replace --base {}` in your checkout (optional final argument: a revision range, default BASE..HEAD). Do not construct replacement mails or JSON by hand. The command builds `out/replacement.json` under your home, preserves format-patch bytes and validates the series with git am in a scratch repository before writing it. This replaces the entire branch with at most {} nonempty commits, including all original commits you want to keep. You may instead use the unique merge base of the run's pinned PR head and this target snapshot, or fetch a newer target-branch snapshot; trusted apply verifies its ancestry. For a fork-to-upstream PR, use the upstream target, not the fork's main. Every commit passes the same path rules and any per-patch file limit.{total_files} The whole JSON fits {} KiB. Include a `push_to_pull_request_branch` request; do not also propose a working-tree patch. A moved branch is refused with an exact lease. Commit messages and existing trailers are preserved; no trailers are added.",
                 push.replacement_base.as_deref().unwrap_or("unresolved"),
                 push.replacement_max_commits,
-                push.replacement_files()
+                policy.replacement_read_limit() / (KIB as u64)
             );
         }
         text.push_str(
@@ -634,7 +641,7 @@ mod tests {
             base: "main".into(),
             kind,
             max_outputs: 3,
-            max_patch_bytes: 1 << 20,
+            max_patch_bytes: Some(1 << 20),
             safe_outputs: serde_json::from_value::<SafeOutputs>(outputs).unwrap(),
             commit_author: None,
             push_repo: None,
@@ -1042,7 +1049,7 @@ mod brief_tests {
             base: "main".into(),
             kind: Kind::Branch,
             max_outputs: 3,
-            max_patch_bytes: 1 << 20,
+            max_patch_bytes: Some(1 << 20),
             safe_outputs: serde_json::from_value::<SafeOutputs>(outputs).unwrap(),
             commit_author: None,
             push_repo: None,

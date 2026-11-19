@@ -119,7 +119,7 @@ impl Job {
             base: "main".to_owned(),
             kind: Kind::Branch,
             max_outputs: 1,
-            max_patch_bytes: 1 << 20,
+            max_patch_bytes: Some(1 << 20),
             safe_outputs: SafeOutputs::default(),
             commit_author: None,
             push_repo: None,

@@ -1556,14 +1556,15 @@ file forbids replacement. The ordinary one-commit push remains unchanged.
 The same head repository and branch checks apply; no write token
 is given to the producer or checker, and a partial run cannot replace history.
 
-Each commit of a series keeps to `max_patch_files`, and by default so does
-the series in all. A pull request that grew over several pushes, each
+When set, `max_patch_files` bounds each commit and by default the union of
+paths across the series. A pull request that grew over several pushes, each
 within that limit, can outgrow it, and a rebase onto a moved base must
 carry all of it at once (#3017). For that, the caller may add
 `replacement_max_files = 200` beside `replacement_max_commits` (maximum
 500): the most files a replacement series may touch in all. Organization
-bounds intersect it, taking a file's `max_patch_files` where it sets none,
-and the patch byte limit still bounds the series.
+bounds take the tighter total, using each bounds file's `max_patch_files`
+where it sets no `replacement_max_files`. If neither limit is set, that
+bounds file imposes no file-count limit on the series.
 
 The producer runs `agentic-job handback replace --base BASE_SHA [RANGE]`
 in its checkout, alongside its `push_to_pull_request_branch` request.
@@ -1616,9 +1617,10 @@ not collect additional uncommitted changes on this path.
 `handback replace` refuses a replay whose final tree differs from the
 producer's intended `HEAD` tree, including an incomplete revision range.
 
-The entire JSON fits `max_patch_bytes`. Check bounds the number of mails,
-checks each with the ordinary path/type rules, and bounds the union of
-changed paths by `max_patch_files`. Empty commits and multiple mails in a
+The entire JSON fits the 4 MiB replacement artifact ceiling and any tighter
+`max_patch_bytes`. Check bounds the number of mails, checks each with the
+ordinary path/type rules, and enforces any file limits described above.
+Empty commits and multiple mails in a
 string are refused. Apply builds only a linear series using plain `git am`
 on the trusted base and compares every commit's actual paths to check's list.
 No producer repository, bundle, hooks or configuration is imported. A fixed
@@ -1648,7 +1650,7 @@ another fork whose owner gave it write access, or the target repository
 itself. The target's CI runs a fork's commit as it ran the pull request's
 first one: as a fork's, with a read-only token, no secrets and no OIDC token.
 
-For an ordinary single-commit GitHub fix, `max_patch_bytes` also supplies the
+For an ordinary single-commit GitHub fix, an explicit `max_patch_bytes` also supplies the
 handler's `max_patch_size` in KiB. Besides bounding the submitted patch,
 the handler bounds the **sum of the complete resulting files** changed by it
 (deleted files contribute zero), rounded up to KiB. A tiny edit to a large
@@ -1656,7 +1658,8 @@ existing file can therefore pass check's patch-byte limit and still be refused
 at apply. This applies equally to `dispatch/implement/*` and other admitted
 head branches; changing branch globs does not fix a changed-content refusal.
 Choose the caller's byte cap for both sizes, subject to any tighter organization
-bounds, rather than disabling the post-apply check.
+bounds. If no byte limit is set, apply does not cap the sum of the resulting
+files; the patch artifact itself still has a bounded read.
 
 In [#4116](https://github.com/cgwalters-forge/agentic-job/issues/4116), the
 [apply log for #4082](https://github.com/cgwalters-forge/tracker/actions/runs/43599823431/job/132466356048)
@@ -1844,13 +1847,24 @@ does, so a pull request closed before apply runs is not pushed to.
 A caller keeps a bounds file in its repository
 ([this repository's](../.github/agentic-job/allow.toml)): the `hosts` a
 clone URL may name, globs of `repos` and `bases`, `max_outputs`,
-`max_patch_bytes`, `max_patch_files`, and under its forge section's
+optional `max_patch_bytes` and `max_patch_files`, and under its forge section's
 `outputs` each type with its ceiling. `agentic-job policy` checks one run's request against
 it (`--repo`, `--clone-url`, `--base`, `--kind`, `--outputs`,
 `--max-outputs`) and prints `policy.json`, or every reason for refusing.
 `--outputs all` is every type the bounds list, and `--max-outputs max`
 their own ceiling. It runs in a job of its own, before the agent's
 machine starts.
+
+Omitting either patch limit imposes no caller limit on that dimension. If
+both caller and organization bounds set one, the smaller value wins; an
+omission never relaxes a value the other file sets. Explicit values must be
+at least 1024 bytes or one file, respectively. To prevent oversized artifacts
+from exhausting the check or apply process, whole-file reads stay bounded:
+the workflow keeps the existing apply ceilings of 64 MiB per primary patch
+and 4 MiB per replacement JSON, subject to any tighter byte policy. Check
+also refuses a result whose report would exceed apply's 4 MiB read limit.
+Separate artifact limits (such as the standalone CLI's 1 MiB patch input)
+still apply. The secondary pull request target has its own required limits.
 On GitHub, `repos` may also contain `{org = "cgwalters-forge", forks = false}`.
 This is opt-in: no shipped bounds enable it. Policy reads the live repository
 through `GITHUB_API_URL` with the read-only `GH_TOKEN`, and requires its
@@ -2177,7 +2191,7 @@ The smallest call that can open a pull request from it:
 - `id`, `repo`, `allow` and `proposals-artifact`; no task, agent or
   configuration.
 - `outputs: create_pull_request,noop`, within the bounds file's
-  `[github.outputs]`, `max_patch_bytes` and `max_patch_files`; the example
+  `[github.outputs]` and any configured patch limits; the example
   also narrows `max-outputs` to `"1"`, the one request it makes.
 - `apply-environment` with `SAFE_OUTPUTS_PAT` passed explicitly: policy
   refuses `create_pull_request` without one, as the job token cannot fork.

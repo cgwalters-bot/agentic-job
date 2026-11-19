@@ -157,7 +157,7 @@ const MAX_TITLE_CHARS: usize = 128;
 const MAX_BODY_CHARS: usize = 65_000;
 
 /// check's own bound on the collector's result, which the report repeats.
-const MAX_REPORT_BYTES: u64 = 4 << 20;
+pub const MAX_REPORT_BYTES: u64 = 4 << 20;
 
 /// The longest run link the footer takes.
 const MAX_RUN_URL: usize = 2048;
@@ -945,7 +945,7 @@ fn checked_patch(
         patch.base_commit
     );
     // `name` is one plain file name: `patch_file_name` takes out `/`.
-    let bytes = (checked.read)(&checked.dir.join(&name), policy.max_patch_bytes)
+    let bytes = (checked.read)(&checked.dir.join(&name), policy.patch_read_limit())
         .with_context(|| format!("the patch {name}"))?;
     anyhow::ensure!(
         bytes.len() == patch.bytes,

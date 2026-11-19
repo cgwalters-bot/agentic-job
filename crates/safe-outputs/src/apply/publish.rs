@@ -1179,7 +1179,7 @@ struct PushRequest {
     patch: Vec<u8>,
     files: Vec<String>,
     /// `max_patch_size`, which bounds the changed files too.
-    max_kb: u64,
+    max_kb: Option<u64>,
     allow_workflows: bool,
     /// How gh-aw's handler ends it before it reads the forge, if it does.
     early: Option<Early>,
@@ -1587,7 +1587,7 @@ fn pull_request(
         "check's base commit {:?} is not a commit id",
         patch.base_commit
     );
-    let bytes = (checked.read)(&checked.dir.join(&name), policy.max_patch_bytes)
+    let bytes = (checked.read)(&checked.dir.join(&name), policy.patch_read_limit())
         .with_context(|| format!("the patch {name}"))?;
     ensure!(
         bytes.len() == patch.bytes,
@@ -1664,9 +1664,10 @@ fn pull_request_failure(
     bytes: &[u8],
     files: &[String],
 ) -> Option<String> {
-    let max_files = positive(config, "max_patch_files", 100);
     let count = files.len() as u64;
-    if count > max_files {
+    if let Some(max_files) = positive(config, "max_patch_files")
+        && count > max_files
+    {
         return Some(format!(
             "E003: Cannot create pull request with more than {max_files} files (received {count}). \
              To increase the limit, set `max-patch-files: {count}` (or higher) under \
@@ -1687,23 +1688,22 @@ fn pull_request_failure(
     })
 }
 
-/// A handler's setting KEY of CONFIG where it is a positive integer, or
-/// DEFAULT.
-fn positive(config: &Map<String, Value>, key: &str, default: u64) -> u64 {
-    config
-        .get(key)
-        .and_then(Value::as_u64)
-        .filter(|n| *n > 0)
-        .unwrap_or(default)
+/// A handler's optional positive integer setting KEY of CONFIG.
+fn positive(config: &Map<String, Value>, key: &str) -> Option<u64> {
+    config.get(key).and_then(Value::as_u64).filter(|n| *n > 0)
 }
 
 /// Why the handlers that carry a patch fail BYTES for its size under
 /// CONFIG, if they do.
 fn patch_size_failure(config: &Map<String, Value>, bytes: &[u8]) -> Option<String> {
-    let max_kb = handler_patch_size_kib(positive(config, "max_patch_size", 0));
+    let max_kb = configured_patch_size(config)?;
     let kb = (bytes.len() as u64).div_ceil(1024);
     (kb > max_kb)
         .then(|| format!("Patch size ({kb} KB) exceeds maximum allowed size ({max_kb} KB)"))
+}
+
+fn configured_patch_size(config: &Map<String, Value>) -> Option<u64> {
+    handler_patch_size_kib(config.get("max_patch_size").and_then(Value::as_u64))
 }
 
 /// Those of FILES the handlers that carry a patch take for protected
@@ -1824,7 +1824,7 @@ fn branch_push(
         "check read the patch against {}, not the head {head} the run was asked for",
         patch.base_commit
     );
-    let bytes = (checked.read)(&checked.dir.join(&name), policy.max_patch_bytes)
+    let bytes = (checked.read)(&checked.dir.join(&name), policy.patch_read_limit())
         .with_context(|| format!("the patch {name}"))?;
     ensure!(
         bytes.len() == patch.bytes,
@@ -1870,7 +1870,7 @@ fn branch_push(
         head: head.to_owned(),
         patch: bytes,
         files: patch.files.clone(),
-        max_kb: handler_patch_size_kib(positive(config, "max_patch_size", 0)),
+        max_kb: configured_patch_size(config),
         allow_workflows: config.get("allow_workflows") == Some(&Value::Bool(true)),
         early,
     })
@@ -3285,7 +3285,7 @@ fn push_outcome(
             committer: Some(ACTIONS_COMMITTER),
             // So that the commit is the same whenever it is made.
             at_author_date: true,
-            max_changed_kb: Some(push.max_kb),
+            max_changed_kb: push.max_kb,
         },
         None,
     );
@@ -4866,6 +4866,7 @@ mod tests {
     use super::super::REPORT_FILE;
     use super::super::tests::upload;
     use super::*;
+
     use crate::apply::testing::{PROVENANCE, Request, TOKEN, serve, sh};
     use crate::check::BASE_COMMIT_HEADER;
     use crate::contract::NATIVE_OUTPUTS;
@@ -5292,7 +5293,8 @@ mod tests {
         let branch = git["patch"]["branch"].as_str().unwrap();
         let name = check::patch_file_name(branch);
         std::fs::write(checked.join(&name), &patch).unwrap();
-        let files: Vec<&String> = git["patch"]["files"].as_object().unwrap().keys().collect();
+        let mut files: Vec<&String> = git["patch"]["files"].as_object().unwrap().keys().collect();
+        files.sort_unstable();
         let report = json!({"ok": true, "errors": [], "items": [], "patch": {
             "file": name, "bytes": patch.len(), "base_commit": base, "files": files}});
         std::fs::write(checked.join(REPORT_FILE), report.to_string()).unwrap();
@@ -5832,6 +5834,10 @@ mod tests {
     /// A checked upload of the corpus's pull request, its repositories
     /// under the directory returned, and the handlers' configuration.
     fn pull_request_case() -> (tempfile::TempDir, PathBuf, Value) {
+        pull_request_case_with_files(0)
+    }
+
+    fn pull_request_case_with_files(extra_files: usize) -> (tempfile::TempDir, PathBuf, Value) {
         let cases: Vec<Value> =
             serde_json::from_value(read_json(&corpus().join("cases.json"))).unwrap();
         let case = cases
@@ -5841,11 +5847,106 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let checked = root.path().join("checked");
         std::fs::create_dir_all(&checked).unwrap();
-        repositories(&case["git"], root.path(), &checked);
+        let mut git_case = case["git"].clone();
+        for n in 0..extra_files {
+            git_case["patch"]["files"][format!("file-{n:03}.txt")] = json!("x\n");
+        }
+        repositories(&git_case, root.path(), &checked);
         let golden = read_json(&corpus().join("create-pull-request.json"));
         let mut handlers = golden["attempts"][0]["handler_config"].clone();
         handlers[ADD_COMMENT] = json!({"max": 2, "target-repo": REPO, "target": "7"});
         (root, checked, handlers)
+    }
+
+    #[test]
+    fn native_publication_does_not_restore_unset_patch_limits() {
+        let (root, dir, mut handlers) = pull_request_case_with_files(101);
+        let mut policy = policy();
+        policy.max_patch_bytes = None;
+        let pr = policy.safe_outputs.create_pull_request.as_mut().unwrap();
+        pr.max_patch_size = None;
+        pr.max_patch_files = None;
+        handlers[CREATE_PULL_REQUEST]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_patch_size");
+        handlers[CREATE_PULL_REQUEST]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_patch_files");
+
+        let items = [pull_request_item()];
+        let (github, sent) = forge(&json!({}), &[]);
+        let run = run(1, github.api_url());
+        let publisher = GithubPublisher {
+            github,
+            git: root.path().display().to_string(),
+            item_repo: REPO.into(),
+            repo: REPO.into(),
+        };
+        let fork = root.path().join(format!("{FORK}.git"));
+        // Run refusals before success so each attempt starts without a pushed branch.
+        for limit in [
+            Some(("max_patch_files", 100, "more than 100 files")),
+            Some(("max_patch_size", 1, "exceeds maximum allowed size")),
+            None,
+        ] {
+            let mut handlers = handlers.clone();
+            if let Some((key, cap, _)) = limit {
+                handlers[CREATE_PULL_REQUEST][key] = json!(cap);
+            }
+            let records = tempfile::tempdir().unwrap();
+            let path = |file: &str| records.path().join(file);
+            let ok = apply(
+                &Checked {
+                    items: &items,
+                    handlers: handlers.as_object().unwrap(),
+                    upload: upload(&dir),
+                    policy: &policy,
+                },
+                &run,
+                &publisher,
+                &Records {
+                    remainder: &path("remainder.json"),
+                    made: &path("made.jsonl"),
+                    errors: &path("errors.json"),
+                    output: None,
+                    summary: None,
+                    workflow: "agentic-job",
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+            assert_eq!(ok, limit.is_none());
+            if let Some((_, _, want)) = limit {
+                assert!(
+                    read_json(&path("errors.json"))["failures"][0]["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains(want)
+                );
+                assert!(sent.lock().unwrap().is_empty());
+                assert_eq!(
+                    sh(&fork, &["for-each-ref", "--format=%(refname)"]),
+                    "refs/heads/main"
+                );
+            } else {
+                assert!(
+                    sent.lock()
+                        .unwrap()
+                        .iter()
+                        .any(|request| request.line.starts_with("POST /repos/owner/repo/pulls "))
+                );
+                let branch = handlers[CREATE_PULL_REQUEST]["branch_prefix"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+                    + "agent-run-4242";
+                let commits = pushed(root.path(), &branch, "main");
+                assert_eq!(commits.as_array().unwrap().len(), 1);
+                assert_eq!(commits[0]["files"].as_array().unwrap().len(), 102);
+            }
+        }
     }
 
     /// What gh-aw's handlers would publish otherwise refuses the run

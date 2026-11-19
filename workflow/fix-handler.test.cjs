@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } = require('node:fs');
+const { appendFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const { homedir } = require('node:os');
 const { spawnSync } = require('node:child_process');
@@ -38,13 +38,13 @@ test('scripted fix from a different caller layout reaches the target checkout an
       git(work, 'config', 'user.name', 'Test');
       git(work, 'config', 'user.email', 'test@example.invalid');
       git(work, 'checkout', '-qb', 'main');
-      writeFileSync(join(work, 'target.txt'), 'before\n');
+      writeFileSync(join(work, 'target.txt'), 'before\n'.repeat(750_000)); // Larger than gh-aw's default.
       git(work, 'add', '.');
       git(work, 'commit', '-qm', 'base');
       const head = git(work, 'rev-parse', 'HEAD');
       git(work, 'push', '-q', origin, 'HEAD:refs/heads/main');
       git(work, 'push', '-q', fork, 'HEAD:refs/heads/agent-run-7');
-      writeFileSync(join(work, 'target.txt'), 'scripted fix\n');
+      appendFileSync(join(work, 'target.txt'), 'scripted fix\n');
       // The handler logs the patch's first lines, the commit message among
       // them, where the runner would read these as commands (#1460).
       const markers = ['::warning::audit-marker-line', 'see ##[warning]legacy-marker'];

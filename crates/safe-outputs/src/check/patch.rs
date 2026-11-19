@@ -129,6 +129,10 @@ const FIXED_HEADERS: &[(&str, &str)] = &[
 /// How much of an offending line a message quotes.
 const QUOTED_CHARS: usize = 120;
 
+/// A malformed patch can trigger a diagnostic on every line. Keep only
+/// a sample so it cannot exhaust the checker before it returns a refusal.
+const MAX_PATCH_DIAGNOSTICS: usize = 16;
+
 fn quoted(line: &str) -> String {
     format!("{:?}", line.chars().take(QUOTED_CHARS).collect::<String>())
 }
@@ -266,7 +270,12 @@ enum Change {
 
 impl Reader {
     fn problem(&mut self, text: impl Into<String>) {
-        self.problems.push(text.into());
+        if self.problems.len() < MAX_PATCH_DIAGNOSTICS {
+            let text = text.into();
+            if !self.problems.contains(&text) {
+                self.problems.push(text);
+            }
+        }
     }
 
     fn mail(&mut self, line: &str, folds: bool) -> State {
@@ -603,6 +612,7 @@ fn protected<'p>(paths: &'p BTreeSet<String>, rules: &PatchRules<'_>) -> Vec<&'p
         .iter()
         .map(String::as_str)
         .filter(|path| listed(path) || dot_folder(path))
+        .take(MAX_PATCH_DIAGNOSTICS)
         .collect()
 }
 
@@ -673,11 +683,13 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
     if files.is_empty() {
         problems.push("the patch holds no change".to_owned());
     }
-    if files.len() > usize::try_from(rules.max_patch_files).unwrap_or(usize::MAX) {
+    if let Some(max) = rules.max_patch_files
+        && files.len() as u64 > u64::from(max)
+    {
         problems.push(format!(
             "the patch touches {} files, over {}",
             files.len(),
-            rules.max_patch_files
+            max
         ));
     }
     if found.as_deref() != Some(base_commit) {
@@ -697,15 +709,14 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
     if !protected.is_empty() {
         problems.push(format!("protected files: {}", protected.join(", ")));
     }
-    for path in &files {
-        if let Some(glob) = protecting_glob(rules.protected_paths, path) {
-            problems.push(format!("{path:?}: protected by the bounds' glob {glob:?}"));
-        }
+    for (path, glob) in files
+        .iter()
+        .filter_map(|path| protecting_glob(rules.protected_paths, path).map(|glob| (path, glob)))
+        .take(MAX_PATCH_DIAGNOSTICS)
+    {
+        problems.push(format!("{path:?}: protected by the bounds' glob {glob:?}"));
     }
 
-    // Each once, in the order found.
-    let mut seen = BTreeSet::new();
-    problems.retain(|problem| seen.insert(problem.clone()));
     PatchReading {
         problems,
         files: files.into_iter().collect(),
@@ -765,6 +776,23 @@ mod tests {
     fn problems(patch: &str) -> Vec<String> {
         let rules = policy().safe_outputs.create_pull_request.unwrap();
         patch_problems(patch, &rules, BASE)
+    }
+
+    #[test]
+    fn malformed_patch_diagnostics_are_bounded() {
+        use std::fmt::Write as _;
+
+        let mut patch = String::new();
+        for n in 0..(MAX_PATCH_DIAGNOSTICS * 10) {
+            writeln!(patch, "unrecognized header {n}").unwrap();
+        }
+        let problems = problems(&patch);
+        assert_eq!(problems.len(), MAX_PATCH_DIAGNOSTICS + 2);
+        assert!(
+            !problems
+                .iter()
+                .any(|p| p.contains("unrecognized header 159"))
+        );
     }
 
     #[test]

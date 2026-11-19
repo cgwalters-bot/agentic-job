@@ -1705,7 +1705,7 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
             files,
             ..Change::default()
         };
-        let max = usize::try_from(policy.max_patch_bytes).unwrap_or(usize::MAX - 1);
+        let max = usize::try_from(policy.replacement_read_limit()).unwrap_or(usize::MAX - 1);
         let content = read_agent_file(runner, &replacement_path, max).taken();
         let outputs = build_outputs(&agent_text, policy, true, &outcome, run_id);
         if policy.safe_outputs.push_to_pull_request_branch.is_none()
@@ -1741,8 +1741,11 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
             // Check refuses it again on another machine; this only names a
             // malformed series in the agent job, not after check.
             if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch
-                && let Err(error) =
-                    crate::check::replacement::check(&content, push, policy.max_patch_bytes)
+                && let Err(error) = crate::check::replacement::check(
+                    &content,
+                    push,
+                    policy.replacement_read_limit(),
+                )
             {
                 change.drop_patch(base, format!("replacement.json: {error:#}"));
                 return Ok(change);
@@ -1868,7 +1871,7 @@ fn collect_change(request: &Request<'_>) -> Result<Change> {
     let mut patches = Vec::new();
     if let (true, Some((title, body))) = (outputs.wants_patch, &outputs.message) {
         let message = commit_message(title, body, &request.commit.trailers, run_id);
-        let max = usize::try_from(policy.max_patch_bytes).unwrap_or(usize::MAX - 1);
+        let max = usize::try_from(policy.patch_read_limit()).unwrap_or(usize::MAX - 1);
         match staged.and_then(|_| build_patch(&git, base, &message, max)) {
             Err(why) => {
                 // As in the old tree, the requests go with the change.
@@ -2059,7 +2062,7 @@ mod tests {
             base: "main".into(),
             kind,
             max_outputs: 3,
-            max_patch_bytes: 1 << 20,
+            max_patch_bytes: Some(1 << 20),
             safe_outputs: serde_json::from_value::<SafeOutputs>(outputs).unwrap(),
             commit_author: None,
             push_repo: None,
@@ -4232,7 +4235,7 @@ mod tests {
         let noop_only = policy(Kind::Branch, json!({"noop": {"max": 1}}));
         let analysis = policy(Kind::Analysis, json!({"noop": {"max": 1}}));
         let mut small = pull.clone();
-        small.max_patch_bytes = 64;
+        small.max_patch_bytes = Some(64);
         let noop = "{\"type\":\"noop\",\"message\":\"m\"}\n";
         // (the case, the policy, the agent's requests, whether it changes
         // a file, why the change was dropped, the files handed back)

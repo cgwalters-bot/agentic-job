@@ -36,6 +36,73 @@ test('project boundary refusal fails the apply job', () => {
   }
 });
 
+test('patch limits the bounds leave out are none in the pinned pull request handler', async () => {
+  const repo = 'owner/source';
+  const files = 101;
+  const base = '5fffa916418485beea9050be41cc38857f49c3a1';
+  const branch = 'agent-run-7';
+  const patch = Array.from({ length: files }, (_, n) =>
+    `diff --git a/f${n} b/f${n}\nnew file mode 100644\nindex 0000000..587be6b\n--- /dev/null\n+++ b/f${n}\n@@ -0,0 +1 @@\n+x\n`).join('');
+  const mail = readFileSync(join(here, '../data/check/handback/aw-agent-run-7.patch'), 'utf8').split('\n---\n')[0] + '\n---\n\n' + patch;
+  const { enforcePullRequestLimits } = require(join(js, 'create_pull_request.cjs'));
+  // [bounds' limits, the size and file count the handler logs, whether the patch passes]
+  for (const [limits, size, count, ok] of [
+    ['', Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, true],
+    ['max_patch_bytes = 102400\nmax_patch_files = 50\n', 100, 50, false],
+  ]) {
+    const work = mkdtempSync(join(homedir(), 'limits-test-'));
+    const workflowId = process.env.GH_AW_WORKFLOW_ID;
+    // As apply's step sets it; the handler refuses to start without it.
+    process.env.GH_AW_WORKFLOW_ID = 'agentic-job';
+    try {
+      const file = name => join(work, name);
+      writeFileSync(file('allow.toml'), `hosts = ["github.com"]\nrepos = ["${repo}"]\nbases = ["main"]\nmax_outputs = 1\n${limits}[github.outputs.create_pull_request]\nmax = 1\n`);
+      const policy = spawnSync(binary, ['policy', '--allow', file('allow.toml'), '--repo', repo,
+        '--clone-url', `https://github.com/${repo}`, '--base', 'main', '--kind', 'branch',
+        '--outputs', 'create_pull_request', '--max-outputs', '1'], { encoding: 'utf8' });
+      assert.equal(policy.status, 0, policy.stderr);
+      mkdirSync(file('outputs'));
+      writeFileSync(file('policy.json'), policy.stdout);
+      writeFileSync(file('outputs/base.json'), JSON.stringify({ repo, ref: 'main', commit: base }));
+      writeFileSync(file(`outputs/aw-${branch}.patch`), mail);
+      writeFileSync(file('outputs/outputs.jsonl'), JSON.stringify({ type: 'create_pull_request', title: 'Wide change', body: 'Why.', branch }) + '\n');
+      const collected = collect(file);
+      assert.equal(collected.status, 0, collected.stderr);
+      const checked = spawnSync(binary, ['check', '--policy', file('policy.json'), '--outputs', file('outputs'),
+        '--collected', file('collected.json'), '--report', file('report.json')], { encoding: 'utf8' });
+      assert.equal(checked.status, ok ? 0 : 1, checked.stderr);
+      const report = JSON.parse(readFileSync(file('report.json'), 'utf8'));
+      if (ok) assert.equal(report.patch.files.length, files);
+      else assert.match(report.errors.join('\n'), /touches 101 files, over 50/);
+      writeFileSync(file('config.json'), JSON.stringify(JSON.parse(policy.stdout).safe_outputs));
+      const configured = spawnSync('bash', ['-euo', 'pipefail', '-c', configStep], { encoding: 'utf8', env: {
+        ...process.env, GH_AW_TMP: work, GITHUB_ENV: file('env'), REPO: repo, OUTPUT_REPO: repo, ITEM_REPO: repo,
+        BASE: 'main', BRANCH_PREFIX: '', READY: '', TITLE_PREFIX: '', PARTIAL: '', COMMENT_TARGET: '', PULL_REQUEST: '{}', PUSH: '{}', FORK: 'bot/source',
+      } });
+      assert.equal(configured.status, 0, configured.stderr);
+      const config = JSON.parse(readFileSync(file('handler-config.json'))).create_pull_request;
+      const logs = [];
+      Object.assign(globalThis, {
+        core: { info: text => logs.push(text), warning() {}, debug() {}, error() {}, setOutput() {} },
+        context: { repo: { owner: 'owner', repo: 'source' }, payload: {}, eventName: 'workflow_dispatch' },
+        github: {},
+      });
+      await require(join(js, 'create_pull_request.cjs')).main(config);
+      assert.ok(logs.includes(`Max patch size: ${size} KB`), JSON.stringify(logs));
+      assert.ok(logs.includes(`Max patch files: ${count}`), JSON.stringify(logs));
+      if (ok) {
+        enforcePullRequestLimits(patch, count);
+      } else {
+        assert.throws(() => enforcePullRequestLimits(patch, count), /E003/);
+      }
+    } finally {
+      if (workflowId === undefined) delete process.env.GH_AW_WORKFLOW_ID;
+      else process.env.GH_AW_WORKFLOW_ID = workflowId;
+      rmSync(work, { recursive: true, force: true });
+    }
+  }
+});
+
 test('agent-board proposals pass the pinned collector and bounded project check', async () => {
   // reconcile plan --snapshot fixtures/board.json --emit, as documented by
   // agent-board. Keep its target_repo/content_number grammar, not issue aliases.

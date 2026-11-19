@@ -687,7 +687,7 @@ impl Compile for Bounds {
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 draft: true,
                 ready_when_complete: ready(CREATE_PULL_REQUEST),
-                max_patch_size: self.max_patch_bytes / KB,
+                max_patch_size: self.max_patch_bytes.map(|bytes| bytes / KB),
                 max_patch_files: self.max_patch_files,
             }),
             push_to_pull_request_branch: pull_request.filter(|_| push).map(|(number, head)| Push {
@@ -708,7 +708,7 @@ impl Compile for Bounds {
                 unprotected_dot_folders: dot_folders(&self.unprotected_files, repo),
                 protected_paths: self.protected.clone(),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
-                max_patch_size: self.max_patch_bytes / KB,
+                max_patch_size: self.max_patch_bytes.map(|bytes| bytes / KB),
                 max_patch_files: self.max_patch_files,
             }),
             others: types
@@ -4253,11 +4253,11 @@ max_patch_files = 10
     fn push_bounds_intersect() {
         let own = push_bounds().compile(&push_request()).unwrap();
         let mut org_bounds = push_bounds();
-        org_bounds.max_patch_files = 7;
+        org_bounds.max_patch_files = Some(7);
         let org = org_bounds.compile(&push_request()).unwrap();
         let both = intersect(own.clone(), org).unwrap();
         let push = both.safe_outputs.push_to_pull_request_branch.unwrap();
-        assert_eq!(push.max_patch_files, 7);
+        assert_eq!(push.max_patch_files, Some(7));
         assert_eq!(push.head, HEAD);
         // Two that pin different pushes are refused, not merged.
         for edit in [
@@ -4334,13 +4334,17 @@ max_patch_files = 10
         // (caller's max_patch_files, replacement_max_files), the
         // organization's, and the series total both allow.
         for (caller, organization, want) in [
-            ((50, 0), (50, 0), (0, 50)),
-            ((50, 200), (50, 0), (0, 50)),
-            ((50, 200), (50, 100), (100, 100)),
-            ((50, 10), (50, 0), (10, 10)),
-            ((50, 200), (20, 300), (200, 200)),
+            ((None, 0), (None, 0), (0, None)),
+            ((None, 200), (None, 0), (200, Some(200))),
+            ((None, 0), (Some(50), 0), (0, Some(50))),
+            ((Some(50), 0), (None, 0), (0, Some(50))),
+            ((Some(50), 0), (Some(50), 0), (0, Some(50))),
+            ((Some(50), 200), (Some(50), 0), (0, Some(50))),
+            ((Some(50), 200), (Some(50), 100), (100, Some(100))),
+            ((Some(50), 10), (Some(50), 0), (10, Some(10))),
+            ((Some(50), 200), (Some(20), 300), (200, Some(200))),
             // The caller's total, above the organization's per patch.
-            ((50, 0), (20, 300), (50, 50)),
+            ((Some(50), 0), (Some(20), 300), (50, Some(50))),
         ] {
             let compile = |(files, total)| {
                 let mut bounds = push_bounds();
@@ -4952,7 +4956,37 @@ max_patch_files = 10
         assert!(pr.draft);
         assert!(pr.protect_top_level_dot_folders);
         assert_eq!(pr.protected_files_policy, ProtectedFilesPolicy::Blocked);
-        assert_eq!((pr.max_patch_size, pr.max_patch_files), (8192, 100));
+        assert_eq!(
+            (pr.max_patch_size, pr.max_patch_files),
+            (Some(8192), Some(100))
+        );
+    }
+
+    #[test]
+    fn optional_patch_limits_only_tighten() {
+        let compile = |bytes, files| {
+            let mut bounds = bounds();
+            bounds.max_patch_bytes = bytes;
+            bounds.max_patch_files = files;
+            bounds.validate().unwrap();
+            bounds.compile(&request()).unwrap()
+        };
+        for (caller, org, want) in [
+            ((None, None), (None, None), (None, None)),
+            ((None, None), (Some(4096), Some(3)), (Some(4096), Some(3))),
+            ((Some(4096), Some(3)), (None, None), (Some(4096), Some(3))),
+            (
+                (Some(8192), Some(3)),
+                (Some(4096), Some(10)),
+                (Some(4096), Some(3)),
+            ),
+        ] {
+            let both = intersect(compile(caller.0, caller.1), compile(org.0, org.1)).unwrap();
+            assert_eq!(both.max_patch_bytes, want.0);
+            let pr = both.safe_outputs.create_pull_request.unwrap();
+            assert_eq!(pr.max_patch_size, want.0.map(|bytes| bytes / KB));
+            assert_eq!(pr.max_patch_files, want.1);
+        }
     }
 
     #[test]
@@ -4960,8 +4994,8 @@ max_patch_files = 10
         let local = bounds();
         let mut org = bounds();
         org.max_outputs = 2;
-        org.max_patch_bytes = 4096;
-        org.max_patch_files = 3;
+        org.max_patch_bytes = Some(4096);
+        org.max_patch_files = Some(3);
         org.outputs_mut().unwrap().remove("missing_data");
         org.unprotected_files = Unprotected::default();
         let request = Request {
@@ -5039,10 +5073,10 @@ max_patch_files = 10
         for (left, right) in [(a.clone(), b.clone()), (b, a)] {
             let policy = intersect(left, right).unwrap();
             assert_eq!(policy.max_outputs, 2);
-            assert_eq!(policy.max_patch_bytes, 4096);
+            assert_eq!(policy.max_patch_bytes, Some(4096));
             assert_eq!(policy.safe_outputs.max_of("missing_data"), None);
             let pr = policy.safe_outputs.create_pull_request.unwrap();
-            assert_eq!(pr.max_patch_files, 3);
+            assert_eq!(pr.max_patch_files, Some(3));
             assert!(pr.protected_files.contains(&"CONTRIBUTING.md".into()));
         }
         assert!(

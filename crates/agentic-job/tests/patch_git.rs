@@ -630,8 +630,8 @@ fn rules() -> PullRequest {
         protected_files_policy: ProtectedFilesPolicy::Blocked,
         draft: true,
         ready_when_complete: false,
-        max_patch_size: 1024,
-        max_patch_files: MAX_PATCH_FILES,
+        max_patch_size: Some(1024),
+        max_patch_files: Some(MAX_PATCH_FILES),
     }
 }
 

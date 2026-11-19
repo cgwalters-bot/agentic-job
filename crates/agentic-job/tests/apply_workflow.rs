@@ -1228,7 +1228,8 @@ fn fork_handler_configuration_preserves_destinations_and_literal_prefixes() {
         let mut expected = json!({"noop": {"max": 1}});
         if !fork.is_empty() {
             expected["create_pull_request"] = json!({
-                "max": 1, "draft": true, "signed_commits": false,
+                "max": 1, "draft": true, "max_patch_size": (1u64 << 53) - 1,
+                "max_patch_files": (1u64 << 53) - 1, "signed_commits": false,
                 "fallback_as_issue": false, "preserve_branch_name": true,
                 "auto_close_issue": false, "target-repo": "owner/other",
                 "base_branch": "main", "branch_prefix": branch,
@@ -1615,6 +1616,11 @@ fn carriers_exempt_at_most_github_of_policy_dot_folders() {
             );
             assert_eq!(got["protected_files_policy"], "blocked");
             assert_eq!(got["protected_files"], json!(["CODEOWNERS"]));
+            // The bounds set no patch limit, so the handlers get none of
+            // their own; an explicit one is kept, as the push test shows.
+            for key in ["max_patch_size", "max_patch_files"] {
+                assert_eq!(got[key], json!((1u64 << 53) - 1), "{carrier}: {key}");
+            }
             assert_eq!(got["head-repo"], "bot/repo");
             assert_eq!(got["allowed_repos"], json!(["bot/repo"]));
             let other = if carrier == "create_pull_request" {

@@ -439,7 +439,7 @@ impl Secondary {
             protect_top_level_dot_folders: self.protect_top_level_dot_folders,
             unprotected_dot_folders: &self.unprotected_dot_folders,
             protected_paths: &self.protected_paths,
-            max_patch_files: self.max_patch_files,
+            max_patch_files: Some(self.max_patch_files),
             commit_author: None,
         }
     }
@@ -875,7 +875,8 @@ pub struct Policy {
     pub kind: Kind,
     /// The most outputs in all.
     pub max_outputs: u32,
-    pub max_patch_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_patch_bytes: Option<u64>,
     /// The configuration gh-aw's collector reads (its `config.json`), and
     /// the rules `check` applies to a patch.
     pub safe_outputs: SafeOutputs,
@@ -1157,13 +1158,16 @@ pub struct PullRequest {
     #[serde(default, skip_serializing_if = "is_false")]
     pub ready_when_complete: bool,
     /// The largest patch, in KB.
-    pub max_patch_size: u64,
-    pub max_patch_files: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_patch_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_patch_files: Option<u32>,
 }
 
-/// Patch handlers treat an omitted or zero size as their default, in KiB.
-pub(crate) fn handler_patch_size_kib(configured: u64) -> u64 {
-    if configured == 0 { 4096 } else { configured }
+/// Preserve the legacy handler default for an explicit zero in JSON.
+/// Bounds TOML never generates zero; an omitted setting has no handler limit.
+pub(crate) fn handler_patch_size_kib(configured: Option<u64>) -> Option<u64> {
+    configured.map(|kib| if kib == 0 { 4096 } else { kib })
 }
 
 /// `push_to_pull_request_branch`'s configuration, in gh-aw's names but
@@ -1205,8 +1209,10 @@ pub struct Push {
     pub protected_paths: Vec<String>,
     pub protected_files_policy: ProtectedFilesPolicy,
     /// The largest patch, in KB.
-    pub max_patch_size: u64,
-    pub max_patch_files: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_patch_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_patch_files: Option<u32>,
 }
 
 /// What a patch may touch, whichever output carries it.
@@ -1219,7 +1225,7 @@ pub struct PatchRules<'a> {
     pub unprotected_dot_folders: &'a [String],
     /// Globs of paths a patch may not touch, from the bounds.
     pub protected_paths: &'a [String],
-    pub max_patch_files: u32,
+    pub max_patch_files: Option<u32>,
     /// [`Policy::commit_author`], which `check` sets: the outputs' own
     /// configuration does not carry it.
     pub commit_author: Option<&'a str>,
@@ -1251,10 +1257,10 @@ impl Push {
     }
 
     /// The most files a replacement series may touch in all.
-    pub fn replacement_files(&self) -> u32 {
+    pub fn replacement_files(&self) -> Option<u32> {
         match self.replacement_max_files {
             0 => self.max_patch_files,
-            max => max,
+            max => Some(max),
         }
     }
 }
@@ -1338,7 +1344,25 @@ impl SafeOutputs {
     }
 }
 
+/// The existing apply guard's patch ceiling. Bound whole-file reads even
+/// without a caller byte limit so an oversized patch cannot exhaust memory.
+pub const MAX_PATCH_ARTIFACT_BYTES: u64 = 64 << 20;
+
+/// The existing apply trial's transport ceiling for replacement JSON.
+pub const MAX_REPLACEMENT_ARTIFACT_BYTES: u64 = 4 << 20;
+
 impl Policy {
+    pub fn patch_read_limit(&self) -> u64 {
+        self.max_patch_bytes
+            .map_or(MAX_PATCH_ARTIFACT_BYTES, |max| {
+                max.min(MAX_PATCH_ARTIFACT_BYTES)
+            })
+    }
+
+    pub fn replacement_read_limit(&self) -> u64 {
+        self.patch_read_limit().min(MAX_REPLACEMENT_ARTIFACT_BYTES)
+    }
+
     /// Whether gh-aw's sanitizer keeps a link to HOST, as its
     /// `sanitizeUrlDomains` decides: the domain itself or a subdomain.
     pub fn keeps_link_to(&self, host: &str) -> bool {

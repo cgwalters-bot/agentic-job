@@ -1249,7 +1249,7 @@ mod tests {
             );
 
             let mut policy = crate::policy::tests::policy();
-            policy.max_patch_bytes = 1 << 20;
+            policy.max_patch_bytes = Some(1 << 20);
             if case == "delete file" {
                 // The policy job captures from a separate unauthenticated git
                 // fetch before the producer, not from its handback files.

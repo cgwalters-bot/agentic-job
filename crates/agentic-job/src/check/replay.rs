@@ -28,7 +28,16 @@ pub fn check(
         .iter()
         .chain(verdict.patch.iter().filter(|p| p.commit_files.is_some()))
     {
-        let bytes = files::read_regular(&outputs.join(&info.file), policy.max_patch_bytes)?;
+        let limit = if info.commit_files.is_some() {
+            policy.replacement_read_limit()
+        } else {
+            policy
+                .secondary_pull_request
+                .as_ref()
+                .context("secondary patch without policy")?
+                .max_patch_bytes
+        };
+        let bytes = files::read_regular(&outputs.join(&info.file), limit)?;
         ensure!(
             !String::from_utf8_lossy(&bytes).contains(safe_outputs::replay::PLACEHOLDER),
             "endpoint replay is unsupported for replacement/secondary patches; regenerate without endpoint substitutions"
@@ -37,7 +46,7 @@ pub fn check(
     let Some(info) = verdict.patch.as_mut().filter(|p| p.commit_files.is_none()) else {
         return Ok(());
     };
-    let bytes = files::read_regular(&outputs.join(&info.file), policy.max_patch_bytes)?;
+    let bytes = files::read_regular(&outputs.join(&info.file), policy.patch_read_limit())?;
     let text = std::str::from_utf8(&bytes)?;
     if !text.lines().any(|line| {
         matches!(line.as_bytes().first(), Some(b'-' | b' '))
@@ -163,7 +172,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         safe_outputs::check::is_patch_file_name(&patch.file),
         "invalid replay patch filename"
     );
-    let bytes = files::read_regular(&args.checked.join(&patch.file), policy.max_patch_bytes)?;
+    let bytes = files::read_regular(&args.checked.join(&patch.file), policy.patch_read_limit())?;
     let rules = policy
         .safe_outputs
         .create_pull_request

@@ -1237,7 +1237,7 @@ mod tests {
             base: "main".into(),
             kind: Kind::Branch,
             max_outputs: 3,
-            max_patch_bytes: 1 << 20,
+            max_patch_bytes: Some(1 << 20),
             safe_outputs: serde_json::from_value(outputs).unwrap(),
             commit_author: None,
             push_repo: None,

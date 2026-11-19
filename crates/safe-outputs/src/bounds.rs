@@ -50,9 +50,9 @@ pub struct Bounds<Trigger = toml::Table> {
     /// The most outputs a run may hand back in all.
     pub max_outputs: u32,
     /// The largest patch, in bytes.
-    pub max_patch_bytes: u64,
+    pub max_patch_bytes: Option<u64>,
     /// The most files a patch may touch.
-    pub max_patch_files: u32,
+    pub max_patch_files: Option<u32>,
     /// Files exempt from protection.
     #[serde(default)]
     pub unprotected_files: Unprotected,
@@ -554,11 +554,11 @@ impl<Trigger> Bounds<Trigger> {
         )?;
         validate_protected(&self.protected, "protected")?;
         ensure!(
-            self.max_patch_files >= 1,
+            self.max_patch_files.is_none_or(|max| max >= 1),
             "`max_patch_files` must be at least 1"
         );
         ensure!(
-            self.max_patch_bytes >= KB,
+            self.max_patch_bytes.is_none_or(|max| max >= KB),
             "`max_patch_bytes` must be at least {KB}"
         );
         Ok(())
@@ -661,6 +661,11 @@ fn union(mut own: Vec<String>, other: Vec<String>) -> Result<Vec<String>, Vec<St
     Ok(own)
 }
 
+/// An absent limit is looser than any explicit limit.
+fn tighter_limit<T: Ord>(own: Option<T>, other: Option<T>) -> Option<T> {
+    own.into_iter().chain(other).min()
+}
+
 /// Intersect compiled policies rather than trying to intersect glob patterns.
 /// Each file independently checks the target and any explicitly requested type.
 pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
@@ -741,7 +746,7 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
             .own_branch_repos
             .extend(other.safe_outputs.own_branch_repos);
     }
-    policy.max_patch_bytes = policy.max_patch_bytes.min(other.max_patch_bytes);
+    policy.max_patch_bytes = tighter_limit(policy.max_patch_bytes, other.max_patch_bytes);
     policy.safe_outputs.others.retain(|name, limit| {
         if let Some(bound) = other.safe_outputs.others.get(name) {
             limit.max = limit.max.min(bound.max);
@@ -854,8 +859,8 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
         (Some(mut pr), Some(bound)) => {
             pr.unprotected_dot_folders
                 .retain(|name| bound.unprotected_dot_folders.contains(name));
-            pr.max_patch_size = pr.max_patch_size.min(bound.max_patch_size);
-            pr.max_patch_files = pr.max_patch_files.min(bound.max_patch_files);
+            pr.max_patch_size = tighter_limit(pr.max_patch_size, bound.max_patch_size);
+            pr.max_patch_files = tighter_limit(pr.max_patch_files, bound.max_patch_files);
             pr.ready_when_complete &= bound.ready_when_complete;
             for name in bound.protected_files {
                 if !pr.protected_files.contains(&name) {
@@ -902,14 +907,15 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
                 .min(bound.replacement_max_commits);
             // Each file's own total, its `max_patch_files` where it sets
             // none; zero again where that is all the tighter one is.
-            let replacement_files = push.replacement_files().min(bound.replacement_files());
+            let replacement_files =
+                tighter_limit(push.replacement_files(), bound.replacement_files());
             push.ready_when_complete &= bound.ready_when_complete;
-            push.max_patch_size = push.max_patch_size.min(bound.max_patch_size);
-            push.max_patch_files = push.max_patch_files.min(bound.max_patch_files);
+            push.max_patch_size = tighter_limit(push.max_patch_size, bound.max_patch_size);
+            push.max_patch_files = tighter_limit(push.max_patch_files, bound.max_patch_files);
             push.replacement_max_files = if replacement_files == push.max_patch_files {
                 0
             } else {
-                replacement_files
+                replacement_files.unwrap_or_default()
             };
             for name in bound.protected_files {
                 if !push.protected_files.contains(&name) {

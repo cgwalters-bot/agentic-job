@@ -402,12 +402,12 @@ fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
             .map_or(test_evidence::MAX_UNEXPECTED_LOG_BYTES, |rules| {
                 rules.max_log_bytes
             }),
-        replacement::REPLACEMENT_FILE => policy.max_patch_bytes,
+        replacement::REPLACEMENT_FILE => policy.replacement_read_limit(),
         _ => policy
             .secondary_pull_request
             .as_ref()
-            .map_or(policy.max_patch_bytes, |target| {
-                target.max_patch_bytes.max(policy.max_patch_bytes)
+            .map_or(policy.patch_read_limit(), |target| {
+                target.max_patch_bytes.max(policy.patch_read_limit())
             }),
     }
 }
@@ -500,7 +500,7 @@ fn check_outputs_with_public(
         continuation,
         public,
     )?;
-    verdict.blocked = verdict.is_blocked();
+    report_json(&mut verdict)?;
     Ok(verdict)
 }
 
@@ -523,6 +523,19 @@ fn verdict_of(
         .with_context(|| format!("reading the outputs directory {}", dir.display()))?;
     names.sort();
 
+    // Refuse excess patch artifacts before reading any of them: per-file
+    // read bounds alone would allow unbounded aggregate memory use.
+    // The role of each patch is established later, from the requests.
+    const MAX_PATCH_ARTIFACTS: usize = 2;
+    let excess_patches = names
+        .iter()
+        .filter(|name| name.to_str().is_some_and(is_patch_file_name))
+        .count()
+        > MAX_PATCH_ARTIFACTS;
+    if excess_patches {
+        errors.push("the hand-back allows at most one primary and one secondary patch".into());
+    }
+
     let mut contents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut warnings = Vec::new();
     for name in &names {
@@ -530,6 +543,9 @@ fn verdict_of(
             errors.push(format!("unexpected file {name:?}"));
             continue;
         };
+        if excess_patches && is_patch_file_name(name) {
+            continue;
+        }
         match files::read_regular(&dir.join(name), max_bytes_of(name, policy)) {
             Ok(content) => {
                 let allowed = if !policy.private && is_patch_file_name(name) {
@@ -706,7 +722,7 @@ fn verdict_of(
             .items
             .iter()
             .all(|item| item_type(item) != PUSH_TO_PULL_REQUEST_BRANCH);
-    Ok(Verdict {
+    let mut verdict = Verdict {
         host_isolation: isolation.as_ref().map(|record| record.host_isolation),
         host_isolation_source: isolation.map(|record| record.host_isolation_source),
         secondary_patch: checked.secondary_patch,
@@ -716,7 +732,9 @@ fn verdict_of(
         test_evidence,
         test_evidence_missing,
         ..Verdict::new(checked.errors, checked.items, checked.patch)
-    })
+    };
+    verdict.blocked = verdict.is_blocked();
+    Ok(verdict)
 }
 
 /// The hand-back's test evidence, if any, held to the policy and bound to
@@ -795,7 +813,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         })
         .transpose()?
         .unwrap_or_default();
-    let mut verdict = check_outputs_with_public(
+    let mut verdict = verdict_of(
         &args.outputs,
         &args.collected,
         &policy,
@@ -884,9 +902,9 @@ pub fn run(args: &Args) -> Result<Exit> {
     if verdict.ok {
         verdict.continuation = continuation;
     }
+    let json = report_json(&mut verdict)?;
     if let Some(report) = &args.report {
-        let json = serde_json::to_string_pretty(&verdict).context("writing the verdict")?;
-        std::fs::write(report, json + "\n")
+        std::fs::write(report, json)
             .with_context(|| format!("writing the report {}", report.display()))?;
     }
     for error in &verdict.errors {
@@ -901,6 +919,23 @@ pub fn run(args: &Args) -> Result<Exit> {
     } else {
         Exit::Failure
     })
+}
+
+/// Refuse a checked result apply could not read, without uploading its
+/// oversized path lists or diagnostics as a refusal report either.
+fn report_json(verdict: &mut Verdict) -> Result<String> {
+    let mut json = serde_json::to_string_pretty(verdict).context("writing the verdict")?;
+    let max = safe_outputs::apply::MAX_REPORT_BYTES;
+    if json.len() as u64 >= max {
+        *verdict = Verdict::new(
+            vec![format!("the check report exceeds {max} bytes")],
+            Vec::new(),
+            None,
+        );
+        json = serde_json::to_string_pretty(verdict).context("writing the refusal")?;
+    }
+    json.push('\n');
+    Ok(json)
 }
 
 #[cfg(test)]
@@ -1440,7 +1475,7 @@ mod tests {
         // Patches are read within the larger budget, a secondary's here,
         // but the run's own is still held to its own.
         let mut wider = secondary_policy();
-        wider.max_patch_bytes = 2048;
+        wider.max_patch_bytes = Some(2048);
         wider
             .secondary_pull_request
             .as_mut()
@@ -1832,7 +1867,7 @@ mod tests {
             run(&["init", "-q", "--initial-branch=main"]);
             let commit = |file: &str| {
                 std::fs::write(repo.join(file), format!("{file}\n")).unwrap();
-                run(&["add", file]);
+                run(&["add", "."]);
                 run(&[
                     "-c",
                     "user.name=Test",
@@ -1848,6 +1883,9 @@ mod tests {
             let pinned = commit("pinned.txt");
             let base = commit("base.txt");
             run(&["checkout", "-qb", "proposal"]);
+            for n in 0..101 {
+                std::fs::write(repo.join(format!("wide-{n:03}.txt")), "new\n").unwrap();
+            }
             commit("a.txt");
             let first = run(&[
                 "format-patch",
@@ -1879,12 +1917,20 @@ mod tests {
             config.replacement_base = Some(pinned.clone());
             config.head = proposal_head.clone();
             let series = json!({"base_commit": base, "commits": [first, second]});
-            let verdict = Handback {
+            let handback = Handback {
                 items: vec![push()],
                 files: vec![(replacement::REPLACEMENT_FILE, series.to_string())],
                 ..Handback::default()
-            }
-            .check_against(&policy);
+            };
+            config.max_patch_files = Some(100);
+            assert!(!handback.check_against(&policy).ok);
+            policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap()
+                .max_patch_files = None;
+            let verdict = handback.check_against(&policy);
             assert!(verdict.ok, "{:?}", verdict.errors);
             let report = temp.path().join("report.json");
             std::fs::write(&report, serde_json::to_vec(&verdict).unwrap()).unwrap();
@@ -2002,14 +2048,14 @@ mod tests {
                 .replacement_max_commits = 0;
             assert!(!proposal(series.clone()).check_against(&off).ok);
             let mut small = policy.clone();
-            small.max_patch_bytes = 10;
+            small.max_patch_bytes = Some(10);
             assert!(!proposal(series.clone()).check_against(&small).ok);
             policy
                 .safe_outputs
                 .push_to_pull_request_branch
                 .as_mut()
                 .unwrap()
-                .max_patch_files = 1;
+                .max_patch_files = Some(1);
             assert!(!proposal(series).check_against(&policy).ok);
         }
 
@@ -3052,6 +3098,12 @@ mod tests {
                 "two patches",
                 pr().with("aw-other.patch", Some(patch_of("a.rs"))),
                 "needs exactly one patch",
+            ),
+            (
+                "more patch artifacts than the checker can read",
+                pr().with("aw-other.patch", Some(patch_of("a.rs")))
+                    .with("aw-third.patch", Some(patch_of("b.rs"))),
+                "at most one primary and one secondary patch",
             ),
             (
                 "a patch without a pull request",

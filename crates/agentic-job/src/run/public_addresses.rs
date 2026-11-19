@@ -499,7 +499,7 @@ impl PublicAddresses {
             protect_top_level_dot_folders: false,
             unprotected_dot_folders: &[".github".to_owned()],
             protected_paths: &[],
-            max_patch_files: MAX_FILES,
+            max_patch_files: Some(MAX_FILES),
             commit_author: None,
         };
         if !safe_outputs::check::read_patch(patch, &rules, &base.commit)
