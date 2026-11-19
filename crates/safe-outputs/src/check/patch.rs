@@ -36,7 +36,8 @@ pub const BASE_COMMIT_HEADER: &str = "X-GH-AW-Base-Commit";
 /// Paths never touched: git's own files at any depth (`.git`,
 /// `.gitmodules`, `.gitattributes`, ...), and CI, hook, editor and shell
 /// configuration that the protection of top-level dot-folders does not
-/// reach (nested ones, and files).
+/// reach (nested ones, and files). `path_problem` excludes an exact
+/// `.gitignore` filename from this match, but not its parent directory.
 static PROTECTED_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(^|/)\.git|(^|/)\.husky/|^\.pre-commit-config\.ya?ml$|^\.?lefthook\.ya?ml$",
@@ -141,9 +142,14 @@ fn path_problem(path: &str, github_exempt: bool) -> Option<&'static str> {
         Some(inside) if github_exempt => inside,
         _ => path,
     };
+    // Keep the trailing slash so rules for protected directories still match.
+    let fixed = inside
+        .strip_suffix(".gitignore")
+        .filter(|parent| parent.is_empty() || parent.ends_with('/'))
+        .unwrap_or(inside);
     if !PLAIN_PATH_RE.is_match(path) || dotted {
         Some("not a plain relative path")
-    } else if PROTECTED_PATH_RE.is_match(inside)
+    } else if PROTECTED_PATH_RE.is_match(fixed)
         || path
             .strip_prefix(MERGE_POLICY_PATH)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -779,6 +785,8 @@ mod tests {
                 (".github/agentic-job/merge.toml.bak", enabled),
                 (".github/agentic-job/allow.toml", enabled),
                 (".github/.git/config", false),
+                (".github/.gitignore", enabled),
+                (".github/.husky/.gitignore", false),
                 (".github/package.json", false),
                 (".github/.husky/pre-commit", false),
             ] {
@@ -788,6 +796,27 @@ mod tests {
                     "{enabled}: {path}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn gitignore_is_only_exempt_as_a_filename() {
+        for (path, allowed) in [
+            (".gitignore", true),
+            ("src/.gitignore", true),
+            (".gitignore.bak", false),
+            (".gitfoo.gitignore", false),
+            (".gitignore/file", false),
+            (".git/.gitignore", false),
+            ("src/.gitmodules/.gitignore", false),
+            (".gitmodules", false),
+            ("src/.gitattributes", false),
+            ("src/.husky/.gitignore", false),
+            (".vscode/.gitignore", false),
+            (".config/.gitignore", false),
+        ] {
+            let found = problems(&(head() + &add(path, PLAIN_MODE)));
+            assert_eq!(found.is_empty(), allowed, "{path}: {found:?}");
         }
     }
 
@@ -1392,6 +1421,11 @@ mod tests {
             patch_problems(&patch, &rules, BASE),
             ["protected files: AGENTS.md"]
         );
+        rules.protected_files.push(".gitignore".into());
+        assert_eq!(
+            patch_problems(&(head() + &edit("src/.gitignore")), &rules, BASE),
+            ["protected files: src/.gitignore"]
+        );
     }
 
     #[test]
@@ -1399,6 +1433,10 @@ mod tests {
         let mut rules = policy().safe_outputs.create_pull_request.unwrap();
         rules.protected_paths = vec!["raw/**".into(), "*.lock".into()];
         for (patch, want) in [
+            (
+                head() + &edit("raw/.gitignore"),
+                vec!["\"raw/.gitignore\": protected by the bounds' glob \"raw/**\""],
+            ),
             (
                 head() + &edit("raw/a.md"),
                 vec!["\"raw/a.md\": protected by the bounds' glob \"raw/**\""],

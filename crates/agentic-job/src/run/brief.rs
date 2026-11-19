@@ -23,8 +23,9 @@ const KIB: usize = 1 << 10;
 /// What `check` refuses by path whatever the policy says
 /// (`check::patch`), in words: an agent is not shown the pattern.
 const ALWAYS_PROTECTED: &str = "any file or directory whose name starts with `.git`, in any \
-                                directory (`.gitignore`, `.gitattributes`, `.gitkeep`, \
-                                and the top-level `.github/` unless exempted above), \
+                                directory (`.gitattributes`, `.gitkeep`, and the top-level \
+                                `.github/` unless exempted above), except an exact `.gitignore` \
+                                filename outside protected directories; \
                                 `CODEOWNERS`, the merge policy \
                                 `.github/agentic-job/merge.toml`, and the configuration \
                                 of hooks, shells, editors and CI systems (`.husky/`, `lefthook.yml`, `.envrc`, \

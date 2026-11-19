@@ -2317,13 +2317,16 @@ The patch is read as git reads it and must be exactly what
 git's own files and CI, hook and editor configuration), paths that are
 not plain relative ones, binaries, symlinks, submodules, new
 executables, mode changes, renames, and a patch over its file count.
+The fixed `.git` prefix rule exempts only an exact `.gitignore` filename.
+It still checks the parent directories, and the caller's protected names,
+path globs and top-level dot-folder rules still apply to `.gitignore`.
 Beyond what the old tree's check refused, it also refuses a change
 carried in the commit message, a second mail, any mail header
 `format-patch` does not write, and a file whose header states no mode:
 git would apply each, and a reader looking for `diff --git` lines would
 miss it. `--report` is the verdict as JSON, with the paths the patch
 names. CI runs a corpus of hand-backs through the old tree's check and
-this one, which must agree but for those differences
+this one, which must agree apart from deliberate differences such as these
 (`crates/agentic-job/tests/corpus`). `crates/agentic-job/tests/check.rs`
 checks the hand-backs of two real runs (`safe-outputs/fixtures`).
 It also runs the output-count corpus cases through Rust `policy`, `collect`

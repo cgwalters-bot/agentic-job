@@ -1,5 +1,6 @@
 // The corpus: the old tree's safe-outputs check and the new one get the
-// same requests and the same hand-backs, and must give the same verdict.
+// same requests and the same hand-backs, and must give the same verdict
+// except where the new check deliberately differs.
 //
 // The old check is cgwalters-devspace-sandbox's safe-outputs/safe-outputs.mjs
 // at the commit ci.yml's corpus job pins, run as it is (it vendors gh-aw's
@@ -269,6 +270,19 @@ async function warned(name, args, want) {
   assert.ok(!JSON.stringify(newVerdict.warnings).includes(TOKEN), name);
 }
 
+test("check: exact .gitignore filenames are no longer protected by default", async () => {
+  const { was, now } = bothPolicies();
+  for (const path of [".gitignore", "src/.gitignore"]) {
+    const dir = handback(withPatch(bad({ [path]: "target\n" })));
+    const oldVerdict = await old.checkOutputs(dir, was);
+    assert.equal(oldVerdict.ok, false, path);
+    assert.match(oldVerdict.errors.join("\n"), /protected path/, path);
+    const newVerdict = newCheck(dir, now);
+    assert.equal(newVerdict.ok, true, `${path}: ${JSON.stringify(newVerdict.errors)}`);
+    assert.deepEqual(newVerdict.patch.files, [path]);
+  }
+});
+
 test("check: what both refuse", async () => {
   const executable = patchOf((d) => {
     write(d, { "run.sh": "#!/bin/sh\n" });
@@ -302,6 +316,7 @@ test("check: what both refuse", async () => {
     ["a manifest (package.json)", withPatch(bad({ "package.json": "{}\n" })), /protected files.*package\.json/],
     ["CI (.github/)", withPatch(bad({ ".github/workflows/x.yml": "on: push\n" })), /\.github/],
     ["a nested git file", withPatch(bad({ "sub/.gitattributes": "* -diff\n" })), /protected path/],
+    ["submodule configuration", withPatch(bad({ ".gitmodules": "# submodules\n" })), /protected path/],
     ["a path with a space", withPatch(bad({ "a b.rs": "x\n" })), /not a plain relative path/],
     ["a new executable", withPatch(executable), /new symlink, submodule, executable/],
     ["a symlink", withPatch(patchOf((d) => symlinkSync("/etc/passwd", join(d, "link")))), /symlink|special/],
@@ -317,7 +332,6 @@ test("check: what both refuse", async () => {
     ["a name that is not ASCII", withPatch(bad({ "é.rs": "x\n" })), /not a plain relative path|unparseable header/],
     ["a name with a quote", withPatch(bad({ 'a"b.rs': "x\n" })), /not a plain relative path|unparseable header/],
     ["a name that starts with a dash", withPatch(bad({ "-x.rs": "x\n" })), /not a plain relative path/],
-    ["git's own ignore file", withPatch(bad({ ".gitignore": "target\n" })), /protected path/],
     ["a nested CODEOWNERS", withPatch(bad({ "docs/CODEOWNERS": "* @x\n" })), /protected/],
     ["an .envrc", withPatch(bad({ ".envrc": "export X=1\n" })), /protected path/],
     ["an editor's settings", withPatch(bad({ ".vscode/settings.json": "{}\n" })), /protected/],
