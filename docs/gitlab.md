@@ -46,8 +46,8 @@ credential, `inference.front`,
 `setup.tools` or child agent is refused by `run --runner-home`.
 A second sandbox user is not an option. Base64 wrapping, `hidepid` and
 a `run0` shim are historical downstream accommodations, not replacements
-for the runner-only credential boundary. Container runners can explicitly
-delegate host isolation as described below; that does not supply a new
+for the runner-only credential boundary. Container runners can delegate
+host isolation as described below; that does not supply a new
 inference identity contract. See the
 [current boundary](inference.md) and
 [runner-mode refusals](interface.md#removed-keys-and-runner-mode-refusals).
@@ -66,9 +66,22 @@ the environment, never copy them into code.
 
 ## Explicit external host isolation
 
-The concrete threat here is confusing host isolation delegated to a runner
-operator with isolation agentic-job has proved. For a container executor,
-the trusted runner configuration may explicitly declare:
+Standalone `run` defaults to external host isolation when GitLab Runner marks
+the job as disposable (`GITLAB_CI=true`, `CI_DISPOSABLE_ENVIRONMENT=true`,
+no `CI_SHARED_ENVIRONMENT`) and Linux shows a regular `/.dockerenv` or
+`/run/.containerenv` marker, or the standard kubelet per-pod `/etc/hosts`
+bind mount. A shell executor can itself run in a long-lived container, so
+a container marker and `GITLAB_CI` alone are not enough. Missing systemd
+and runtime environment hints alone don't count. If detection is
+inconclusive, `GITHUB_ACTIONS` is present, `DOCKER_HOST` or `CONTAINER_HOST`
+is set, or a well-known Docker, Podman, containerd or CRI-O socket path
+exists, the default remains `managed`: a job that can reach a host engine
+is not one whose host isolation the runner owns. Detection also applies
+only when the configuration sets `egress.proxy = false`: a job that asks
+for the local egress proxy (the default) stays `managed`, where `run`
+refuses a proxy that cannot hold the agent rather than dropping it on the
+strength of hints. An explicit setting always wins: use `managed`
+to retain local controls on a detected container, or declare:
 
 ```toml
 [host]
@@ -92,20 +105,21 @@ no credentials beyond the run's own. Do not mount a Kubernetes service
 account token, provider key, MCP credential, OIDC request credential,
 publisher token or host/container-engine socket into the agent's reach.
 Pod Security admission, NetworkPolicy and node placement are the runner
-hoster's responsibility, not something this declaration tests.
+hoster's responsibility, not something detection or declaration tests.
 
-The absent setting means `managed`, including on GitHub-hosted runners.
-GitLab variables, container detection and missing systemd never enable
-external mode. Provider-key, MCP, OIDC, private-target, front-proxy and
+Provider-key, MCP, OIDC, private-target, front-proxy and
 child-agent refusals remain. Log redaction, run limits, hostile-data checking
 on a separate runner and apply as the only publisher are unchanged.
 
-`summary.json`, the agent's hand-back metadata and the published hand-back's
-`host-isolation.json` contain `host_isolation = "external"` (a JSON string
-field). Check reads the latter as a regular file of at most 128 bytes,
-accepts only the fixed declaration and retains it in its report for apply.
-An absent record means unknown, not proved managed isolation. `summary.md` labels it
-as a caller declaration, not proof; pass it to `check --run-summary`, which
+`summary.json` and the agent's hand-back metadata record external isolation
+with `host_isolation_source: "declared"` or `"detected"`. Check reads the
+published `host-isolation.json` as a regular file of at most 128 bytes and
+retains the bounded fields in its report. Declared records keep the older
+external-only encoding; detected records add the source. Upgrade check
+before using a producer that emits detected records. An absent record
+means unknown, not proved managed isolation. `summary.md` distinguishes
+detection from declaration, neither of which is proof. Pass it to
+`check --run-summary`, which
 reads a bounded regular file and sanitizes it for apply. This is
 producer-reported provenance, not an attestation: it must never authorize
 an output or bypass bounds. Check and apply must remain on separate,

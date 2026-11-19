@@ -675,7 +675,11 @@ pub fn cost_line(s: &Value) -> String {
 /// The run's `summary.md` from its `summary.json`.
 pub(super) fn isolation_notice(s: &Value) -> &'static str {
     if s["host_isolation"] == "external" {
-        "Host isolation: **external** — declared by caller; not proved by agentic-job. This is producer-reported provenance, not a check attestation.\n"
+        if s["host_isolation_source"] == "detected" {
+            "Host isolation: **external** — detected GitLab container; not proved by agentic-job. This is producer-reported provenance, not a check attestation.\n"
+        } else {
+            "Host isolation: **external** — declared by caller; not proved by agentic-job. This is producer-reported provenance, not a check attestation.\n"
+        }
     } else {
         ""
     }
@@ -744,7 +748,7 @@ pub fn markdown(s: &Value) -> String {
         ]),
     ];
     if s["host_isolation"] == "external" {
-        out.insert(2, "Host isolation: **external** — declared by caller; not proved by agentic-job. This is producer-reported provenance, not a check attestation.\n".to_owned());
+        out.insert(2, isolation_notice(s).to_owned());
     }
     if let Some(models) = s["cost"]["estimated_models"]
         .as_object()

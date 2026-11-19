@@ -115,7 +115,6 @@ const MAX_RUN_SUMMARY_UNITS: usize = 900_000;
 
 /// Producer-reported provenance only: never an attestation or authorization.
 pub(crate) const HOST_ISOLATION_FILE: &str = "host-isolation.json";
-pub(crate) const EXTERNAL_ISOLATION_RECORD: &str = "{\"host_isolation\":\"external\"}\n";
 const MAX_HOST_ISOLATION_BYTES: u64 = 128;
 
 /// `run`'s summary.md at PATH as apply may post it: read without
@@ -147,9 +146,11 @@ pub struct Verdict {
     /// Independent required-job results, not semantic task completion or readiness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unchanged_completion: Option<unchanged::Checked>,
-    /// A bounded producer declaration, not evidence of passed host controls.
+    /// Bounded producer provenance, not evidence of passed host controls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_isolation: Option<crate::config::Isolation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) host_isolation_source: Option<crate::run::isolation::Source>,
 
     /// Identity checked against independent caller context; not completion evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,6 +210,7 @@ impl Verdict {
         Self {
             unchanged_completion: None,
             host_isolation: None,
+            host_isolation_source: None,
             continuation: None,
             inline_target: None,
             ok: errors.is_empty(),
@@ -564,19 +566,21 @@ fn verdict_of(
         }
     }
     warnings.truncate(redact::MAX_SHAPE_WARNINGS);
-    let host_isolation = contents.get(HOST_ISOLATION_FILE).and_then(|bytes| {
-        // Only this fixed declaration is supported. In particular a producer
+    let isolation = contents.get(HOST_ISOLATION_FILE).and_then(|bytes| {
+        // Only external provenance is supported. In particular a producer
         // cannot assert that managed isolation was proved. Missing provenance
         // on older hand-backs means unknown, never managed or attested.
-        if serde_json::from_slice::<Value>(bytes).ok()
-            == Some(serde_json::json!({"host_isolation": "external"}))
-        {
-            Some(crate::config::Isolation::External)
-        } else {
-            errors.push(format!(
-                "{HOST_ISOLATION_FILE}: expected only host_isolation = external"
-            ));
-            None
+        let record = (bytes.trim_ascii_start().first() == Some(&b'{'))
+            .then(|| serde_json::from_slice::<crate::run::isolation::Record>(bytes).ok())
+            .flatten();
+        match record {
+            Some(record) if record.host_isolation == crate::config::Isolation::External => Some(record),
+            _ => {
+                errors.push(format!(
+                    "{HOST_ISOLATION_FILE}: expected external isolation with a declared or detected source"
+                ));
+                None
+            }
         }
     });
     // Taken from a path of its own and never from `dir`, which the agent's
@@ -696,7 +700,8 @@ fn verdict_of(
             .iter()
             .all(|item| item_type(item) != PUSH_TO_PULL_REQUEST_BRANCH);
     Ok(Verdict {
-        host_isolation,
+        host_isolation: isolation.as_ref().map(|record| record.host_isolation),
+        host_isolation_source: isolation.map(|record| record.host_isolation_source),
         secondary_patch: checked.secondary_patch,
         checkpoint,
         warnings,

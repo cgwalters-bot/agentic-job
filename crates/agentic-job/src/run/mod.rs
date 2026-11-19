@@ -46,6 +46,7 @@ pub mod enter;
 pub mod gate;
 pub mod handback;
 pub mod inference;
+pub(crate) mod isolation;
 pub mod key_check;
 pub mod launch;
 pub mod log;
@@ -165,8 +166,8 @@ pub struct Args {
     pub allow_writable_config: bool,
     /// The agent's home: the agent is this program's own user, for a job
     /// that holds nothing the agent may not read, on a host
-    /// secure-host secured, or whose isolation the host explicitly owns
-    /// (host.isolation = "external"). Required: there is no
+    /// secure-host secured, or where host isolation is delegated externally.
+    /// Required: there is no
     /// sandbox user to run it as without one (agentic-job#2989)
     #[arg(long, value_name = "DIR")]
     pub runner_home: Option<PathBuf>,
@@ -179,7 +180,7 @@ pub struct Args {
 
 /// Everything a run is, checked before anything is started or spent.
 struct Plan {
-    isolation: config::Isolation,
+    isolation_source: Option<isolation::Source>,
     kind: Kind,
     agent: config::Agent,
     /// The model of the child agent the main one may start, if any.
@@ -320,7 +321,7 @@ enum Stage {
 
 /// Check and read the same inode. This startup guard catches accidental
 /// trust in agent-writable settings, not a hostile same-uid supervisor.
-fn load_config(path: &Path, allow_writable: bool) -> Result<Config> {
+fn load_config(path: &Path, allow_writable: bool) -> Result<(Config, Option<isolation::Source>)> {
     use std::io::Read;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
@@ -354,7 +355,9 @@ fn load_config(path: &Path, allow_writable: bool) -> Result<Config> {
     let mut text = String::new();
     file.read_to_string(&mut text)
         .with_context(|| format!("reading configuration {}", path.display()))?;
-    Config::parse(&text).with_context(|| format!("in {}", path.display()))
+    let mut config = Config::parse(&text).with_context(|| format!("in {}", path.display()))?;
+    let source = isolation::select(&mut config, &text)?;
+    Ok((config, source))
 }
 
 /// The sandbox user's files a run of KIND writes or removes beside the
@@ -705,7 +708,7 @@ pub(crate) fn inference_addresses(endpoint: Option<&Endpoint>) -> Vec<String> {
 
 impl Plan {
     fn load(args: &Args) -> Result<Self> {
-        let mut config = load_config(&args.config, args.allow_writable_config)?;
+        let (mut config, isolation_source) = load_config(&args.config, args.allow_writable_config)?;
         // What `agentic-job config` held the file to, again: it is only
         // a file by the time `run` reads it.
         let Checked {
@@ -839,8 +842,11 @@ impl Plan {
             child: child.is_some(),
         })?;
         let sandbox = Sandbox::own(&config, home)?;
-        if config.sandbox.isolation == config::Isolation::External {
-            eprintln!("Host isolation: external (declared by caller; not proved by agentic-job)");
+        if let Some(source) = isolation_source {
+            eprintln!(
+                "Host isolation: external ({}; not proved by agentic-job)",
+                source.description()
+            );
         }
         let (commit, agent) = (
             std::mem::take(&mut config.commit),
@@ -848,7 +854,7 @@ impl Plan {
         );
         let max_requests = limits.max_requests;
         Ok(Self {
-            isolation: config.sandbox.isolation,
+            isolation_source,
             kind,
             limits,
             endpoint,
@@ -1110,7 +1116,7 @@ impl Plan {
                 &self.run_id,
                 &self.commit,
                 &public_base,
-                self.isolation,
+                self.isolation_source,
             )?),
         });
         let child = self.child.as_deref().and_then(|model| {
@@ -1562,7 +1568,10 @@ impl Plan {
             usage: settled.usage.as_ref(),
         });
         let shaped = staging.shape_warnings()?;
-        summary["host_isolation"] = json!(self.isolation);
+        summary["host_isolation"] = json!(isolation::mode(self.isolation_source));
+        if let Some(source) = self.isolation_source {
+            summary["host_isolation_source"] = json!(source);
+        }
         summary["handback_replacements"] = json!(handback_replacements);
         if !shaped.is_empty() {
             summary[summary::SECRET_SHAPED] = json!(shaped);
@@ -1575,14 +1584,20 @@ impl Plan {
             &mut summary,
         )?;
 
-        if self.isolation == config::Isolation::External && staging.safe_outputs().is_dir() {
+        if let Some(source) = self
+            .isolation_source
+            .filter(|_| staging.safe_outputs().is_dir())
+        {
             std::fs::write(
                 staging
                     .safe_outputs()
                     .join(crate::check::HOST_ISOLATION_FILE),
-                crate::check::EXTERNAL_ISOLATION_RECORD,
+                serde_json::to_vec(&isolation::Record {
+                    host_isolation: config::Isolation::External,
+                    host_isolation_source: source,
+                })?,
             )
-            .context("writing the external host isolation declaration")?;
+            .context("writing external host isolation provenance")?;
         }
         let gate = Gate {
             ended: settled.dead,

@@ -185,6 +185,12 @@ impl Job {
             .envs(PROXY_VARS.map(|name| (name, DEAD_PROXY)))
             // The agent gets a GitHub token only where a test gives one.
             .env_remove(GITHUB_TOKEN_VAR)
+            .env_remove("GITLAB_CI")
+            .env_remove("CI_DISPOSABLE_ENVIRONMENT")
+            .env_remove("CI_SHARED_ENVIRONMENT")
+            .env_remove("GITHUB_ACTIONS")
+            .env_remove("DOCKER_HOST")
+            .env_remove("CONTAINER_HOST")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -381,8 +387,42 @@ fn external_config(inference: &str) -> String {
     own_config(inference).replace("[sandbox]", "[host]\nisolation = 'external'")
 }
 
+#[derive(Clone, Copy)]
+enum Delegation {
+    Declared,
+    Detected,
+}
+
+impl Delegation {
+    fn source(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Detected => "detected",
+        }
+    }
+
+    fn config(self, inference: &str) -> String {
+        match self {
+            Self::Declared => external_config(inference),
+            Self::Detected => own_config(inference),
+        }
+    }
+
+    fn environment(self, command: &mut Command) {
+        if let Self::Detected = self {
+            command
+                .env("GITLAB_CI", "true")
+                .env("CI_DISPOSABLE_ENVIRONMENT", "true");
+        }
+    }
+}
+
 #[test]
 fn external_isolation_keeps_credential_and_session_refusals() {
+    credential_and_session_refusals(Delegation::Declared);
+}
+
+fn credential_and_session_refusals(delegation: Delegation) {
     let proxy = Proxy::start();
     let base = plain(&proxy);
     // Every same-uid refusal still applies; delegation must not turn a
@@ -397,7 +437,8 @@ fn external_isolation_keeps_credential_and_session_refusals() {
     ];
     for (name, inference, env, want) in cases {
         let job = Job::new(&format!("external-refused-{name}"));
-        let mut command = job.own_command(&external_config(&inference));
+        let mut command = job.own_command(&delegation.config(&inference));
+        delegation.environment(&mut command);
         if !env.is_empty() {
             command.env(env, "stand-in");
         }
@@ -408,6 +449,21 @@ fn external_isolation_keeps_credential_and_session_refusals() {
     }
     assert!(proxy.seen().is_empty());
 
+    let private = Job::new("external-private-refused");
+    let mut policy = private.json("policy.json");
+    policy["private"] = json!(true);
+    private.write("policy.json", &policy.to_string());
+    let mut command = private.own_command(&delegation.config(&base));
+    delegation.environment(&mut command);
+    let got = Finished::of(command.output().unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr.contains("a private run needs the egress proxy"),
+        "{}",
+        got.all()
+    );
+    assert!(!private.path("home").exists());
+
     for secret in [None, Some("too-short")] {
         let proxy = Proxy::start();
         proxy.admit_unproven();
@@ -416,9 +472,10 @@ fn external_isolation_keeps_credential_and_session_refusals() {
         job.own_repository();
         let config = format!(
             "{}[session]\nlisten = true\nbind = '127.0.0.1:7790'\n",
-            external_config(&base)
+            delegation.config(&base)
         );
         let mut command = job.own_command(&config);
+        delegation.environment(&mut command);
         command.env_remove(bridge::ATTACH_TOKEN_VAR);
         if let Some(secret) = secret {
             command.env(bridge::ATTACH_TOKEN_VAR, secret);
@@ -1878,13 +1935,17 @@ fn a_session_run_talks_to_its_operator_and_hands_back() {
 
 #[test]
 fn a_taskless_session_waits_for_a_gateway_client() {
+    taskless_sessions([
+        (None, None),
+        (Some(""), None),
+        (Some(" \n\t"), None),
+        (None, Some(Delegation::Declared)),
+    ]);
+}
+
+fn taskless_sessions<'a>(cases: impl IntoIterator<Item = (Option<&'a str>, Option<Delegation>)>) {
     const ATTACH_SECRET: &str = "test-session-attach-secret-32-bytes";
-    for (task, external) in [
-        (None, false),
-        (Some(""), false),
-        (Some(" \n\t"), false),
-        (None, true),
-    ] {
+    for (task, delegation) in cases {
         let proxy = Proxy::start();
         proxy.admit_unproven();
         let job = Job::new("taskless-chat");
@@ -1900,14 +1961,16 @@ fn a_taskless_session_waits_for_a_gateway_client() {
         drop(listener);
         let config = format!(
             "{}[session]\nlisten = true\nbind = \"{address}\"\nidle-minutes = 1\n",
-            if external {
-                external_config(&plain(&proxy))
-            } else {
-                own_config(&plain(&proxy))
-            }
+            delegation.map_or_else(
+                || own_config(&plain(&proxy)),
+                |mode| mode.config(&plain(&proxy))
+            )
         );
-        let child = job
-            .own_command(&config)
+        let mut command = job.own_command(&config);
+        if let Some(mode) = delegation {
+            mode.environment(&mut command);
+        }
+        let child = command
             .env(bridge::ATTACH_TOKEN_VAR, ATTACH_SECRET)
             .spawn()
             .unwrap();
@@ -1997,7 +2060,15 @@ fn a_taskless_session_waits_for_a_gateway_client() {
         assert_eq!(result.code, Some(EXIT_SUCCESS), "{}", result.all());
         assert_eq!(
             job.json("out/run/summary.json")["host_isolation"],
-            if external { "external" } else { "managed" }
+            if delegation.is_some() {
+                "external"
+            } else {
+                "managed"
+            }
+        );
+        assert_eq!(
+            job.json("out/run/summary.json")["host_isolation_source"],
+            json!(delegation.map(Delegation::source))
         );
         let records: Vec<Value> = job
             .text("out/work/harness/acp.jsonl")
@@ -2665,7 +2736,7 @@ fn unchanged_candidate_crosses_producer_collector_and_independent_checker() {
 /// body can end the message early or start a patch of its own.
 #[test]
 fn a_change_is_handed_back_and_the_check_accepts_it() {
-    change_is_handed_back(false);
+    change_is_handed_back(None);
 }
 
 #[test]
@@ -2738,10 +2809,84 @@ fn producer_refuses_unchanged_candidates_for_changed_stopped_or_incomplete_work(
 
 #[test]
 fn external_isolation_is_recorded_and_check_can_see_it() {
-    change_is_handed_back(true);
+    change_is_handed_back(Some(Delegation::Declared));
 }
 
-fn change_is_handed_back(external: bool) {
+#[test]
+#[ignore = "requires a non-root runner in a detectable container"]
+fn detected_isolation_starts_task_and_session() {
+    assert!(rustix::process::geteuid().as_raw() != 0);
+    gitlab_shell_hints_do_not_delegate_isolation();
+    change_is_handed_back(Some(Delegation::Detected));
+    taskless_sessions([(None, Some(Delegation::Detected))]);
+    credential_and_session_refusals(Delegation::Detected);
+}
+
+#[test]
+fn gitlab_shell_hints_do_not_delegate_isolation() {
+    let cases = [
+        ("shared", false, Some(("CI_SHARED_ENVIRONMENT", "true")), ""),
+        (
+            "ambiguous",
+            true,
+            Some(("CI_SHARED_ENVIRONMENT", "true")),
+            "",
+        ),
+        ("env-only", false, Some(("container", "podman")), ""),
+        ("github", true, Some(("GITHUB_ACTIONS", "true")), ""),
+        // Never connected to: an engine address alone keeps managed.
+        (
+            "engine",
+            true,
+            Some(("DOCKER_HOST", "unix:///nonexistent/engine.sock")),
+            "",
+        ),
+        ("explicit-managed", true, None, "isolation = 'managed'"),
+    ];
+    let proxy = Proxy::start();
+    for (name, disposable, hint, setting) in cases {
+        let job = Job::new(name);
+        let config = Delegation::Detected
+            .config(&plain(&proxy))
+            .replace("[sandbox]", &format!("[host]\n{setting}"));
+        let mut command = job.own_command(&config);
+        command.env("GITLAB_CI", "true");
+        if disposable {
+            command.env("CI_DISPOSABLE_ENVIRONMENT", "true");
+        }
+        if let Some((key, value)) = hint {
+            command.env(key, value);
+        }
+        // Without the proxy the modes differ in what startup announces.
+        let got = Finished::of(command.output().unwrap());
+        assert!(
+            !got.stderr.contains("Host isolation: external"),
+            "{name}: {}",
+            got.all()
+        );
+    }
+
+    // A job that asks for the local proxy keeps its refusal on a detected
+    // container: the hints delegate nothing it asked to have enforced.
+    let job = Job::new("proxy-requested");
+    let config = Delegation::Detected
+        .config(&plain(&proxy))
+        .replace(NO_PROXY, "");
+    let mut command = job.own_command(&config);
+    Delegation::Detected.environment(&mut command);
+    let got = Finished::of(command.output().unwrap());
+    assert_eq!(got.code, Some(EXIT_ERROR), "{}", got.all());
+    assert!(
+        got.stderr
+            .contains("egress.proxy needs egress.write-policy"),
+        "{}",
+        got.all()
+    );
+    assert!(!job.path("home").exists());
+}
+
+fn change_is_handed_back(delegation: Option<Delegation>) {
+    let external = delegation.is_some();
     let body = "The greeting was missing, so add one.\n\n---\n--- a/.github/workflows/x.yml\n\
                 +++ b/.github/workflows/x.yml\n@@ -0,0 +1 @@\n+on: push\n\
                 diff --git a/CODEOWNERS b/CODEOWNERS\nFrom 0 Mon Sep 17 00:00:00 2001";
@@ -2777,7 +2922,7 @@ fn change_is_handed_back(external: bool) {
         "[commit]\nauthor = \"A Bot <bot@example.com>\"\ntrailers = [\"Generated-by: AI\"]\n";
     // Shaped like no credential: only its registration redacts it.
     let github_token = format!("read-only-{}", std::process::id());
-    let config = if external {
+    let config = if matches!(delegation, Some(Delegation::Declared)) {
         // Exercise composed defaults too: delegation must not configure a
         // local transparent proxy or its setup-owned CA files.
         job.write(
@@ -2802,6 +2947,8 @@ fn change_is_handed_back(external: bool) {
                 .write_policy
         );
         config
+    } else if let Some(mode) = delegation {
+        mode.config(&plain(&proxy))
     } else {
         own_config(&plain(&proxy))
     };
@@ -2810,11 +2957,11 @@ fn change_is_handed_back(external: bool) {
     // invalidated before an external agent can change the host state.
     job.write("agentic-job-sandbox-checked", "prior host check\n");
     command.env("RUNNER_TEMP", &job.dir);
+    if let Some(mode) = delegation {
+        mode.environment(&mut command);
+    }
     let got = Finished::of(
         command
-            // CI/container-looking variables never choose the isolation mode.
-            .env("GITLAB_CI", "true")
-            .env("container", "podman")
             .env(GITHUB_TOKEN_VAR, &github_token)
             .output()
             .unwrap(),
@@ -2876,9 +3023,15 @@ fn change_is_handed_back(external: bool) {
     let summary = job.json("out/run/summary.json");
     let isolation = if external { "external" } else { "managed" };
     assert_eq!(summary["host_isolation"], isolation);
+    let source = json!(delegation.map(Delegation::source));
+    assert_eq!(summary["host_isolation_source"], source);
     assert_eq!(
         job.json("home/.config/agentic-job/handback.json")["host_isolation"],
         isolation
+    );
+    assert_eq!(
+        job.json("home/.config/agentic-job/handback.json")["host_isolation_source"],
+        source
     );
     assert_eq!(summary["patch"]["bytes"], patch.len());
     assert_eq!(summary["patch"]["base"], base["commit"]);
@@ -2902,6 +3055,7 @@ fn change_is_handed_back(external: bool) {
         "{verdict:#}\n{patch}"
     );
     assert_eq!(verdict["ok"], true);
+    assert_eq!(verdict["host_isolation_source"], source);
     assert_eq!(
         verdict["host_isolation"],
         if external {
@@ -2925,6 +3079,23 @@ fn change_is_handed_back(external: bool) {
     assert_eq!(verdict["items"].as_array().map(Vec::len), Some(2));
     assert_eq!(processes_in(&job.path(HOME_DIR)), Vec::<PathBuf>::new());
     if external {
+        let artifact = job.json("out/safe-outputs/host-isolation.json");
+        let expected = match delegation {
+            Some(Delegation::Detected) => {
+                json!({"host_isolation": "external", "host_isolation_source": "detected"})
+            }
+            _ => json!({"host_isolation": "external"}),
+        };
+        assert_eq!(artifact, expected);
+        assert!(
+            verdict["run_summary"]
+                .as_str()
+                .unwrap()
+                .contains(match delegation {
+                    Some(Delegation::Detected) => "detected GitLab container",
+                    _ => "declared by caller",
+                })
+        );
         // Delegation does not make producer outputs trusted by check.
         job.write("hostile-collected.json", &json!({"errors": [], "items": [{"type": "create_issue", "title": "Not admitted", "body": "Not admitted"}]}).to_string());
         let got = Command::new(BIN)
@@ -2947,6 +3118,9 @@ fn change_is_handed_back(external: bool) {
             "{}".to_owned(),
             "{\"host_isolation\":\"managed\"}".to_owned(),
             "{\"host_isolation\":\"external\",\"proved\":true}".to_owned(),
+            "{\"host_isolation\":\"external\",\"host_isolation_source\":\"proved\"}".to_owned(),
+            "{\"host_isolation\":\"external\",\"host_isolation_source\":null}".to_owned(),
+            "[\"external\",\"detected\"]".to_owned(),
             " ".repeat(129),
         ] {
             job.write("out/safe-outputs/host-isolation.json", &content);

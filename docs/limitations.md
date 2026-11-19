@@ -8,14 +8,16 @@ come with the limits below. See
 for what has actually run; a passing local test is not deployment proof.
 
 Standalone container runs can explicitly set `[host] isolation = "external"`.
-This is a caller declaration, not proof of isolation; the default remains
-managed and never changes based on the environment. The runner host owns one
+Disposable GitLab jobs with a recognized container signal, no container
+engine address in reach and `egress.proxy = false` default to external;
+other jobs default to managed. Neither declaration nor detection is proof
+of isolation. The runner host owns one
 job per runner, a fresh environment, an egress allowlist and no credentials
 beyond the run's own. Agentic-job performs no host setup in that mode;
 provider/MCP/OIDC credential refusals, session attach secrets, redaction and
 separate check/apply boundaries still apply. See
 [external host isolation](gitlab.md#explicit-external-host-isolation) for
-configuration, provenance and the pending readiness integration. Local fake-agent
+configuration and provenance. Local fake-agent
 tests do not prove Kubernetes Pod Security or a live GitLab inference deployment.
 
 - Steps after `secure-host` lose root but keep the job's tokens and an open

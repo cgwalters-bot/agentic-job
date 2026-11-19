@@ -139,6 +139,8 @@ const MAX_RUN_FILE_BYTES: u64 = 1 << 20;
 struct RunFile {
     #[serde(default)]
     host_isolation: config::Isolation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_isolation_source: Option<crate::run::isolation::Source>,
     #[serde(default)]
     public_base: crate::run::public_addresses::PublicAddresses,
     policy: Policy,
@@ -209,14 +211,7 @@ pub(crate) fn run_file_with_public(
     commit: &config::Commit,
     public: &crate::run::public_addresses::PublicAddresses,
 ) -> Result<String> {
-    run_file_with_isolation(
-        policy,
-        checkout,
-        run_id,
-        commit,
-        public,
-        config::Isolation::Managed,
-    )
+    run_file_with_isolation(policy, checkout, run_id, commit, public, None)
 }
 
 pub(crate) fn run_file_with_isolation(
@@ -225,7 +220,7 @@ pub(crate) fn run_file_with_isolation(
     run_id: &str,
     commit: &config::Commit,
     public: &crate::run::public_addresses::PublicAddresses,
-    isolation: config::Isolation,
+    isolation_source: Option<crate::run::isolation::Source>,
 ) -> Result<String> {
     let mut policy = Policy {
         clone_url: String::new(),
@@ -236,7 +231,7 @@ pub(crate) fn run_file_with_isolation(
         secondary.clone_url = String::new();
     }
     let mut file = json!({
-        "host_isolation": isolation,
+        "host_isolation": crate::run::isolation::mode(isolation_source),
         "public_base": public,
         "policy": policy,
         "checkout": checkout.dir,
@@ -244,6 +239,9 @@ pub(crate) fn run_file_with_isolation(
         "run_id": run_id,
         "commit": commit,
     });
+    if let Some(source) = isolation_source {
+        file["host_isolation_source"] = json!(source);
+    }
     if let Some(tree) = &checkout.secondary {
         file["secondary"] = json!({"checkout": tree.dir, "base": tree.base_commit});
     }
@@ -355,9 +353,11 @@ fn fix_for(reason: &str, collector: bool) -> &'static str {
 fn validate(home: &Path, run: &RunFile) -> Result<Report> {
     let mut report = Report::default();
     if run.host_isolation == config::Isolation::External {
-        report.notes.push(
-            "host isolation is external: declared by caller, not proved by agentic-job".to_owned(),
-        );
+        let source = run.host_isolation_source.unwrap_or_default();
+        report.notes.push(format!(
+            "host isolation is external: {}, not proved by agentic-job",
+            source.description()
+        ));
     }
     let mut base_shapes_checked = false;
     let policy = &run.policy;
@@ -1253,6 +1253,7 @@ mod tests {
         };
         let run = RunFile {
             host_isolation: config::Isolation::Managed,
+            host_isolation_source: None,
             public_base: Default::default(),
             policy,
             checkout,
