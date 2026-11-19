@@ -40,8 +40,8 @@ CI's `javascript` job lets the JavaScript outside `site/`, `.github/actions/`
 and exactly `corpus.test.mjs`, `handlers.test.mjs` and `collect.cjs` in
 `crates/agentic-job/tests/corpus/` only shrink: put new logic in the Rust binary,
 and do not add `.js`, `.mjs`, `.cjs` or `.ts` files elsewhere. The directory itself
-is not exempt. The legacy `corpus.test.mjs` allowance is temporary pending
-tracker#1455's trusted caller evidence for deletion; its CI dependencies remain.
+is not exempt. Keep the legacy `corpus.test.mjs` allowance and its CI
+dependencies until trusted caller evidence supports their removal.
 Keep the [pinned upstream parity drivers](safe-outputs.md#upstream-javascript-disposition)
 and their coverage; this is not acceptance of the 1.0 no-JavaScript bar.
 

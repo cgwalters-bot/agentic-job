@@ -61,10 +61,6 @@ jobs:
       - run: make check                           # runner's user, no sudo
 ```
 
-To run an agent, follow [Getting started](../docs/try-it.md): a local check
-and a minimal GitHub caller, with no model or broker needed. Unlike this
-repository's own deployment callers, it needs no project-specific settings.
-
 ## Compared with GitHub Agentic Workflows
 
 agentic-job is for work that needs a [hardened host-user sandbox](../docs/sandbox.md)
@@ -90,6 +86,5 @@ agentic-job callers instead write [ordinary workflow YAML](../docs/workflow.md).
 
 ## Read more
 
-- [Quickstart](../docs/try-it.md): a first run with the scripted agent, no model needed.
 - [Running it on GitHub](../docs/workflow.md): the reusable workflow, its jobs and tokens.
 - [Inference through a proxy](../docs/inference.md): reaching a model without holding its key.

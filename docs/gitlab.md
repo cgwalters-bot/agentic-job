@@ -111,8 +111,7 @@ producer-reported provenance, not an attestation: it must never authorize
 an output or bypass bounds. Check and apply must remain on separate,
 trusted runners that never execute agent-produced code.
 
-Readiness #3000 / PR #3169 is not merged on main at the time of this change.
-Integration must delegate only its host-control evidence (privileges,
+Any readiness check must delegate only host-control evidence (privileges,
 process isolation and local network enforcement), never its reachable
 credential refusals. External mode does not resolve #2903's inference
 identity/lifecycle work or establish a live GitLab deployment proof.

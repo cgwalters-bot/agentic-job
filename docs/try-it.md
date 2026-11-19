@@ -27,7 +27,7 @@ collects a fixed [noop request](examples/outputs.jsonl), and checks it with
 the built CLI. It prints a temporary report path. Expect exit 0 and an
 accepted noop in that JSON report; keep it for inspection or delete the
 printed temporary directory afterward. It makes no forge calls, runs no
-agent and changes no host settings. It is a local contract demonstration,
+agent and changes no host settings. It is a smoke test of the hand-back contract,
 not evidence of sandbox isolation or publication. Do not run `secure-host`
 or `sandbox setup` on your workstation or inside an existing sandbox.
 
@@ -138,8 +138,9 @@ gh run watch RUN_ID --exit-status
 
 Replace `RUN_ID` with the dispatched run's id. If `agent-apply` requires
 approval, approve the waiting environment job in Actions before expecting
-apply to finish. Inspect the check/apply summaries and `applied` artifact;
-a successful agent job alone does not mean a pull request was published.
+apply to finish. Check should admit the one-file patch; apply should report
+the resulting draft pull request in the `applied` artifact. Open that pull
+request and inspect the diff. Agent success alone proves neither result.
 
 If policy refuses the run, check `OWNER/REPO`, the base branch, output bounds
 and source pin first. If apply fails, check the environment secret, bot's
@@ -148,18 +149,11 @@ their named failure; do not disable a probe to obtain a green first run.
 
 ## 4. Choose the next step
 
-**A real agent** needs a credential broker
-([what a broker provides](inference.md#what-a-broker-provides)), but
-it doesn't need any secret beyond `SAFE_OUTPUTS_PAT`. Replace
-`agent: fake` with `claude`, drop `max-requests: "0"` (the default caps at 150 requests, which the
-broker counts), and pass `inference-url` and `inference-audience` from the
-broker's operator and an `agent-runner` that reaches the broker in **both**
-the separate register job and the agent job. Keep the default
-`inference-register: github-oidc`; the operator must admit the caller's
-numeric repository id and exact workflow commit. Do not switch to `plain`
-to bypass an admission failure ([its limits](inference.md#registering-without-proof));
-agentic-job doesn't provision runners. The
-[real agent checklist](workflow.md#real-agent-checklist) has the rest.
+**A real agent:** follow the [real agent checklist](workflow.md#real-agent-checklist)
+with your broker and runner operators. Supply the broker URL and audience
+from runtime configuration. Both register and agent need a route to the
+broker; only register gets the OIDC request credential. Do not switch to
+`plain` to bypass an admission failure or put a provider key on the runner.
 
 **GitLab:** follow the [deterministic GitLab CI caller](gitlab.md#minimal-deterministic-pipeline)
 for a policy/produce/check/apply pipeline and its bounds, binary-verification
@@ -171,9 +165,12 @@ broker identity or work around that boundary with a provider key.
 
 `cargo test --locked -p agentic-job --test policy` parses the GitHub YAML,
 checks its inputs against the reusable workflow, composes its generic host
-configuration and admits its bounds. It also parses the GitLab pipeline,
+configuration and admits its bounds. In CI the same test runs pinned
+actionlint on the guide's YAML to check workflow syntax and expressions.
+It also parses the GitLab pipeline,
 checks its command flags and job separation, and runs its deterministic
 producer through collect/check. The same suite executes the local script
 above. `just site-test` builds the site and tests its pages and link
-rewriting. These checks need no model or forge writes; they do not establish
+rewriting. Run `just site-check` after it to check rendered link destinations
+and fragments. These checks need no model or forge writes; they do not establish
 live GitHub/GitLab deployment or privileged host proof.

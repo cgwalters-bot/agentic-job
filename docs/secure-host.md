@@ -176,7 +176,8 @@ passed:
   holding the artifact; the upload step's log names no host. So the run
   shows one admitted destination, not where a refused upload would have gone.
 
-That is pull request evidence, not default-branch adoption. On 2026-11-09
+The following pins and check results are a deployment snapshot, not
+recommended pins or evidence of current default-branch adoption. On 2026-11-09
 actions' `main` (`eef41d3b216c731fda0960d6c9876a6ab3cd159a`) still pins the
 example to `c9a9501729bc306f3efdc188056b51149c1c9398`, whose image is v0.6.4,
 digest `sha256:df9133ce3d7ca05c9de0c5eb7d1f6c662065288191ac857d6c877ab5833e5b49`;
@@ -584,8 +585,9 @@ is not published-path acceptance.
 
 ### Published standalone acceptance (#2070)
 
-Rechecked on 2026-11-09: the effective action, image digest and source
-remain [the v0.6.9 deployment above](#deployed-write-policy-diagnostics).
+This section records the November 2026 deployment checks. It is not a
+live status report. On 2026-11-09 the effective action, image digest and
+source were [the v0.6.9 deployment above](#deployed-write-policy-diagnostics).
 The actual Ubuntu
 [`secure-host-published` setup/check](https://github.com/cgwalters-forge/agentic-job/actions/runs/42143295583/job/127648635121)
 verified that image's attestation, completed setup and passed 96 checks.

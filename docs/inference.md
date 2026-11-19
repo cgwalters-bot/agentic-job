@@ -20,7 +20,7 @@ runner, a fresh environment, an egress allowlist and no credentials beyond the
 run's own; provider keys, MCP and OIDC request credentials remain refused.
 No sudo, systemd or second user is required in the container. See
 [external host isolation](gitlab.md#explicit-external-host-isolation) for
-standalone configuration and the unmerged readiness dependency.
+standalone configuration and the limits of that declaration.
 
 Current broker inference still gives the agent a **run token**, and the workflow
 forwards a GitHub read token unless `github-reads: false`. Those credentials

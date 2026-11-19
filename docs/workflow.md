@@ -1103,28 +1103,15 @@ and the apply environment token described below, not the job token.
 
 ## A caller
 
-[`.github/workflows/example.yml`](../.github/workflows/example.yml) is a
-complete one, for the scripted agent, started by hand; the
-[Try it](try-it.md) has the same caller written for another
-repository. Copy it and `.github/agentic-job/allow.toml` to the same paths.
-Either copy `.github/agentic-job/hosted.toml` too, or set `config` to
-`.agentic-job-source/.github/agentic-job/hosted.toml`, which the workflow
-reads from its own source at the pinned commit, so the pin covers the
-hardening and there is no copy to keep. Replace `uses: ./.github/workflows/agentic-job.yml` with
-`uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
-using a reviewed commit. Replace the bounds file's `repos` with your
-public repository; the example's `repo` input is empty by default, which
-means the repository it runs in. The allowed base is `main`. Keep the permissions. Commit to your default branch, enable
-Actions and permit the referenced actions and workflow. No branch of your
-repository is written: the pull request comes from a fork.
-The example applies with the `SAFE_OUTPUTS_PAT` of an `agent-apply`
-environment: it asks for a pull request, which apply opens only from a
-fork owned by the account whose token that is
-([below](#pull-requests-come-from-a-fork)). Three more are started by events, [below](#event-triggered-callers):
-a slash command in a comment, a label on a pull request, a schedule.
-Every input is described where it is declared, at the top of the
-workflow file; this page says what a caller has to provide for them.
-The call itself:
+For a first run in your repository use [Getting started](try-it.md), not
+[this repository's caller](../.github/workflows/example.yml) or its bounds.
+The guide includes the reviewed source pin, hosted configuration, fork
+publisher and manual dispatch. For other triggers see the
+[event-triggered callers](#event-triggered-callers).
+
+The following call shows what changes for a broker-backed Claude run on a
+disposable self-hosted runner. Inputs are declared in the
+[reusable workflow](../.github/workflows/agentic-job.yml).
 
 ```yaml
 jobs:
@@ -1154,7 +1141,7 @@ jobs:
 ```
 
 `runner.toml` is a file of the calling repository, not one this
-repository ships: [`hosted.toml`](../.github/agentic-job/hosted.toml) is
+repository ships: the [generic hosted config](examples/hosted.toml) is
 for GitHub's hosted `ubuntu-26.04`, and another runner image listens on
 other sockets, each of which `agentic-job sandbox check` names.
 Name the workflow by a commit you have read, not by a branch. The binary
@@ -1172,12 +1159,9 @@ Opencode also needs
 its `model`, which has no default.
 
 Before replacing `agent: fake` with a broker, ask the inference and network
-operator for the following. The proxy is a
-[praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker);
-nothing else speaks the run API that the default `github-oidc` and
-`plain` registrations use
-([what it must provide](inference.md#what-a-broker-provides)). Hosted Ubuntu alone
-cannot reach a private proxy.
+operator for the following. The broker must implement the
+[registration and lifecycle API](inference.md#what-a-broker-provides).
+Hosted Ubuntu alone cannot reach a private proxy.
 
 - **Proxy URL and audience:** set repository variables `INFERENCE_URL` and
   `INFERENCE_AUDIENCE`, and pass them as `inference-url` and
@@ -1306,8 +1290,9 @@ commit.
 image and not on the run: the services `sandbox setup` stops, the local
 sockets `sandbox check` accepts, the egress rules, who the hand-back's
 commit is by.
-[`.github/agentic-job/hosted.toml`](../.github/agentic-job/hosted.toml)
-is the one for GitHub's `ubuntu-26.04`. For another image, start from an
+Use the [generic hosted config](examples/hosted.toml) for GitHub's
+`ubuntu-26.04`, not [this deployment's settings](../.github/agentic-job/hosted.toml).
+For another image, start from an
 empty `[host]` and read what `sandbox check` fails on: it names each
 listener that is left. The inputs for the agent, the proxy, the limits
 and the packages are written over this file by `agentic-job config`,

@@ -298,6 +298,10 @@ jobs:
         env:
           ZIZMOR: ${{ runner.temp }}/zizmor
           ACTIONLINT: ${{ runner.temp }}/actionlint
+      # Check the workflow schema and expressions in the documented caller.
+      - run: cargo test --locked -p agentic-job --test policy try_it_caller_fits_its_bounds_and_configuration -- --exact
+        env:
+          ACTIONLINT: ${{ runner.temp }}/actionlint
       - run: node --test workflow/workflow-commands.test.cjs
       # Credentialless cross-repository fix: the pinned real handler writes
       # only local git fixtures, with mock forge reads. No new permissions.

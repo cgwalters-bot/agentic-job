@@ -532,6 +532,15 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
             .unwrap()
     };
     let caller = block("```yaml\n");
+    // Ordinary CI supplies the same digest-verified analyzer as ingress.
+    // Lint the actual example, not a checked-in copy of the caller.
+    if let Some(actionlint) = std::env::var_os("ACTIONLINT") {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("agent.yml");
+        std::fs::write(&file, caller).unwrap();
+        let status = Command::new(actionlint).arg(file).status().unwrap();
+        assert!(status.success(), "actionlint refused the documented caller");
+    }
     let input = |name: &str| {
         caller
             .lines()
@@ -545,6 +554,13 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     let caller_yaml = YamlLoader::load_from_str(caller).unwrap().remove(0);
     let workflow_yaml = YamlLoader::load_from_str(&workflow).unwrap().remove(0);
     let declared = &workflow_yaml["on"]["workflow_call"]["inputs"];
+    let secrets = caller_yaml["jobs"]["run"]["secrets"].as_hash().unwrap();
+    assert_eq!(secrets.len(), 1);
+    assert_eq!(
+        caller_yaml["jobs"]["run"]["secrets"]["SAFE_OUTPUTS_PAT"].as_str(),
+        Some("${{ secrets.SAFE_OUTPUTS_PAT }}")
+    );
+    assert!(!workflow_yaml["on"]["workflow_call"]["secrets"]["SAFE_OUTPUTS_PAT"].is_badvalue());
     for (key, value) in caller_yaml["jobs"]["run"]["with"].as_hash().unwrap() {
         let key = key.as_str().unwrap();
         assert!(!declared[key].is_badvalue(), "unknown caller input {key:?}");
@@ -682,6 +698,8 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
 #[test]
 fn documented_local_check_runs_and_refuses_an_out_of_bounds_request() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let guide = std::fs::read_to_string(root.join("docs/try-it.md")).unwrap();
+    assert!(guide.contains("cargo build --locked -p agentic-job --bin agentic-job\nPATH=\"$PWD/target/debug:$PATH\" sh docs/examples/local.sh\n"));
     let temp = tempfile::tempdir().unwrap();
     let examples = temp.path().join("docs/examples");
     std::fs::create_dir_all(&examples).unwrap();

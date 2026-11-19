@@ -234,11 +234,11 @@ changes what the broker has to admit
 with passwordless sudo initially and systemd 257+, Node and apt-get or dnf;
 see [runner requirements](workflow.md#what-a-caller-provides).
 
-Configure your inference broker to verify GitHub identity tokens with the chosen audience
-and admit the caller repository. Confirm registration and per-run budgets
-before real tasks. No model API key goes on the runner. Narrowing broker
-admission to a specific caller remains optional hardening tracked in
-[tracker#452](https://github.com/cgwalters-forge/tracker/issues/452).
+Before real tasks, confirm [broker admission](inference.md#which-workflows-a-broker-admits)
+for the chosen audience, workflow pin and calling repository. Both the
+separate register job and the agent job need a network route to the broker;
+only register holds the OIDC request credential. Confirm per-run budgets.
+No model API key goes on the runner.
 
 For `implement`, and for cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment
 restricted to the protected default branch, and store its sole secret
