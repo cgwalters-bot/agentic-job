@@ -36,7 +36,7 @@ Run the narrow test covering a change first, then applicable checks.
 Run `just fmt` and then `just check` before every commit you hand back;
 a change that fails `just check` isn't done.
 
-CI's `javascript` job lets the JavaScript outside `site/`, `.github/actions/`
+CI's `javascript` job lets the JavaScript outside `.github/actions/`
 and exactly `corpus.test.mjs`, `handlers.test.mjs` and `collect.cjs` in
 `crates/agentic-job/tests/corpus/` only shrink: put new logic in the Rust binary,
 and do not add `.js`, `.mjs`, `.cjs` or `.ts` files elsewhere. The directory itself

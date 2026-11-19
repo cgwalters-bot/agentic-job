@@ -365,7 +365,7 @@ fn javascript_ratchet_allows_only_named_corpus_harnesses() {
             true,
         ),
         ("crates/agentic-job/tests/corpus/collect.cjs", false, true),
-        ("site/example.ts", false, true),
+        ("site/example.ts", false, false),
         (".github/actions/example/probe.js", false, true),
         (
             "crates/agentic-job/tests/corpus/unrelated.mjs",

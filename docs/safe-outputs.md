@@ -3581,7 +3581,7 @@ these drivers and their tests because they execute or compare actual upstream co
 - CI's apply-guard rerun exercises apply's actual guard rather than a model of it.
   `apply.yml` continues to execute the upstream handlers under `actions/github-script`.
 
-The JS ratchet still requires shrinkage outside `site/`, `.github/actions/` and
+The JS ratchet still requires shrinkage outside `.github/actions/` and
 the exact three existing corpus harness paths. Its temporary `corpus.test.mjs`
 allowance and old-tree CI inputs remain until tracker#1455 supplies trusted
 effective opt-in, compatible exact producer/checker revisions and public-base

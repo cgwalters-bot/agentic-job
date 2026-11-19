@@ -218,9 +218,9 @@ jobs:
       - run: node safe-outputs/validation.mjs gh-aw --check
       - run: python3 -B egress/ecosystems.py gh-aw --check
 
-  # The JavaScript outside site/ may only shrink: new logic goes in the
+  # JavaScript outside the allowlist may only shrink: new logic goes in the
   # Rust binary. A change fails if it adds a .js, .mjs, .cjs or .ts file
-  # (or its .mts/.cts form) anywhere but site/, .github/actions/, whose
+  # (or its .mts/.cts form) anywhere but .github/actions/, whose
   # probes must be JS to stand in for a third-party action, and the three
   # named corpus harness files, or if it grows the line count outside them.
   # Exact harness paths prevent unrelated JS from hiding in that directory.
@@ -250,12 +250,12 @@ jobs:
             echo "::error::no base commit to compare with: '$BASE'"; exit 1
           fi
           js='[.][cm]?[jt]s$'
-          allowed='^(site/|[.]github/actions/|crates/agentic-job/tests/corpus/(corpus[.]test[.]mjs|handlers[.]test[.]mjs|collect[.]cjs)$)'
+          allowed='^([.]github/actions/|crates/agentic-job/tests/corpus/(corpus[.]test[.]mjs|handlers[.]test[.]mjs|collect[.]cjs)$)'
           # -z, so git does not quote a name with a tab or non-ASCII byte
           # (which would end it in `"`); a newline in one becomes `?`.
           added=$(git diff -z --no-renames --diff-filter=A --name-only "$BASE" HEAD | tr '\0\n' '\n?' | grep -iE "$js" | grep -vE "$allowed" || true)
           if [ -n "$added" ]; then
-            sed 's/^/::error::adds a JavaScript file outside site\/, .github\/actions\/ and the three named corpus harness files: /' <<< "$added"
+            sed 's/^/::error::adds a JavaScript file outside .github\/actions\/ and the three named corpus harness files: /' <<< "$added"
             exit 1
           fi
           growth=$(git diff -z --no-renames --numstat "$BASE" HEAD | tr '\0\n' '\n?' |
