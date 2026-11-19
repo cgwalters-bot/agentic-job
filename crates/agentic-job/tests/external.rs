@@ -21,6 +21,15 @@ fn command(dir: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn sha256(bytes: &[u8]) -> String {
+    let hex: String = ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("sha256:{hex}")
+}
+
 fn status(output: &Output, expected: i32) {
     assert_eq!(
         output.status.code(),
@@ -36,6 +45,7 @@ fn receipt_is_caller_owned_and_does_not_bypass_policy_check_or_detection() {
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path();
     std::fs::write(dir.join("bounds.toml"), "hosts = ['github.com']\nrepos = ['owner/target']\nbases = ['main']\nmax_outputs = 2\nmax_patch_bytes = 1048576\nmax_patch_files = 50\n[github.outputs]\ncreate_pull_request = { max = 1 }\nnoop = { max = 1 }\n").unwrap();
+    let outputs = "{\"type\":\"noop\",\"message\":\"No change\"}\n";
     let receipt = json!({
         "record": {
             "dispatch_id":"0123456789abcdef0123456789abcdef", "caller_repository":"owner/caller", "caller_run_id":90,"caller_attempt":1,
@@ -47,7 +57,8 @@ fn receipt_is_caller_owned_and_does_not_bypass_policy_check_or_detection() {
             "check_workflow":"example-org/tool/.github/workflows/check.yml",
             "dispatched_at":"2026-11-09T12:00:00Z","deadline":"2026-11-09T13:00:00Z","returned_run_id":null
         },
-        "run_id":7,"attempt":1,"checked":{"id":10,"digest":format!("sha256:{}","a".repeat(64))},"raw":{"id":11,"digest":format!("sha256:{}","b".repeat(64))}
+        "run_id":7,"attempt":1,"checked":{"id":10,"digest":format!("sha256:{}","a".repeat(64))},"raw":{"id":11,"digest":format!("sha256:{}","b".repeat(64))},
+        "files":{"outputs.jsonl":sha256(outputs.as_bytes())}
     });
     std::fs::write(dir.join("receipt.json"), receipt.to_string()).unwrap();
     let policy_args = [
@@ -99,11 +110,7 @@ fn receipt_is_caller_owned_and_does_not_bypass_policy_check_or_detection() {
     std::fs::write(dir.join("receipt.json"), replay.to_string()).unwrap();
     status(&command(dir, &policy_args), 2);
     std::fs::create_dir(dir.join("raw")).unwrap();
-    std::fs::write(
-        dir.join("raw/outputs.jsonl"),
-        "{\"type\":\"noop\",\"message\":\"No change\"}\n",
-    )
-    .unwrap();
+    std::fs::write(dir.join("raw/outputs.jsonl"), outputs).unwrap();
     status(
         &command(
             dir,
@@ -156,12 +163,75 @@ fn receipt_is_caller_owned_and_does_not_bypass_policy_check_or_detection() {
             expected,
         );
     }
+    // The checked files are the receipted ones: a request substituted
+    // between fetch and check is refused, however well-formed.
+    std::fs::write(
+        dir.join("raw/outputs.jsonl"),
+        "{\"type\":\"noop\",\"message\":\"Nothing to do\"}\n",
+    )
+    .unwrap();
+    let refused = |reason: &str| {
+        status(&command(dir, &check), 1);
+        let report: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("report.json")).unwrap()).unwrap();
+        assert!(
+            report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error.as_str().unwrap().contains(reason)),
+            "{reason}: {report}"
+        );
+    };
+    refused("differs from the external receipt");
+    // Nor does the receipted directory lend its provenance to the
+    // collector's result for other, valid outputs.
+    std::fs::create_dir(dir.join("other")).unwrap();
+    std::fs::rename(
+        dir.join("raw/outputs.jsonl"),
+        dir.join("other/outputs.jsonl"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("raw/outputs.jsonl"), outputs).unwrap();
+    status(
+        &command(
+            dir,
+            &[
+                "collect",
+                "--policy",
+                "policy.json",
+                "--outputs",
+                "other",
+                "--collected",
+                "collected.json",
+            ],
+        ),
+        0,
+    );
+    refused("the collector's result is not of the receipted outputs.jsonl");
+    status(
+        &command(
+            dir,
+            &[
+                "collect",
+                "--policy",
+                "policy.json",
+                "--outputs",
+                "raw",
+                "--collected",
+                "collected.json",
+            ],
+        ),
+        0,
+    );
+    status(&command(dir, &check), 0);
+    // A file the receipt does not name is refused before its content counts.
     std::fs::write(
         dir.join("raw/base.json"),
         json!({"repo":"owner/target","ref":"main","commit":"f".repeat(40)}).to_string(),
     )
     .unwrap();
-    status(&command(dir, &check), 1);
+    refused("not in the external receipt");
     // Apply-only retries keep the same run's idempotency keys; another run
     // cannot borrow the checked policy even with a successful detector flag.
     let mut retry = Command::new(BIN);

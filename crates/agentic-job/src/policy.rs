@@ -942,6 +942,7 @@ pub fn run(args: &Args) -> Result<Exit> {
                     run_id: receipt.run_id,
                     base_commit: receipt.record.base_commit,
                     raw_digest: receipt.raw.digest,
+                    files: receipt.files,
                 });
                 // External mode can only narrow the caller's publication policy.
                 if let Some(pull) = &mut policy.safe_outputs.create_pull_request {
@@ -1048,6 +1049,66 @@ missing_data = { max = 3 }
         let bounds: Bounds = toml::from_str(BOUNDS).unwrap();
         bounds.validate().unwrap();
         bounds
+    }
+
+    /// The external identity check and apply are handed in `policy.json`
+    /// is held to its shape there too, the file manifest included.
+    #[test]
+    fn external_identity_and_file_manifest_are_validated() {
+        use serde_json::json;
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let mut valid = policy();
+        valid.secondary_pull_request = None;
+        valid.external = Some(ExternalRun {
+            caller_repository: "example-org/caller".into(),
+            caller_run_id: 90,
+            caller_attempt: 1,
+            repository: "example-org/external".into(),
+            run_id: 7,
+            base_commit: "b".repeat(40),
+            raw_digest: digest.clone(),
+            files: [("outputs.jsonl".to_owned(), digest.clone())].into(),
+        });
+        valid.validate().unwrap();
+        let mut json = serde_json::to_value(&valid).unwrap();
+        json["external"]["files"] = json!({});
+        serde_json::from_value::<Policy>(json)
+            .unwrap()
+            .validate()
+            .unwrap();
+        let many: serde_json::Map<_, _> = (0..=MAX_EXTERNAL_FILES)
+            .map(|i| (format!("{i}.patch"), json!(digest)))
+            .collect();
+        for (pointer, wrong) in [
+            ("/external/caller_run_id", json!(0)),
+            ("/external/run_id", json!(0)),
+            ("/external/repository", json!("not-a-repository")),
+            ("/external/base_commit", json!("b".repeat(39))),
+            ("/external/raw_digest", json!("sha256:short")),
+            ("/external/files", json!({"": digest})),
+            ("/external/files", json!({"dir/outputs.jsonl": digest})),
+            ("/external/files", json!({"dir\\outputs.jsonl": digest})),
+            ("/external/files", json!({"outputs\n.jsonl": digest})),
+            ("/external/files", json!({"a".repeat(256): digest})),
+            ("/external/files", json!({"outputs.jsonl": "sha256:short"})),
+            ("/external/files", json!({"outputs.jsonl": "a".repeat(64)})),
+            ("/external/files", serde_json::Value::Object(many)),
+        ] {
+            let mut json = serde_json::to_value(&valid).unwrap();
+            *json.pointer_mut(pointer).unwrap() = wrong.clone();
+            let error = serde_json::from_value::<Policy>(json)
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("invalid trusted external"),
+                "{pointer} = {wrong}: {error}"
+            );
+        }
+        let mut json = serde_json::to_value(&valid).unwrap();
+        json["external"].as_object_mut().unwrap().remove("files");
+        assert!(serde_json::from_value::<Policy>(json).is_err());
     }
 
     #[test]

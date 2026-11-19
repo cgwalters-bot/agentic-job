@@ -566,6 +566,14 @@ fn verdict_of(
         }
     }
     warnings.truncate(redact::MAX_SHAPE_WARNINGS);
+    // An external hand-back is what the trusted fetch extracted and
+    // receipted, file for file, not whatever reached this directory since.
+    if let Some(external) = &policy.external {
+        let present = names.iter().filter_map(|name| name.to_str()).collect();
+        if let Err(error) = crate::external::bound(&present, &contents, &external.files) {
+            errors.push(format!("{error:#}"));
+        }
+    }
     let isolation = contents.get(HOST_ISOLATION_FILE).and_then(|bytes| {
         // Only external provenance is supported. In particular a producer
         // cannot assert that managed isolation was proved. Missing provenance
@@ -589,6 +597,25 @@ fn verdict_of(
         .with_context(|| format!("the collector's result {}", collected.display()))?;
     if redact::is_private_key(&collected_bytes) {
         errors.push("a secret-shaped string in the collected outputs: a private key".to_owned());
+    }
+    // Nor are its requests whatever collector result came with it: they
+    // are what the collector makes of the receipted bytes read above.
+    if errors.is_empty() && policy.external.is_some() {
+        let outputs = contents.get(OUTPUTS_FILE).map_or(&[][..], Vec::as_slice);
+        let outputs =
+            std::str::from_utf8(outputs).with_context(|| format!("{OUTPUTS_FILE} is not UTF-8"))?;
+        let expected = serde_json::to_value(crate::collect::collect_text(outputs, policy)?)?;
+        let given: Value = serde_json::from_slice(&collected_bytes).with_context(|| {
+            format!(
+                "{} is not the result of gh-aw's collector",
+                collected.display()
+            )
+        })?;
+        if given != expected {
+            errors.push(format!(
+                "the collector's result is not of the receipted {OUTPUTS_FILE}"
+            ));
+        }
     }
     if !errors.is_empty() {
         return Ok(Verdict {

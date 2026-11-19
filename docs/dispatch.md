@@ -860,7 +860,9 @@ profiles all come from a single tracker commit:
 
     The dispatch fails, and nothing is applied, if no such run appears
     within 10 minutes of dispatch, or if a run whose name carries the
-    `dispatch-id` breaks any rule. It also fails if more than one run
+    `dispatch-id` breaks any rule. The window bounds the run's creation
+    time, not the waiting job's: a job queued past it still finds a run
+    created within it, until the deadline. It also fails if more than one run
     matches, and then all of them are refused. A ref that moved between the
     map's review and the dispatch fails `head_sha`; the fix is a reviewed
     change to the map's commit, not a looser match.
@@ -890,7 +892,10 @@ profiles all come from a single tracker commit:
    only. Provenance rests on the run rules above, not on the digest.
 6. **Re-check.** The waiting job downloads the raw hand-back by ID and
    checks its digest. It uploads it again in tracker's own run, and passes
-   that upload's ID and digest to tracker's `check.yml`. Today only the
+   that upload's ID and digest to tracker's `check.yml`. The receipt names
+   each extracted file with its digest, and check holds the directory it
+   reads to that manifest, so a file substituted, changed, dropped or added
+   between fetch and check is refused. Today only the
    agent job's own upload reaches check.yml that way; a non-agent producer
    passes a name, which checks no digest. So tracker composes `policy.yml`,
    `check.yml` and `apply.yml` itself for this path rather than going
@@ -957,10 +962,13 @@ external machine. Fetch requires the caller's `GITHUB_REPOSITORY`,
 API credentials are never forwarded to an artifact-storage redirect.
 HTTP failures refuse rather than silently choosing another result.
 
-Fetch polls at most every 15 seconds, stops matching after ten minutes,
-and stops waiting/downloading at the record's deadline (at most 330 minutes
-from dispatch). Every request has a maximum 15-second timeout, further
-limited by the remaining lifetime. Each metadata page is at most 4 MiB;
+Fetch polls at most every 15 seconds, stops waiting for a run to appear
+ten minutes after dispatch, and stops waiting/downloading at the record's
+deadline (at most 330 minutes from dispatch). A run created more than ten
+minutes after dispatch is refused whenever it is read; a fetch that itself
+starts later still finds a run created in time. Every request has a
+maximum 15-second timeout, further limited by the remaining lifetime.
+Each metadata page is at most 4 MiB;
 each list is at most ten pages of 100 entries. Pagination overflow refuses
 rather than assuming uniqueness from a partial list. The ZIP and its total
 expanded contents are each at most 128 MiB, with at most 256 flat,
@@ -972,8 +980,10 @@ The ordinary checker then applies its stricter per-file and patch bounds.
 
 All output paths must be new. A refusal writes no receipt authorizing a
 result; an I/O failure may leave partial output, which must be discarded.
-The receipt holds `record`, numeric `run_id`, `attempt` (1), and `checked`
-and `raw`, each an `id` and `digest` (`sha256:HEX`) from the Actions API.
+The receipt holds `record`, numeric `run_id`, `attempt` (1), `checked`
+and `raw`, each an `id` and `digest` (`sha256:HEX`) from the Actions API,
+and `files`: each extracted file's name and `sha256:HEX` digest, at most
+256 entries.
 The checked artifact is an early filter only: fetch never downloads or
 trusts its policy/config/report. The downloaded raw artifact is fetched
 by API ID and hashed before extraction; the API digest is transfer
@@ -989,7 +999,10 @@ run, retaining that upload's ID and digest. It composes the same-pinned
   This supports only one draft-only GitHub implement target, not fix,
   secondary targets or a different output repository.
 - Pass the new raw upload's ID and digest to check, never a legacy artifact
-  name. The ordinary collector and patch/protected-path/size checks still
+  name. Check holds the files it reads to the receipt's `files`: the same
+  names, each with its digest, so a substituted, changed, dropped or added
+  file refuses the hand-back. The ordinary collector and
+  patch/protected-path/size checks still
   run. `base.json` must match the record's exact commit; the request's
   branch must be `agent-run-EXTERNAL-RUN-ID`, not the caller's run ID.
 - Check exposes `detection-result`: `success` only if the trusted detector
