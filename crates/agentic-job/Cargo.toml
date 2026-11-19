@@ -27,7 +27,7 @@ safe-outputs = { path = "../safe-outputs", features = ["clap"] }
 secure-host = { path = "../secure-host" }
 serde.workspace = true
 # Numbers read as JavaScript reads them, for apply's applied names.
-serde_json = { workspace = true, features = ["float_roundtrip"] }
+serde_json = { workspace = true, features = ["float_roundtrip", "raw_value"] }
 tar.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

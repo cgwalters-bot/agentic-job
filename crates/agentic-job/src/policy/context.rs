@@ -19,6 +19,14 @@ const API_URL_VAR: &str = "GITHUB_API_URL";
 const DEFAULT_API: &str = "https://api.github.com";
 const TOKEN_VAR: &str = "GH_TOKEN";
 
+pub(super) fn public_repo(metadata: &Value) -> bool {
+    metadata["private"] == false && metadata["visibility"] == "public"
+}
+
+pub(super) fn valid_repo(repo: &str) -> bool {
+    REPO_RE.is_match(repo) && repo.split('/').all(|part| !part.starts_with(['.', '-']))
+}
+
 /// One requested repository: `ref` is a branch, tag or commit, and the
 /// default branch when left out.
 #[derive(Debug, Deserialize)]
@@ -54,11 +62,7 @@ pub fn resolve(
     let mut seen = std::collections::BTreeSet::new();
     for item in &items {
         ensure!(
-            REPO_RE.is_match(&item.repo)
-                && item
-                    .repo
-                    .split('/')
-                    .all(|part| !part.starts_with(['.', '-']))
+            valid_repo(&item.repo)
                 && item.reference.as_deref().is_none_or(|reference| {
                     BASE_RE.is_match(reference) && !reference.contains("..")
                 }),
@@ -76,7 +80,7 @@ pub fn resolve(
             let repo = read(&format!("repos/{}", item.repo))?;
             // Everything about a run is published: admission alone must not
             // publish private source through the prompt or the transcript.
-            if repo["private"] != false || repo["visibility"] != "public" {
+            if !public_repo(&repo) {
                 bail!(
                     "context repository cannot be confirmed public; private runs are refused because run evidence can disclose source. See docs/private-repositories.md in the agentic-job source"
                 );
