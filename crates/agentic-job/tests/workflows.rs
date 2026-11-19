@@ -47,61 +47,15 @@ fn definition(file: &str) -> yaml_rust2::Yaml {
 }
 
 #[test]
-fn release_notes_use_github_categories_without_a_changelog_bump() {
+fn release_notes_use_github_defaults_without_a_changelog_bump() {
     let config = definition(".github/release.yml");
     let notes = &config["changelog"];
-    let categories = notes["categories"].as_vec().unwrap();
-    let expected = [
-        ("Features", "enhancement"),
-        ("Fixes", "bug"),
-        ("Documentation", "documentation"),
-        ("CI", "github_actions"),
-        ("Other changes", "*"),
-    ];
-    assert_eq!(categories.len(), expected.len());
-    for (category, (title, label)) in categories.iter().zip(expected) {
-        assert_eq!(category.as_hash().unwrap().len(), 2);
-        assert_eq!(category["title"].as_str(), Some(title));
-        let labels = category["labels"].as_vec().unwrap();
-        assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].as_str(), Some(label));
-    }
+    assert!(notes["categories"].is_badvalue());
     assert_eq!(
         notes["exclude"]["labels"].as_vec().unwrap(),
         &[yaml_rust2::Yaml::String("dependencies".into())]
     );
     assert!(notes["exclude"]["authors"].is_badvalue());
-
-    // Offline policy examples, not a substitute for GitHub's notes preview.
-    // First matching category wins; exclusion takes precedence over categories.
-    for (author, labels, expected) in [
-        ("contributor", vec!["enhancement"], Some("Features")),
-        ("cgwalters-bot", vec!["bug"], Some("Fixes")),
-        ("dependabot", vec!["documentation"], Some("Documentation")),
-        ("renovate", vec!["github_actions"], Some("CI")),
-        ("contributor", vec!["tests"], Some("Other changes")),
-        ("cgwalters-bot", vec![], Some("Other changes")),
-        ("dependabot", vec!["dependencies"], None),
-        ("contributor", vec!["dependencies", "enhancement"], None),
-    ] {
-        let excluded = notes["exclude"]["labels"]
-            .as_vec()
-            .unwrap()
-            .iter()
-            .any(|label| labels.contains(&label.as_str().unwrap()));
-        let actual = (!excluded)
-            .then(|| {
-                categories.iter().find(|category| {
-                    category["labels"].as_vec().unwrap().iter().any(|label| {
-                        let label = label.as_str().unwrap();
-                        label == "*" || labels.contains(&label)
-                    })
-                })
-            })
-            .flatten()
-            .and_then(|category| category["title"].as_str());
-        assert_eq!(actual, expected, "{author}: {labels:?}");
-    }
 
     let release = definition("release.yml");
     let publish = release["jobs"]["publish"]["steps"]

@@ -2660,10 +2660,9 @@ or not newer than every `v` tag (`just release-check`), and a run whose
 `v` tags changed while it built. It then tags main's commit `vVERSION`
 and publishes the binaries with notes listing the pull requests merged
 since the previous version, using `gh release create --generate-notes`
-and an explicit `--notes-start-tag` for that version. GitHub groups the
-notes by the labels in [.github/release.yml](../.github/release.yml), with
-an Other changes category for tests and unlabelled PRs. PRs labelled
-`dependencies` are excluded; no authors are excluded. Release notes need no changelog
+and an explicit `--notes-start-tag` for that version. GitHub lists changes
+without custom categories. [.github/release.yml](../.github/release.yml)
+excludes PRs labelled `dependencies`, not authors. Release notes need no changelog
 entries or fragments. [CHANGELOG.md](../CHANGELOG.md) is only a pointer to
 releases and the history through v0.6.14; nothing updates it on a bump.
 The agent-board release train likewise bumps only the Cargo files and
