@@ -1,5 +1,6 @@
 import re
 import unittest
+from urllib.parse import urljoin
 
 from markdown import Markdown
 from zensical.extensions.context import ContextExtension, Page
@@ -78,6 +79,22 @@ class RepositoryLinksTest(unittest.TestCase):
             with self.subTest(file=file):
                 self.assertTrue((dist / route / "index.html").is_file(), f"no page at /{route}")
         self.assertTrue((dist / "404.html").is_file())
+
+    def test_built_navigation(self):
+        home = (ROOT / "site/dist/index.html").read_text()
+        _, primary, sidebar = home.partition('<nav class="md-nav md-nav--primary"')
+        self.assertTrue(primary, "no primary navigation on the home page")
+        sidebar = sidebar.split('<div class="md-content"', 1)[0]
+        routes = [
+            urljoin("/", href)
+            for href in re.findall(r'<a href="([^"]*)" class="md-nav__link\b', sidebar)
+            if not href.startswith("#")  # In-page table of contents.
+        ]
+        self.assertEqual(routes[:3], ["/", "/docs/try-it/", "/docs/workflow/"])
+        docs_routes = [
+            f"/{file.removesuffix('.md')}/" for file in SOURCES if file.startswith(DOCS)
+        ]
+        self.assertCountEqual(routes, ["/", *docs_routes])
 
     # Python-Markdown ends a list item at a nested list, or a paragraph or
     # code block after a blank line, indented less than 4 spaces; the forge
