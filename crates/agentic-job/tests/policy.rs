@@ -746,16 +746,25 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     // variables and the workflow's registration default, keeps a positive
     // cap. Composition accepts the scripted zero for it too, uncapped, as
     // docs/workflow.md warns: the guide's change is what sets the cap.
+    let vars = std::collections::HashMap::from([
+        ("${{ vars.INFERENCE_URL }}", "http://192.0.2.1:8080"),
+        ("${{ vars.INFERENCE_AUDIENCE }}", "example-audience"),
+    ]);
+    let with = &brokered["jobs"]["run"]["with"];
+    let url = format!(
+        "inference.url={}",
+        vars[with["inference-url"].as_str().unwrap()]
+    );
+    let audience = format!(
+        "inference.audience={}",
+        vars[with["inference-audience"].as_str().unwrap()]
+    );
     let register = format!("inference.register={}", default("inference-register"));
     let broker_compose = |max_requests: &str| {
         let output = compose(
             field(&broker, "agent"),
             max_requests,
-            &[
-                "inference.url=http://192.0.2.1:8080",
-                &register,
-                "inference.audience=example-audience",
-            ],
+            &[&url, &register, &audience],
         );
         assert!(
             output.status.success(),
@@ -764,6 +773,14 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
         );
         let composed: toml::Value =
             toml::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+        assert_eq!(
+            composed["inference"]["audience"].as_str(),
+            Some("example-audience")
+        );
+        assert_eq!(
+            composed["inference"]["url"].as_str(),
+            Some("http://192.0.2.1:8080")
+        );
         assert_eq!(
             composed["inference"]["register"].as_str(),
             Some("github-oidc")

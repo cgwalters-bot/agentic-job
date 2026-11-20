@@ -241,7 +241,10 @@ of the two, only register holds the OIDC request credential, and the agent
 job has none. Check's separate [threat detector](workflow.md#optional-threat-detection)
 has its own OIDC permission and registers its own run when
 `AGENTIC_JOB_DETECT_MODEL` is set, from a hosted runner that then also
-needs a route to the broker. Confirm per-run budgets.
+needs a route to the broker. With OIDC and a `called_workflows` policy,
+enabling detection requires an entry for `check.yml` at its exact pinned
+commit and the caller's numeric repository ID, not just the register job's entry.
+Confirm per-run budgets.
 No model API key goes on the runner.
 
 For `implement`, and for cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment

@@ -179,7 +179,10 @@ run; the agent job gets none, only the broker's run token beside its read-only
 GitHub token; and the optional [threat detector](workflow.md#optional-threat-detection),
 when `AGENTIC_JOB_DETECT_MODEL` is set, has its own OIDC permission and
 registers its own run from a hosted `ubuntu-26.04` runner, which then also
-needs a route to the broker. Do not switch to `plain` to bypass an admission
+needs a route to the broker. For detection, the broker must also admit
+`check.yml` at the same pinned commit for the same caller repository ID;
+admitting `agentic-job.yml` alone covers only the main registration.
+Do not switch to `plain` to bypass an admission
 failure or put a provider key on the runner. The checks below compose this
 change offline; no live broker run of it is shown here.
 

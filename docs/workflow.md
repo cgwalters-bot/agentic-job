@@ -139,7 +139,11 @@ The separate detect job has `contents: read` and `id-token: write`, no write
 credential or agent tools. It registers its own run through the same inference
 proxy using the policy's configuration (`github-oidc` or `plain`, not
 `token-file` or `api-key`, which fail). That proxy must be reachable from the hosted detector runner.
-It sends the task, checked outputs and patches as untrusted evidence to one
+With `github-oidc`, the detector registers as `check.yml`, not `agentic-job.yml`.
+A `called_workflows` entry for the main register job does not cover it. With
+that policy, also admit `cgwalters-forge/agentic-job/.github/workflows/check.yml`
+at the exact pinned commit for the calling repository's numeric ID.
+The detector sends the task, checked outputs and patches as untrusted evidence to one
 OpenAI-compatible chat-completions request, capped at 2 MiB of evidence, 256
 output tokens and 120 seconds. That request has no retries or tool continuations;
 registering and ending the run are retried through a proxy restart, as `run` does.
@@ -1187,8 +1191,10 @@ not define, and opts into `apply-partial`, which inference does not need.
 - **Broker admission:** the broker operator must enable a `called_workflows`
   policy entry for `cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml`,
   the exact commit pinned by the caller (`job_workflow_sha`), and the calling
-  repository's numeric id (not just its name). Update that entry when the
-  workflow pin changes. An agent job of your own is your workflow's, not
+  repository's numeric id (not just its name). If detection is enabled,
+  `check.yml` needs its own entry at the same SHA and caller repository ID.
+  Update the applicable entries whenever the workflow pin changes.
+  An agent job of your own is your workflow's, not
   a called one: its separate register job needs broker admission for the
   workflow it runs in. See [inference admission](inference.md#which-workflows-a-broker-admits).
 - **Agent programs and limits:** `agent: claude` defaults to
