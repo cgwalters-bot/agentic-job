@@ -334,20 +334,82 @@ runs:
         # The REST API with curl, not gh, which a runner need not have (RHEL
         # has it only in EPEL). The token goes on stdin, not on a command
         # line other users could read; -q leaves out any ~/.curlrc.
-        visibility() {
-          printf 'Authorization: Bearer %s\n' "$GH_TOKEN" |
-            curl -q --fail --silent --show-error --max-time 60 -H @- \
-              -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$1" |
-            jq -r 'if .private == false and .visibility == "public" then "public"
-              elif .private == true and .visibility == "private" then "private" else "unknown" end' || echo unknown
+        # A rate-limited answer (403 or 429 that names a wait) restarts the
+        # whole pass after that wait, so no answer outlives a wait, at most
+        # $waits times and $budget seconds of waiting in all, so that
+        # concurrent runs sharing a token do not lose finished work (#4465).
+        # Any other failure, or a wait beyond the budget, refuses.
+        waits=3
+        budget=900
+        headers=$(mktemp)
+        trap 'rm -f "$headers"' EXIT
+        rate_wait() {
+          awk -v now="$(date +%s)" -v cap="$budget" '{ sub(/\r$/, "") }
+            tolower($0) ~ /^http\// {
+              status = $2
+              after = remaining = reset = ""
+              next
+            }
+            (colon = index($0, ":")) {
+              field = tolower(substr($0, 1, colon - 1))
+              value = substr($0, colon + 1)
+              gsub(/^[ \t]+|[ \t]+$/, "", value)
+              if (field == "retry-after") after = value
+              if (field == "x-ratelimit-remaining") remaining = value
+              if (field == "x-ratelimit-reset") reset = value
+            }
+            END {
+              if (status != "403" && status != "429") exit 1
+              wait = (after ~ /^[0-9]+$/ ? after + 0 : -1)
+              if (remaining ~ /^0$/ && reset ~ /^[0-9]+$/) {
+                primary = (reset + 0 > now ? reset - now + 1 : 1)
+                if (primary > wait) wait = primary
+              }
+              if (wait < 0) exit 1
+              # Keep even oversized header numbers safe for shell arithmetic.
+              print (wait > cap ? cap + 1 : wait)
+            }' "$headers"
         }
-        target=$(visibility "$REPO")
+        # Sets $answer, or fails with $delay set when GitHub names a wait.
+        visibility() {
+          local body
+          answer=unknown
+          : > "$headers"
+          if body=$(printf 'Authorization: Bearer %s\n' "$GH_TOKEN" |
+            curl -q --fail --silent --show-error --max-time 60 -D "$headers" -H @- \
+              -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$1"); then
+            answer=$(jq -r 'if .private == false and .visibility == "public" then "public"
+              elif .private == true and .visibility == "private" then "private" else "unknown" end' <<< "$body") || answer=unknown
+            return 0
+          fi
+          limited=$1
+          ! delay=$(rate_wait)
+        }
         private=$(jq -r --arg repo "$REPO" 'if .private == true and .repo == $repo then "true" else "false" end' "$JOB_DIR/policy.json")
-        [ "$target" = public ] || { [ "$target/$private" = private/true ] && [ "$REPO" = "$GITHUB_REPOSITORY" ]; } || refuse "$REPO"
         set -f
-        for repo in $REPOS; do
-          [[ "$repo" =~ $name ]] || { echo "::error::not a repository name: $repo"; exit 1; }
-          [ "$(visibility "$repo")" = public ] || refuse "$repo"
+        # One pass over every repository; fails when one is rate-limited.
+        check() {
+          visibility "$REPO" || return 1
+          [ "$answer" = public ] || { [ "$answer/$private" = private/true ] && [ "$REPO" = "$GITHUB_REPOSITORY" ]; } || refuse "$REPO"
+          for repo in $REPOS; do
+            [[ "$repo" =~ $name ]] || { echo "::error::not a repository name: $repo"; exit 1; }
+            visibility "$repo" || return 1
+            [ "$answer" = public ] || refuse "$repo"
+          done
+        }
+        until check; do
+          if [ "$waits" -eq 0 ]; then
+            echo "::error::GitHub rate-limits the visibility check of $limited: retry limit reached; refusing upload"
+            exit 1
+          fi
+          if [ "$delay" -gt "$budget" ]; then
+            echo "::error::GitHub rate-limits the visibility check of $limited: requested wait exceeds the remaining ${budget}s budget; refusing upload"
+            exit 1
+          fi
+          waits=$((waits - 1))
+          budget=$((budget - delay))
+          echo "::warning::GitHub rate-limits the visibility check of $limited: checking every repository again in ${delay}s"
+          sleep "$delay"
         done
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:

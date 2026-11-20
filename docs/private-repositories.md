@@ -25,7 +25,10 @@ update. The run is refused if any checked condition below fails.
 The reusable workflow checks target, agent-configuration and item repository
 visibility on the policy machine; context resolution independently requires
 public metadata. The run action checks target and agent-configuration visibility
-again before artifact upload. This second check cannot recall material already
+again before artifact upload. When GitHub rate-limits that check, it waits for
+the time GitHub names and checks every repository again, at most three times per
+run and 15 minutes of waiting in all; each API call can add up to a minute more.
+Any other failure refuses the run. This second check cannot recall material already
 sent to inference, printed in a job log or written to a summary if visibility
 changes during execution. The standalone CLI's bounds checks are not a private
 workflow admission guarantee.

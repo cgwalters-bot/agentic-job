@@ -1737,11 +1737,24 @@ fn agent_board_classifies_the_failed_host_composite() {
 }
 
 /// curl's mock refuses a token on argv and requires the authorization header
-/// on stdin; it is shared by the scope and publication probes.
+/// on stdin; it is shared by the scope and publication probes. While the
+/// count in the repository's file under `$LIMITS` is above zero, a call
+/// fails with `$LIMIT_HEADERS` written to its `-D` file and the count goes
+/// down. Once `$SLEPT` exists, the target answers `$AFTER` if set.
 const MOCK_CURL: &str = r#"#!/bin/bash
 read -r header
 [ "$header" = "Authorization: Bearer $GH_TOKEN" ] || exit 8
 case "$*" in *"$GH_TOKEN"*) exit 9 ;; esac
+url=${*: -1}
+[ -z "$REQUESTS" ] || printf '%s\n' "${url#https://api.github.com/repos/}" >> "$REQUESTS"
+limit="$LIMITS/${url#https://api.github.com/repos/}"
+if [ -n "$LIMITS" ] && [ -s "$limit" ] && [ "$(cat "$limit")" -gt 0 ]; then
+  echo $(($(cat "$limit") - 1)) > "$limit"
+  args=("$@")
+  for i in "${!args[@]}"; do [ "${args[i]}" = -D ] && printf '%b' "$LIMIT_HEADERS" > "${args[i + 1]}"; done
+  exit 22
+fi
+[ -z "$AFTER" ] || [ ! -e "$SLEPT" ] || TARGET=$AFTER
 if [ -n "$HEADERS" ]; then printf '%s' "$HEADERS"; exit "$API_EXIT"; fi
 if [ "${*: -1}" = "https://api.github.com/repos/$REPO" ]; then answer=$TARGET; else answer=$OTHER; fi
 case "$answer" in
@@ -1826,6 +1839,156 @@ fn run_refuses_classic_write_tokens_without_exposing_them() {
             !log.contains("classic-fixture") && !log.contains("job-fixture"),
             "{log}"
         );
+    }
+}
+
+#[test]
+fn publication_visibility_retries_only_rate_limits() {
+    let limit = "HTTP/2 403\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 0\r\n";
+    let now = "HTTP/2 403\r\nretry-after: 0\r\n";
+    let future = "HTTP/2 403\r\nX-RateLimit-Remaining:0\r\nx-ratelimit-reset:1700000825\r\n";
+    let mixed = format!("{future}Retry-After:1\r\n");
+    // Rate-limited calls for the target and the configuration repository,
+    // their headers, the target's answer, its answer after a wait, the
+    // waits, acceptance.
+    for (target_limits, config_limits, headers, target, after, sleeps, ok) in [
+        ("1", "0", now, "public", "", "0", true),
+        (
+            "1",
+            "0",
+            "HTTP/2 429 \r\nReTrY-AfTeR:1\t \r\n",
+            "public",
+            "",
+            "1",
+            true,
+        ),
+        ("1", "0", limit, "public", "", "1", true),
+        ("0", "1", future, "public", "", "826", true),
+        ("0", "1", mixed.as_str(), "public", "", "826", true),
+        ("3", "0", now, "public", "", "0 0 0", true),
+        ("1", "0", limit, "private", "", "1", false),
+        ("1", "0", "HTTP/2 403\r\n", "public", "", "", false),
+        (
+            "1",
+            "0",
+            "HTTP/2 429\r\nRetry-After: 1 extra\r\n",
+            "public",
+            "",
+            "",
+            false,
+        ),
+        (
+            "1",
+            "0",
+            "HTTP/2 404\r\nretry-after: 0\r\n",
+            "public",
+            "",
+            "",
+            false,
+        ),
+        (
+            "1",
+            "0",
+            "HTTP/2 403\r\nx-ratelimit-remaining: 1\r\nx-ratelimit-reset: 0\r\n",
+            "public",
+            "",
+            "",
+            false,
+        ),
+        (
+            "1",
+            "0",
+            "HTTP/2 403\r\nretry-after: 901\r\n",
+            "public",
+            "",
+            "",
+            false,
+        ),
+        ("4", "0", now, "public", "", "0 0 0", false),
+        ("0", "1", now, "public", "", "0", true),
+        // A target accepted before a wait is asked again after it.
+        ("0", "1", now, "public", "private", "0", false),
+        // The waits and their seconds are shared by all repositories.
+        ("2", "1", now, "public", "", "0 0 0", true),
+        ("2", "2", now, "public", "", "0 0 0", false),
+        (
+            "1",
+            "1",
+            "HTTP/2 403\r\nretry-after: 450\r\n",
+            "public",
+            "",
+            "450 450",
+            true,
+        ),
+        (
+            "1",
+            "1",
+            "HTTP/2 403\r\nretry-after: 451\r\n",
+            "public",
+            "",
+            "451",
+            false,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        executable(&dir.path().join("curl"), MOCK_CURL);
+        executable(&dir.path().join("date"), "#!/bin/bash\necho 1700000000\n");
+        executable(
+            &dir.path().join("sleep"),
+            "#!/bin/bash\necho \"$1\" >> \"$SLEPT\"\n",
+        );
+        std::fs::write(
+            dir.path().join("policy.json"),
+            serde_json::json!({"repo":"owner/repo","private":false}).to_string(),
+        )
+        .unwrap();
+        let limits = dir.path().join("limits/owner");
+        std::fs::create_dir_all(&limits).unwrap();
+        std::fs::write(limits.join("repo"), target_limits).unwrap();
+        std::fs::write(limits.join("config"), config_limits).unwrap();
+        let slept = dir.path().join("slept");
+        let requests = dir.path().join("requests");
+        let search = format!("{}:/usr/bin:/bin", dir.path().display());
+        let result = run_step(
+            "run/action.yml",
+            "Check again that the repositories are public",
+            dir.path(),
+            &[
+                ("PATH", &search),
+                ("GH_TOKEN", "fixture-token"),
+                ("REPO", "owner/repo"),
+                ("REPOS", "owner/config"),
+                ("TARGET", target),
+                ("OTHER", "public"),
+                ("AFTER", after),
+                ("API_EXIT", "0"),
+                ("LIMITS", path(&dir.path().join("limits"))),
+                ("LIMIT_HEADERS", headers),
+                ("SLEPT", path(&slept)),
+                ("REQUESTS", path(&requests)),
+                ("JOB_DIR", path(dir.path())),
+                ("GITHUB_REPOSITORY", "owner/caller"),
+            ],
+        );
+        let case = format!("{target_limits} {config_limits} {headers:?} {target} {after}");
+        assert_eq!(result.status.success(), ok, "{case}: {result:?}");
+        let waited = std::fs::read_to_string(&slept).unwrap_or_default();
+        assert_eq!(
+            waited.split_whitespace().collect::<Vec<_>>().join(" "),
+            sleeps,
+            "{case}"
+        );
+        if headers == future || headers == mixed {
+            assert_eq!(
+                std::fs::read_to_string(&requests).unwrap(),
+                "owner/repo\nowner/config\nowner/repo\nowner/config\n"
+            );
+        }
+        // Every rate-limited call was made, so no more were admitted.
+        for repo in ["repo", "config"] {
+            let left = std::fs::read_to_string(limits.join(repo)).unwrap();
+            assert_eq!(left.trim(), "0", "{case}: {repo}");
+        }
     }
 }
 
