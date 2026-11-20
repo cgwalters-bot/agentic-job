@@ -178,9 +178,13 @@ trigger now lets someone do. Both prompts ask for every finding in one pass
 and, in an approving review, for important findings and nits under
 "Follow-ups" with file and line, for later pull requests; a fix for a blocker
 may take them along. Blocking on each new narrow finding cost a fix, CI and
-review run per finding, ten rounds on one pull request. Check does not read
-severities: refusing a mislabelled verdict would only lose its comment, and
-the status would fail as it does for CHANGES.
+review run per finding, ten rounds on one pull request. A finding is important
+at most if it needs malicious control of a trusted ref or configuration that
+already grants that authority, unless the change weakens it. A
+contributor's branch or input is not trusted this way; neither honest
+misconfiguration nor a new effect on an asset outside that authority
+qualifies for the cap. Check does not read severities: refusing a mislabelled verdict would only
+lose its comment, and the status would fail as it does for CHANGES.
 
 Before correctness, `review.yml`'s standing task, dispatch's `review`
 profile and the implement skill's [diff reviewer](../skills/agents/diff-reviewer.md)
@@ -483,11 +487,48 @@ asks the reviewer to say first, per earlier finding, whether the new head
 resolves it, confirmed in its code and citing the commit, and to record
 each resolved one on a `Resolved:` line, so the next round's file carries
 it; a `resolved_by`, reply or comment is a claim to check, and a finding
-that still holds is raised again. Then it reviews the whole diff as before,
-looking first at code changed since the last review, and raises new
-findings wherever they are, saying why a blocker in code unchanged since
-the last review was missed. Check holds the verdict to its usual bounds;
-the `Resolved:` lines are text in it, which only the next history reads.
+that still holds is raised again. Rounds that re-investigated settled
+findings from scratch did not converge
+([#4471](https://github.com/cgwalters-forge/agentic-job/issues/4471)), so
+the reviewer groups earlier IDs whose cause it verifies to be the same, and
+reuses an earlier round's evidence where the code it cites is unchanged. An
+author or maintainer who can edit the pull request description may dispute
+earlier findings with evidence in a "Disputed" section; automated fix runs
+leave the body alone. Put disputes early enough to survive truncation of
+the description. The reviewer answers each supplied history ID once in
+its earlier finding entry, checking the dispute against the admitted
+head's code and flagging missing evidence. It drops or downgrades a
+finding only where the confirmed evidence refutes it or changes its
+severity; true but insufficient evidence leaves the finding standing. It
+ignores unmatched IDs or summarizes them once.
+
+The reviewer still looks at the whole diff. With any earlier review in the
+history, a blocker must be an unresolved earlier blocker, a finding with a
+concrete trigger, or a structural one; the full first-review rubric
+applies only when the history is empty. Only a submitted review, with
+`AGENT_REAL_REVIEWS=true` beside `REVIEW_HISTORY=true`, is bound by the
+forge to the commit it reviewed, so only its head can serve as a
+comparison point, and only after `git merge-base --is-ancestor` confirms
+it in the admitted checkout: `head_on_branch` reflects the forge's commit
+list when the history was collected, which may already be newer. A
+carried approval is submitted too but says no new review ran, so it is no
+comparison point. With `REVIEW_HISTORY=true` alone, the verdict is apply's
+comment, whose head is inferred from its text, so there is no comparison
+point either. A verified comparison point lets the reviewer look first at
+changes since it and attribute regressions to them; a blocker it shows in
+code already there at that review also says why the review missed it,
+or that the reason is unknown. It never changes which findings can block: a
+confirmed structural blocker blocks anywhere in the diff, whatever the
+posting mode. For a structural blocker, explain why the proposed
+alternative actually does the same job. Unconfirmed concerns and other nonblocking new
+findings go under Follow-ups, not into another required fix round. An
+unresolved earlier blocker is raised again as itself; a distinct new
+blocker that shares a verified cause with an earlier one becomes one
+structural blocker naming the change that removes that cause, where that
+fix is demonstrably better than fixing each. Check holds
+the verdict to its usual bounds; it does not check the reviewer's reasoning.
+The `Resolved:` lines are text in the verdict, which only the next history
+reads.
 
 ## Dispatched reviews
 

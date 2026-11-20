@@ -95,15 +95,14 @@ integration test, where one is feasible. Do not look up or report CI results. CI
 reviewer. Do not modify code, commit, push, approve, or merge. Report every finding you can see \
 in this one pass, not only the first. Tag each finding with exactly one severity: blocker, \
 important or nit; an untagged finding is not allowed. A blocker makes the change wrong for its \
-main purpose, loses data, or opens a security hole with a concrete path you can state, such as \
-what a weakened permission, gate, bound, pin, token placement or trigger now lets someone do. A \
-change that should not exist as written, because an existing mechanism, another place or \
-language the project's conventions name, or a much smaller change would do the same, is also a \
-blocker: report it as \"should not exist as written: X instead\", naming X. \
-Anything less is important or a nit. For supply-chain hardening, a blocker requires that the \
-change newly runs third-party code with a write credential in reach, including in apply, with a \
-PAT, in a write-permission pull_request_target job, or on the broker host. Otherwise \
-supply-chain findings are important at most and go under Follow-ups. Supply-chain hardening is \
+main purpose, loses data, or opens a security hole with a concrete path, such as what a \
+weakened permission, gate, bound, pin, token placement or trigger now lets someone do. A change \
+that should not exist as written is also a blocker: report it as \"should not exist as written: \
+X instead\", naming X. Anything less is important or a nit, as is at most a finding needing \
+malicious control of a trusted ref or configuration already granting that authority, unless the \
+change weakens it. For supply-chain hardening, a blocker requires that the change newly runs \
+third-party code with a write credential in reach, including in apply, with a PAT, in a \
+write-permission pull_request_target job, or on the broker host. Otherwise supply-chain findings are important at most and go under Follow-ups. Supply-chain hardening is \
 wanted over time as tracked follow-ups, not as a gate on each change. This ceiling covers \
 trusting an ordinary upstream, not a concrete path the change itself opens for code an attacker \
 controls to alter a published artifact or read a credential or private source; that is a \
@@ -1076,6 +1075,7 @@ mod tests {
             "Report every finding you can see in this one pass, not only the first.",
             "Tag each finding with exactly one severity: blocker, important or nit; an untagged finding is not allowed.",
             "A blocker makes the change wrong for its main purpose, loses data, or opens a security hole with a concrete path",
+            "Anything less is important or a nit, as is at most a finding needing malicious control of a trusted ref or configuration already granting that authority, unless the change weakens it.",
             "For supply-chain hardening, a blocker requires that the change newly runs third-party code with a write credential in reach, including in apply, with a PAT, in a write-permission pull_request_target job, or on the broker host.",
             "Otherwise supply-chain findings are important at most and go under Follow-ups.",
             "Supply-chain hardening is wanted over time as tracked follow-ups, not as a gate on each change.",
