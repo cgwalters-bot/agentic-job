@@ -66,7 +66,8 @@ setup keeps ([the agent job](secure-host.md#the-agent-job)):
   SHA-512 integrity, unpacked by `agentic-job` into
   `/opt/agentic-job/agents` with no npm and no install script, its
   programs linked in `/usr/local/bin`; a tarball that does not match its
-  pin is refused, and the pins are for Linux on x86-64 with glibc;
+  pin is refused, and the pins are for Linux on x86-64 with glibc
+  ([proposed deprecation](#who-installs-the-agents));
 - writes the agent's managed settings, which `run` checks.
 
 It runs no `setup.script`: the reusable workflow's agent job runs it
@@ -141,12 +142,127 @@ lockdown. Whether to allow a named private destination is open
 ([#1812](https://github.com/cgwalters-forge/agentic-job/issues/1812)).
 
 `run` starts every command of the agent's through `env -i` in the
-agent's home, with a fixed `PATH` and `LANG`, the user's names and
-`host.env`; a variable named `ACTIONS_*` (the job's identity-token
+agent's home, with defaults for `PATH` and `LANG`, the user's names and
+overrides from `host.env`; a variable named `ACTIONS_*` (the job's identity-token
 request is two of them) is refused by name in the configuration. That
 keeps `run`'s own variables out of what the agent's commands get, not
 what the agent could read from `run`'s process: there is no uid between
 them.
+
+### Who installs the agents
+
+The deliverable is the `agentic-job` binary; the agents are the
+caller's to install, at versions the caller chooses. `setup.agents` and
+its pins exist because `npm install -g` resolves dependencies afresh and
+runs their install scripts as root, not so that the binary holds an
+opinion on agent versions, which it should not
+([#3617](https://github.com/cgwalters-forge/agentic-job/issues/3617)).
+The direction is to move installation into the caller's job and retire
+the installer. What is implemented: `setup.agents` is the reusable
+workflow's default, `pinned-agents` (a development binary, not released)
+installs the same pins for `just claude-acp-test`, and the pins name the
+only versions this repository tests
+([agent adapters](harness.md#agent-adapters)). The stages further down
+are a proposal, and the issue, not this page, says how far it has got.
+
+What `run` asks of an installed agent, whoever installed it, from the
+launcher and setup code:
+
+- For agents found by name, `launch-agent` searches the effective `PATH`:
+  `/usr/local/bin:/usr/bin:/bin` by default, unless the trusted `host.env.PATH`
+  overrides it. The runner's user must be able to execute the program.
+  `run` checks its own binary's path before it clones, not the agent's;
+  an agent that is missing fails the run when the session starts it.
+- Install it in a trusted caller-owned step before hardening and before
+  credentials arrive, never from the target checkout or from inputs the
+  task controls. Secure-host hardens the default `PATH` directories and
+  their ancestors, not the programs or their dependencies. The caller
+  must keep the executable, any resolved symlink target, and its runtime
+  dependency tree in locations the runner's user cannot modify or replace.
+  If overriding `PATH`, also protect the search directories and their
+  ancestors so the agent cannot put another program ahead of the intended one.
+- The agent's managed settings and run configuration come from
+  `sandbox setup` or `prepare` and from `run`, both from the same
+  configuration, whatever installed the agent
+  ([what a move must keep](harness.md#what-moving-a-shim-out-must-keep)).
+  Where neither setup command runs, Claude's managed settings must
+  still be there; see the runner-image case below.
+
+How a caller installs one today, from most to least pinned:
+
+- `setup.agents`, the default: the reusable workflow sets it to the
+  pinned `opencode-ai` or `claude-agent-acp` unless the caller's `npm`
+  input replaces it.
+- `setup.npm` with exact `NAME@VERSION` pins (the `npm` input): npm
+  installs them as root on the open network, with their install scripts,
+  and resolves transitive dependencies afresh.
+- On a standalone host with caller-owned configuration, install opencode
+  or `claude-agent-acp` before setup, or use `setup.packages` if the
+  distribution packages it. Leave both `setup.agents` and `setup.npm`
+  unset or empty in the configuration passed to setup. The existing
+  [composed-job example](workflow.md#the-pieces-and-an-agent-job-of-your-own)
+  does not do this: policy adds the pin for opencode
+  or Claude when `npm` is empty, even when `packages` is set. Its installer
+  can replace a caller's entry in `/usr/local/bin` or shadow a program in
+  `/usr/bin` on the default `PATH`. A composed caller-install example is
+  proposed below, and no test yet drives a caller-installed version
+  outside the tested pins.
+- The runner image alone, under `[host] isolation = "external"`
+  ([external host isolation](gitlab.md#explicit-external-host-isolation)):
+  no setup runs there, so the image holds the agent, and Vibe's
+  virtualenv at the path below if Vibe is the agent. The agent alone
+  is enough only for opencode and Vibe. For Claude, `run` also reads
+  `/etc/claude-code/managed-settings.json` and refuses the run before it
+  starts the adapter unless the file is byte for byte what `sandbox setup`
+  would write for the run's `[agent]` and `[inference]` configuration.
+  The trusted image builder must supply that file, and it must not be
+  writable by the runner's user: `run` compares the content but does not
+  check who owns the file, and external isolation does not protect it.
+  No command prints the file on its own; `sandbox setup` and
+  `sandbox prepare` write it from the same configuration.
+- Vibe, under setup, by none of the others: setup installs the pinned
+  `mistral-vibe` into a root-owned virtualenv at a fixed path,
+  `/opt/agentic-job/vibe`, which the launcher names. A caller cannot put
+  Vibe elsewhere until the launcher is moved out or taught where to look.
+
+Runtime dependencies, as the source has them, not as a contract: the
+`agentic-job` release is a static musl build with rustls, so the binary
+itself needs no OpenSSL or glibc on the host; `run` needs `git`,
+`getent` (its own libc reads only `/etc/passwd`) and a POSIX `sh` with
+coreutils (`env`, `test`, `timeout`, `mkdir`, `chmod`, `rm`, `cat` and
+the like) on the effective `PATH`, and setup needs root once. Its `env`
+must accept `-C`, which `run` uses to start the agent in its home; GNU
+coreutils does, BusyBox does not. `claude-agent-acp` runs on the host's
+`node`; `setup.agents` refuses that agent when there is no `node`, a
+check that does not run for an adapter the caller installed. The native
+Claude Code executable that ships with the adapter's pinned Claude Agent
+SDK, and `opencode`, are binaries for Linux x86-64 with glibc; Vibe needs `python3` with
+`venv` (setup installs `python3-venv`) and PyPI at setup time; `setup.npm`
+needs `npm`. Any other OS, CPU or libc is untested, and nothing detects
+musl on the host.
+
+The staged deprecation, as proposed:
+
+1. **Document.** Describe caller-owned installation as the preferred
+   direction. A deprecation notice is proposed, not emitted today;
+   `setup.agents` and its lock keep working with the workflow's pinned defaults.
+2. **A caller-owned installation example.** A caller installs its agents
+   in a step of its own before `secure-host`, with an integrity check of
+   what it fetches, the trusted-setup boundary above, and configuration
+   that does not install another copy. The first-party
+   test pins (`just claude-acp-test`, the Vibe adapter test) move to CI
+   fixtures. That way the tests no longer depend on the runtime lock,
+   which stage 4 removes.
+3. **Decouple discovery from layout.** Launchers find an agent on the
+   `PATH` rather than at a fixed path, Vibe's included, and a test drives
+   an externally installed agent, without weakening inference routing or
+   isolation. Bespoke shims, Vibe's launcher first, move to a project of
+   their own; its destination is not chosen here.
+4. **Remove.** Once callers have moved, the installer, the embedded lock
+   and `just agents-lock` go, and `setup.agents` is refused by name like
+   the removed second-user keys. No image with pinned agents becomes the
+   primary deliverable; whether an optional binary-only image is wanted
+   is open.
 
 ### What hardens the agent's user
 

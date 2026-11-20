@@ -112,19 +112,54 @@ collection or additional permissions are introduced.
 
 ### Agent adapters
 
+The deliverable is the `agentic-job` binary: the session, `run` and its
+launchers, released as a static build beside `fake-agent` and
+`secure-host`. The agents it drives are programs of their own, and
+installing them, at versions of the caller's choosing, is to be the
+caller's; today the reusable workflow installs the binary's own pins
+(`setup.agents`). See [who installs the agents](sandbox.md#who-installs-the-agents)
+for installation and `PATH` requirements and the proposed deprecation.
+
 To the session, an agent is an entry of `session/agents.toml`, built into
 the binary: its command, how it is told the model, and whether it takes
 notices. This is not a caller-extensible registry for `run`: `run` also
 has a closed `Kind` enum and agent-specific configuration and launcher
-code. ACP makes the session transport common, not provider setup.
-`claude` is Claude Code through `claude-agent-acp`, `opencode` is
-`opencode acp`, and `fake` is `fake-agent demo`, which plays a recorded
-session and needs no model.
+code. ACP makes the session transport common, not provider setup, and it
+does not make any version of an agent work. The entries differ in how
+each comes to speak ACP, which decides what a caller can install:
 
-`vibe` is Mistral Vibe 2.26.1, using its legacy Python ACP runtime.
-The launcher uses its library entrypoint with only the user configuration
-source and isolated Python imports: `.vibe/config.toml`, project profiles
-and checkout modules cannot redirect inference. Both built-in provider
+- `opencode` speaks ACP natively: `opencode acp`.
+- `claude` is Claude Code through an external adapter,
+  `claude-agent-acp` (`@agentclientprotocol/claude-agent-acp`, a package
+  of its own that brings the Claude Agent SDK), run by the host's `node`.
+  The adapter is a dependency between the session and Claude Code,
+  maintained outside both; its version, not
+  Claude Code's, is what the session's entry was written against.
+- `vibe` is a bespoke shim: a Python launcher that `agents.toml` embeds,
+  run by the interpreter of a virtualenv at the fixed path
+  `/opt/agentic-job/vibe` that setup makes. A Vibe installed anywhere
+  else is not found, and the launcher calls that version's internals.
+  Shims of this kind are to leave this repository for a project of their
+  own, destination not chosen; [below](#what-moving-a-shim-out-must-keep)
+  is what the move must keep.
+- `fake` is `fake-agent demo`, which plays a recorded session and needs
+  no model.
+
+The versions the reusable workflow installs, and the only ones this
+repository's tests run against, are opencode-ai 1.18.35, claude-agent-acp
+0.88.0 and mistral-vibe 2.26.1. Installing another is the caller's
+choice and risk: nothing checks it, and the entry's contract is what
+breaks with a version, such as how the agent reports a model set over
+ACP, the words a refused model request ends a turn with
+(`provider-error`), steering, stalls and the configuration keys the
+launcher writes. Supported versions are the tested ones; a test against a
+caller-installed agent, outside the pins, is part of the staged migration
+and not yet there.
+
+Vibe's entry uses its legacy Python ACP runtime, through its library
+entrypoint with only the user configuration source and isolated Python
+imports: `.vibe/config.toml`, project profiles and checkout modules
+cannot redirect inference. Both built-in provider
 names are replaced with the broker's `/mistral/v1` chat-completions route;
 the caller's model is selected under its own name, which Vibe reports over
 ACP and tells the model it is, and also replaces the built-in model, which
@@ -178,7 +213,7 @@ above. Dispatch and review always pass `AGENT_MODEL`, so there the file
 only declares models. Vibe keeps its built-in model beside the file's, on
 the same broker provider, where it may serve as the image fallback of a
 text-only active model.
-The run token lives only in the private generated TOML, as an Authorization
+Vibe's private generated TOML puts the run token in an Authorization
 header, with no provider key or browser login. Telemetry, experiments,
 connectors and update checks are disabled. Instructions are pointed out
 in the task rather than automatically loaded from the project.
@@ -193,10 +228,57 @@ not a privileged sandbox or live broker test.
 
 `run` does not start the real agents by those commands. It starts
 `agentic-job launch-agent NAME`, a hidden command that runs as the
-sandbox user, reads the one file holding the run token, sets the
+sandbox user, uses the generated agent configuration, sets the
 agent's environment and becomes the agent. So the binary must be where
 the sandbox user can run it, such as `/usr/local/bin`; `run` checks
-that before it clones.
+that before it clones. The agent's own program is not checked before:
+the launcher resolves it when the session starts it, and an agent that
+cannot be found fails the run then, exit state 1.
+
+#### What moving a shim out must keep
+
+Vibe's launcher is in this repository because its ACP entrypoint enables
+project configuration unconditionally; the shim is what keeps a
+checkout from redirecting inference. Wherever such a shim ends up, and
+whatever installs a caller's agent, these hold, each from code the
+[recipe](#adding-an-acp-agent-to-run) below names:
+
+- **Trusted installation.** Follow the
+  [caller installation and `PATH` requirements](sandbox.md#who-installs-the-agents)
+  so the task cannot replace the program or its dependencies.
+- **Managed settings.** Claude Code's managed settings
+  (`/etc/claude-code/managed-settings.json`) are root's, written by
+  `sandbox setup` or `prepare` from the same configuration `run` reads,
+  and `run` refuses any difference. They win over the user's and the
+  project's settings key by key, so a target repository cannot send the
+  conversation elsewhere. That does not depend on how the adapter was
+  installed, and a caller-installed adapter still needs them.
+- **Inference routing.** The launcher sets only what the run configured.
+  Nothing named `ACTIONS_*`, `ANTHROPIC_*`, `CLAUDE_*`, `OPENCODE_*`,
+  `VIBE_*` or `MISTRAL_*`, nor the run's own credential variables, is
+  inherited from the job (`NOT_INHERITED` in `session/process.rs`);
+  Claude's private environment file may set only `ANTHROPIC_*`. For
+  opencode, `run` sets the selected provider's `baseURL` to the proxy URL
+  and its `apiKey` to the run token.
+  The launcher disables project configuration, model fetching, default
+  plugins and external skills (`OPENCODE_SWITCHES`) and drops the XDG base
+  directories (except `XDG_RUNTIME_DIR`, for rootless podman). This does
+  not disable all plugins or guarantee the provider honors those options.
+  The caller must trust its configuration repository, distinct from the
+  untrusted target checkout, and the provider code it selects. Vibe's
+  launcher uses only the user configuration source and runs Python in
+  isolated mode, so `.vibe/config.toml`, project profiles
+  and checkout modules cannot redirect inference.
+- **Token placement.** Within the generated agent configuration, the run
+  token is written to one private file in the agent's home (0600, directory
+  0700). That is not the only copy: the hosted path passes the token in
+  `run`'s environment, readable by same-UID processes, and token-file mode
+  starts with a separate caller-provided file. Never put the token in argv,
+  the registry's `env`, public settings, managed settings or published logs.
+
+These protections depend on how the launcher, host and agent work together.
+A new agent version may read a setting the launcher does not pin. A shim
+moved out needs the same review against the agent version it starts.
 
 ### Adding an ACP agent to `run`
 

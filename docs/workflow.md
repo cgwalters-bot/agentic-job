@@ -1206,7 +1206,10 @@ not define, and opts into `apply-partial`, which inference does not need.
   Linux with glibc: setup refuses another OS or CPU before it changes
   anything, but does not detect musl. Set `npm` to exact
   `NAME@VERSION` pins to install with npm instead; those do not pin
-  their transitive dependencies. Choose `model`, `max-requests`,
+  their transitive dependencies. Installing the agents is to become the
+  caller's, with these pins deprecated in stages that change nothing
+  for a caller yet ([who installs the agents](sandbox.md#who-installs-the-agents)).
+  Choose `model`, `max-requests`,
   `budget` and `timeout` with the operator. Replace the scripted caller's
   `max-requests: "0"` with the default `"150"` or another positive cap:
   composition accepts a zero for a brokered agent with a budget, and the
