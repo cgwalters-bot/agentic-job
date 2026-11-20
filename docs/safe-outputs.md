@@ -1761,10 +1761,30 @@ enforce the author and applying-identity check. `own_author` is the login of the
 request's author with the branch and head. If `repos` does not list the
 repository, policy admits it only when that author is `own_author`, and
 records the login as the push's `author`. Such a run may ask for the
-push, `noop`, `missing_tool` and `missing_data`. Besides the push, the
-only write to a repository the bounds never listed is the run's status
-comment on that pull request, where the caller posts one (`notify`): no
-requested comment, label or close. Apply reads the pull request again and refuses
+push, one `add_comment` where the bounds list it, `noop`, `missing_tool`
+and `missing_data`. The comment is where a fix run disputes a review
+finding: check and apply refuse it unless the caller's fixed comment
+target is that pull request in the output repository, so the caller
+passes its number as `comment-target` and no other `item-repo`;
+`handback check` checks it against that pull request. Check also
+refuses it without the push, and check and apply refuse it unless
+`native_handlers` routes both `add_comment` and
+`push_to_pull_request_branch` to
+[agentic-job's own handlers](#agentic-jobs-own-handlers), which role
+mode requires anyway. Role mode supports a paired patch push, not a
+replacement series. The native publisher makes the patch push first,
+whatever the requests' order. If the applied guard already found the
+checked push or pushed a replacement series, it passes the resulting
+commit to the publisher instead. The publisher verifies that the
+commit is still the live branch tip before posting the comment and
+names that commit in the comment's first line, its own, so that the
+agent's text cannot start the comment as a command. A failed or skipped push, or a
+branch that no longer holds the commit, leaves the comment unposted.
+The comment's SHA records what was verified before posting, not a
+guarantee that the branch still holds it. Besides these, the only write
+to a repository the bounds never listed is the run's status comment on
+that pull request, where the caller posts one (`notify`): no label,
+close or other comment. Apply reads the pull request again and refuses
 unless it is still by `author`, and `author` is the identity apply holds.
 The branch globs, replacement limits and every apply check below are those
 of any push. This stops a fix run admitted this way from pushing to a

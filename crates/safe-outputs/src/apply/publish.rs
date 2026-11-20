@@ -2280,17 +2280,23 @@ const SUBMIT_REVIEW: &str = "submit_pull_request_review";
 /// Publishes OPS in order with PUBLISHER, allowing the DEFAULTS mentions,
 /// and returns how each ended. Review comments are buffered, and submitted
 /// in one review after the others, as gh-aw's handler manager submits
-/// them.
+/// them. A held comment needs the live branch to match the commit made by
+/// the push before it, or the one the applied guard verified or pushed.
 fn publish(
     ops: &[Op],
     publisher: &GithubPublisher,
     run: &Run,
     defaults: &[String],
+    held: Option<HeldComment<'_>>,
     log: &mut dyn FnMut(&Annotation),
 ) -> Result<Published> {
     let mut outcomes: Vec<Outcome> = Vec::new();
     let mut processed: std::collections::BTreeMap<&str, u64> = Default::default();
     let mut pushed_failed = None;
+    let mut pushed = held
+        .as_ref()
+        .and_then(|held| held.guarded)
+        .map(|prior| prior.commit.to_owned());
     let mut review = Review::default();
     for op in ops {
         let count = processed.entry(op.output()).or_default();
@@ -2314,9 +2320,23 @@ fn publish(
             ),
             (op, _) => {
                 let mut buffer = (outcomes.len(), &mut review);
-                publish_one(op, publisher, run, defaults, &mut buffer, log)
+                let verified = match (&held, op) {
+                    (Some(held), Op::Comment { .. }) => held
+                        .verify(publisher, pushed.as_deref())
+                        .map(|()| pushed.as_deref()),
+                    _ => Ok(None),
+                };
+                match verified {
+                    Ok(commit) => {
+                        publish_one(op, publisher, run, defaults, &mut buffer, log, commit)
+                    }
+                    Err(err) => Outcome::failed(op, format!("not posted: {err:#}")),
+                }
             }
         };
+        if matches!(op, Op::Push { .. }) && outcome.kind == Kind::Success {
+            pushed = outcome.result["commit_sha"].as_str().map(str::to_owned);
+        }
         if outcome.kind == Kind::Failed {
             let error = outcome.error.clone().unwrap_or_default();
             log(&command(
@@ -2895,6 +2915,7 @@ fn publish_one(
     defaults: &[String],
     review: &mut (usize, &mut Review),
     log: &mut dyn FnMut(&Annotation),
+    verified_push: Option<&str>,
 ) -> Outcome {
     let github = match publisher
         .github
@@ -2934,7 +2955,15 @@ fn publish_one(
         }
         Op::Comment {
             item, repo, issue, ..
-        } => comment(op, item, repo, *issue, defaults, publisher, run),
+        } => comment(
+            op,
+            item,
+            (repo, *issue),
+            defaults,
+            publisher,
+            run,
+            verified_push,
+        ),
         Op::PullRequest {
             failure: Some(failure),
             ..
@@ -3364,11 +3393,11 @@ fn unpushable(
 fn comment(
     op: &Op,
     item: &Map<String, Value>,
-    repo: &str,
-    issue: u64,
+    (repo, issue): (&str, u64),
     defaults: &[String],
     publisher: &GithubPublisher,
     run: &Run,
+    verified_push: Option<&str>,
 ) -> Outcome {
     // The item's author may be mentioned, where the forge says who it is.
     let mut aliases = Vec::new();
@@ -3402,8 +3431,11 @@ fn comment(
         Ok(triggering) => triggering,
         Err(err) => return Outcome::failed(op, format!("{err:#}")),
     };
+    let verified = verified_push
+        .map(check::verified_push_note)
+        .unwrap_or_default();
     let body = format!(
-        "{body}\n\n{}",
+        "{verified}{body}\n\n{}",
         footer(
             run,
             triggering.as_deref(),
@@ -4438,6 +4470,135 @@ fn warn_of_failure(rest: &[Value], failed: &Outcome) -> Vec<Value> {
         .collect()
 }
 
+/// Evidence from the applied guard, not the agent or its checked upload.
+/// The publisher still verifies that this is the live branch tip.
+#[derive(Clone, Copy)]
+pub struct GuardedPush<'a> {
+    pub commit: &'a str,
+    /// The guard pushed a replacement in this attempt, rather than finding it already applied.
+    pub made: bool,
+}
+
+struct HeldComment<'a> {
+    head_repo: &'a str,
+    branch: &'a str,
+    guarded: Option<GuardedPush<'a>>,
+}
+
+impl HeldComment<'_> {
+    fn verify(&self, publisher: &GithubPublisher, commit: Option<&str>) -> Result<()> {
+        let commit = commit.with_context(|| {
+            format!("the {PUSH_TO_PULL_REQUEST_BRANCH} it follows was not made")
+        })?;
+        ensure!(super::COMMIT_RE.is_match(commit), "invalid pushed commit");
+        let remote = format!("{}/{}.git", publisher.git, self.head_repo);
+        let reference = format!("refs/heads/{}", self.branch);
+        let dir = tempfile::tempdir().context("verifying the pushed branch")?;
+        let github = publisher.github.for_role(super::roles::Role::ForkPush)?;
+        let found = github.git().run(
+            dir.path(),
+            &["ls-remote", "--refs", &remote, &reference],
+            None,
+        )?;
+        ensure!(
+            found.trim_end() == format!("{commit}\t{reference}"),
+            "the branch {} of {} no longer holds the verified push {commit}",
+            self.branch,
+            self.head_repo
+        );
+        Ok(())
+    }
+}
+
+/// Bind an own-author dispute to the checked push's destination before publishing.
+fn held_comment<'a>(
+    checked: &'a Checked<'a>,
+    guarded: Option<GuardedPush<'a>>,
+    publisher: &GithubPublisher,
+) -> Result<Option<HeldComment<'a>>> {
+    let Checked {
+        items,
+        handlers,
+        upload,
+        policy,
+    } = checked;
+    let count = |output: &str| items.iter().filter(|item| item["type"] == output).count();
+    let Some(push) = policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .filter(|_| check::own_author_run(policy) && count(ADD_COMMENT) != 0)
+    else {
+        return Ok(None);
+    };
+    if let Some(error) = check::own_comment_routing(policy) {
+        bail!("{error}");
+    }
+    ensure!(
+        count(ADD_COMMENT) == 1,
+        "only one own_author add_comment is allowed"
+    );
+    let config = handlers.get(ADD_COMMENT).unwrap_or(&Value::Null);
+    ensure!(
+        config["target-repo"]
+            .as_str()
+            .is_some_and(|repo| repo.eq_ignore_ascii_case(&policy.repo))
+            && publisher.item_repo.eq_ignore_ascii_case(&policy.repo)
+            && config["target"].as_str() == Some(push.target.as_str()),
+        "the add_comment handler's destination is not {}#{}, the pull request pushed to, in a \
+         run admitted for its own_author's pull request",
+        policy.repo,
+        push.target
+    );
+    let report = read_report(upload)?;
+    ensure!(
+        report.ok
+            && report.errors.is_empty()
+            && report
+                .items
+                .iter()
+                .any(|item| check::item_type(item) == PUSH_TO_PULL_REQUEST_BRANCH
+                    && item.get("branch").and_then(Value::as_str) == Some(policy.base.as_str())),
+        "an add_comment without a checked {PUSH_TO_PULL_REQUEST_BRANCH}, in a run admitted \
+         for its own_author's pull request"
+    );
+    match (count(PUSH_TO_PULL_REQUEST_BRANCH), guarded) {
+        (1, None) => {}
+        (0, Some(prior)) => ensure!(
+            super::COMMIT_RE.is_match(prior.commit)
+                && prior.commit != push.head
+                && (!prior.made
+                    || report
+                        .patch
+                        .is_some_and(|patch| patch.commit_files.is_some())),
+            "invalid guarded push for an own_author add_comment"
+        ),
+        _ => bail!(
+            "an own_author add_comment requires exactly one push, pending or verified by the applied guard"
+        ),
+    }
+    let config = handlers
+        .get(PUSH_TO_PULL_REQUEST_BRANCH)
+        .unwrap_or(&Value::Null);
+    let head_repo = config["head-repo"]
+        .as_str()
+        .filter(|repo| REPO_RE.is_match(repo))
+        .context("the paired push has no valid head-repo")?;
+    ensure!(
+        config["target"].as_str() == Some(push.target.as_str())
+            && config["head"].as_str() == Some(push.head.as_str())
+            && config["target-repo"]
+                .as_str()
+                .is_some_and(|repo| repo.eq_ignore_ascii_case(&policy.repo)),
+        "the paired push handler's destination differs from policy"
+    );
+    Ok(Some(HeldComment {
+        head_repo,
+        branch: &policy.base,
+        guarded,
+    }))
+}
+
 /// What apply's earlier steps leave [`apply`]: the requests, the
 /// handlers' configuration, check's upload and its policy.
 #[derive(Clone, Copy)]
@@ -4465,6 +4626,18 @@ pub struct Records<'a> {
 /// handler leaves it. LOG is given each line for the step's log.
 pub fn apply(
     checked: &Checked<'_>,
+    run: &Run,
+    publisher: &GithubPublisher,
+    records: &Records<'_>,
+    log: &mut dyn FnMut(&Annotation),
+) -> Result<bool> {
+    apply_with_guarded_push(checked, None, run, publisher, records, log)
+}
+
+/// Publish after the applied guard, which may have removed a verified push.
+pub fn apply_with_guarded_push(
+    checked: &Checked<'_>,
+    guarded: Option<GuardedPush<'_>>,
     run: &Run,
     publisher: &GithubPublisher,
     records: &Records<'_>,
@@ -4508,6 +4681,10 @@ pub fn apply(
             "advisory handler destination differs from policy"
         );
     }
+    let held = match held_comment(checked, guarded, publisher) {
+        Ok(held) => held,
+        Err(error) => return refuse(vec![format!("{error:#}")]),
+    };
     let Split { ours, rest } = match split(items, &policy.native_handlers) {
         Ok(split) => split,
         Err(errors) => return refuse(errors),
@@ -4526,10 +4703,13 @@ pub fn apply(
             "document runs permit one document and no other writing outputs"
         );
     }
-    let ops = match plan(ours, handlers, &upload, policy, run) {
+    let mut ops = match plan(ours, handlers, &upload, policy, run) {
         Ok(ops) => ops,
         Err(errors) => return refuse(errors),
     };
+    if held.is_some() {
+        ops.sort_by_key(|op| matches!(op, Op::Comment { .. }));
+    }
     // A refusal too, so before the remainder hands gh-aw the rest; only
     // the routed comments, pull requests, issues and review comments keep
     // mentions, and so read the event's people.
@@ -4554,7 +4734,21 @@ pub fn apply(
     let remainder = json!({"items": rest, "errors": []}).to_string();
     std::fs::write(records.remainder, remainder)
         .with_context(|| format!("writing {}", records.remainder.display()))?;
-    let Published { outcomes, reviewed } = publish(&ops, publisher, run, &defaults, log)?;
+    let guarded_outcome = held.as_ref().and_then(|held| {
+        let prior = held.guarded.filter(|prior| prior.made)?;
+        Some(Outcome {
+            output: PUSH_TO_PULL_REQUEST_BRANCH,
+            index: 0,
+            kind: Kind::Success,
+            result: json!({"commit_sha": prior.commit, "branch_name": held.branch,
+                "commit_url": format!("{}/{}/commit/{}", run.server, held.head_repo, prior.commit)}),
+            error: None,
+        })
+    });
+    let Published {
+        mut outcomes,
+        reviewed,
+    } = publish(&ops, publisher, run, &defaults, held, log)?;
     if let Some(failed) = outcomes
         .iter()
         .find(|o| o.kind == Kind::Failed && CODE_PUSHES.contains(&o.output))
@@ -4579,6 +4773,11 @@ pub fn apply(
         );
     for entry in entries {
         writeln!(made, "{entry}").with_context(|| format!("writing {}", records.made.display()))?;
+    }
+    // The guard already wrote its replacement to the manifest. Count it in
+    // the joint publisher result without writing a duplicate manifest entry.
+    if let Some(outcome) = guarded_outcome {
+        outcomes.insert(0, outcome);
     }
     if let Some(report) = error_report(run, records.workflow, &outcomes, &timestamp) {
         std::fs::write(records.errors, report)
@@ -5461,7 +5660,7 @@ mod tests {
                 issue: 7,
                 max: 1,
             };
-            let outcome = comment(&op, &item, REPO, 7, &[], &publisher, &run);
+            let outcome = comment(&op, &item, (REPO, 7), &[], &publisher, &run, None);
             assert_eq!(
                 outcome.kind == Kind::Success,
                 success,
@@ -6364,6 +6563,225 @@ mod tests {
                     )) && body.ends_with("Pushed."),
                     "{body}"
                 );
+            }
+        }
+    }
+
+    /// A run admitted by `own_author` posts its comment only once the push
+    /// it asked for is made, here or before by the applied guard, and only
+    /// where both are published here, to the pull request pushed to.
+    #[test]
+    fn an_own_author_comment_waits_for_its_push() {
+        // Command-shaped, as a dispute must not be able to start its comment.
+        const DISPUTE: &str = "/review The finding does not apply.";
+        let body = format!("{DISPUTE}\n{}", "é".repeat(63_500 - DISPUTE.len()));
+        let comment = json!({"type": ADD_COMMENT, "body": body});
+        type Change = fn(&mut Value, &mut Policy, &Path);
+        type Case = (
+            &'static str,
+            bool,
+            Option<bool>,
+            Change,
+            Result<usize, &'static str>,
+        );
+        let cases: &[Case] = &[
+            ("after the push it follows", true, None, |_, _, _| {}, Ok(2)),
+            (
+                "after a push that was skipped",
+                true,
+                None,
+                |handlers, _, _| {
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["protected_files"] = json!(["sub.rs"]);
+                },
+                Ok(0),
+            ),
+            (
+                "alone, its push already made",
+                false,
+                Some(true),
+                |_, _, _| {},
+                Ok(1),
+            ),
+            (
+                "alone, its push no longer at the tip",
+                false,
+                Some(false),
+                |_, _, _| {},
+                Ok(0),
+            ),
+            (
+                "alone, with no proof of push",
+                false,
+                None,
+                |_, _, _| {},
+                Err("requires exactly one push, pending or verified by the applied guard"),
+            ),
+            (
+                "alone, with no push checked",
+                false,
+                None,
+                |_, _, checked| {
+                    let path = checked.join(REPORT_FILE);
+                    let mut report = read_json(&path);
+                    report["items"] = json!([]);
+                    std::fs::write(path, report.to_string()).unwrap();
+                },
+                Err("an add_comment without a checked push_to_pull_request_branch"),
+            ),
+            (
+                "routed to gh-aw's handlers",
+                true,
+                None,
+                |_, policy, _| policy.native_handlers.retain(|o| o != ADD_COMMENT),
+                Err("native_handlers does not route both"),
+            ),
+            (
+                "to another pull request",
+                false,
+                None,
+                |handlers, _, _| handlers[ADD_COMMENT]["target"] = json!("8"),
+                Err("the add_comment handler's destination is not"),
+            ),
+        ];
+        for (name, with_push, prior, change, want) in cases {
+            let (root, checked, case, mut handlers) = corpus_case("push-to-pull-request-branch");
+            let mut policy = case_policy(&case);
+            let push = policy.safe_outputs.push_to_pull_request_branch.as_mut();
+            let push = push.unwrap();
+            push.author = Some("example-bot".into());
+            let target = push.target.clone();
+            handlers[ADD_COMMENT] = json!({"max": 1, "target-repo": REPO, "target": target});
+            let report = checked.join(REPORT_FILE);
+            let mut checked_items = read_json(&report);
+            checked_items["items"] = json!([case["items"][0], comment]);
+            std::fs::write(&report, checked_items.to_string()).unwrap();
+            change(&mut handlers, &mut policy, &checked);
+            let seed = root.path().join("seed");
+            let commit = git(&seed, &["rev-parse", "agent"]);
+            if *prior == Some(true) {
+                let remote = root.path().join(format!(
+                    "{}.git",
+                    handlers[PUSH_TO_PULL_REQUEST_BRANCH]["head-repo"]
+                        .as_str()
+                        .unwrap()
+                ));
+                git(
+                    &seed,
+                    &[
+                        "push",
+                        "-q",
+                        remote.to_str().unwrap(),
+                        &format!("agent:refs/heads/{}", policy.base),
+                    ],
+                );
+            }
+            // The comment comes first, and is still published after the push.
+            let mut items = vec![comment.clone()];
+            if *with_push {
+                items.push(case["items"][0].clone());
+            }
+            let (github, sent) = forge(&case["forge"], &[]);
+            let publisher = GithubPublisher {
+                github,
+                git: root.path().display().to_string(),
+                item_repo: REPO.into(),
+                repo: REPO.into(),
+            };
+            let records = tempfile::tempdir().unwrap();
+            let path = |file: &str| records.path().join(file);
+            std::fs::write(path("output"), "").unwrap();
+            let applied = apply_with_guarded_push(
+                &Checked {
+                    items: &items,
+                    handlers: handlers.as_object().unwrap(),
+                    upload: upload(&checked),
+                    policy: &policy,
+                },
+                prior.map(|_| GuardedPush {
+                    commit: &commit,
+                    made: false,
+                }),
+                &run(1, "http://127.0.0.1:1"),
+                &publisher,
+                &Records {
+                    remainder: &path("remainder.json"),
+                    made: &path("made.jsonl"),
+                    errors: &path("errors.json"),
+                    output: Some(&path("output")),
+                    summary: None,
+                    workflow: "agentic-job",
+                },
+                &mut |_| {},
+            );
+            let sent = std::mem::take(&mut *sent.lock().unwrap());
+            let posted: Vec<String> = sent
+                .iter()
+                .filter(|request| request.line.starts_with("POST "))
+                .map(|request| request.body["body"].as_str().unwrap_or_default().to_owned())
+                .collect();
+            match want {
+                Err(want) => {
+                    let err = format!("{:#}", applied.unwrap_err());
+                    assert!(err.contains(want), "{name}: {err}");
+                    assert!(writes(&sent).is_empty(), "{name}");
+                }
+                Ok(made) => {
+                    let ok = applied.unwrap();
+                    let output = std::fs::read_to_string(path("output")).unwrap();
+                    assert!(
+                        output.contains(&format!("items_succeeded={made}\n")),
+                        "{name}: {output}"
+                    );
+                    assert!(
+                        output.contains(&format!("processed_count={made}\n")),
+                        "{name}: {output}"
+                    );
+                    assert!(
+                        output.contains("code_push_failure_count=0\n"),
+                        "{name}: {output}"
+                    );
+                    // The push's own "Commit pushed" note, then the dispute.
+                    let disputed = posted.iter().position(|body| body.contains(DISPUTE));
+                    if *made == 0 {
+                        assert!(!ok, "{name}");
+                        assert_eq!(disputed, None, "{name}: {posted:?}");
+                        let errors = read_json(&path("errors.json"));
+                        let expected = if prior.is_some() {
+                            "no longer holds the verified push"
+                        } else {
+                            "it follows was not made"
+                        };
+                        assert!(
+                            errors["failures"][0]["error"]
+                                .as_str()
+                                .unwrap()
+                                .contains(expected),
+                            "{name}: {errors}"
+                        );
+                    } else {
+                        assert!(ok, "{name}");
+                        assert_eq!(disputed, Some(posted.len() - 1), "{name}: {posted:?}");
+                        assert_eq!(posted.len(), *made, "{name}: {posted:?}");
+                        let dispute = &posted[disputed.unwrap()];
+                        let sha = if prior.is_some() {
+                            &commit
+                        } else {
+                            output
+                                .lines()
+                                .find_map(|line| line.strip_prefix("push_commit_sha="))
+                                .unwrap()
+                        };
+                        assert!(
+                            dispute.starts_with(&format!(
+                                "{}{DISPUTE}\n",
+                                check::verified_push_note(sha)
+                            )),
+                            "{name}"
+                        );
+                        assert!(dispute.contains("gh-aw-execution:"), "{name}");
+                        assert!(utf16_len(dispute) <= MAX_BODY_UNITS, "{name}");
+                    }
+                }
             }
         }
     }

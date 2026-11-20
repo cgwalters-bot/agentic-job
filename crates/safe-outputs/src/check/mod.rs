@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
+use crate::apply::ADD_COMMENT;
 use crate::contract::{COMMIT_RE, PatchRules, Policy, Secondary, update_fields};
 use crate::{
     CREATE_PULL_REQUEST, CREATE_REVIEW_COMMENT, Forge, HIDE_COMMENT, KIND_TARGETS, MARK_READY,
@@ -281,6 +282,26 @@ pub fn redirections_to(
                 )
             }),
     );
+    // A repository the bounds admit only for a push to the bot's own pull
+    // request gets a comment only on that pull request, where a fix run
+    // disputes a finding: on any other item it would be a write the
+    // bounds never admitted there.
+    if output == ADD_COMMENT
+        && let Some(push) = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_ref()
+            .filter(|push| push.author.is_some())
+        && !comment.is_some_and(|(repo, target)| {
+            repo.eq_ignore_ascii_case(&policy.repo) && target.to_string() == push.target
+        })
+    {
+        problems.push(format!(
+            "an add_comment in a run admitted for its own_author's pull request goes only to \
+             that pull request, #{}",
+            push.target
+        ));
+    }
     if output == "add_comment"
         && let Some((_, target)) = comment
     {
@@ -748,6 +769,71 @@ fn unsupported_label_fields(item: &Map<String, Value>, policy: &Policy) -> bool 
         })
 }
 
+/// Whether POLICY admits its run only for a push to its `own_author`'s
+/// pull request.
+pub fn own_author_run(policy: &Policy) -> bool {
+    policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_ref()
+        .is_some_and(|push| push.author.is_some())
+}
+
+/// Native publisher's plain SHA note, the comment's first line so the
+/// agent's text cannot start it as a command; it adds length but no links
+/// or mentions.
+pub(crate) fn verified_push_note(commit: &str) -> String {
+    format!("Fix run reply after its verified pushed commit `{commit}`.\n\n")
+}
+
+/// Why POLICY's run, admitted only for a push to its `own_author`'s pull
+/// request, may not comment there: agentic-job publish posts the comment
+/// only once it has made the checked push, or the applied guard found it
+/// made (docs/safe-outputs.md#pushing-to-a-pull-requests-branch), so it
+/// has to publish both.
+pub fn own_comment_routing(policy: &Policy) -> Option<String> {
+    let routed = |output: &str| policy.native_handlers.iter().any(|routed| routed == output);
+    (own_author_run(policy) && !(routed(ADD_COMMENT) && routed(PUSH_TO_PULL_REQUEST_BRANCH))).then(
+        || {
+            format!(
+                "an add_comment in a run admitted for its own_author's pull request, where \
+                 native_handlers does not route both {ADD_COMMENT} and \
+                 {PUSH_TO_PULL_REQUEST_BRANCH} to agentic-job publish"
+            )
+        },
+    )
+}
+
+/// The refusals of ITEMS' comments in a run admitted only for a push to
+/// its `own_author`'s pull request: the push is what holds the comment to
+/// the head the run was asked for, so there is none without it.
+fn unpushed_own_comment(policy: &Policy, items: &[Map<String, Value>]) -> Vec<String> {
+    if !own_author_run(policy) || !items.iter().any(|item| item_type(item) == ADD_COMMENT) {
+        return Vec::new();
+    }
+    let mut problems = Vec::new();
+    if !items
+        .iter()
+        .any(|item| item_type(item) == PUSH_TO_PULL_REQUEST_BRANCH)
+    {
+        problems.push(format!(
+            "an add_comment without a {PUSH_TO_PULL_REQUEST_BRANCH}, in a run admitted for its \
+             own_author's pull request"
+        ));
+    }
+    problems.extend(own_comment_routing(policy));
+    if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch {
+        let extra = verified_push_note(&push.head).len();
+        problems.extend(
+            items
+                .iter()
+                .filter(|item| item_type(item) == ADD_COMMENT)
+                .flat_map(|item| handler_limits::refusals_with_extra_length(item, extra)),
+        );
+    }
+    problems
+}
+
 /// The field naming the one item an output acts on, for those that must
 /// name it explicitly.
 pub fn target_key(output: &str) -> Option<&'static str> {
@@ -961,6 +1047,7 @@ pub fn check(
             target.repo, target.max
         ));
     }
+    errors.extend(unpushed_own_comment(policy, &items));
     for (output, count) in counts {
         match policy.safe_outputs.max_of(output) {
             None => errors.push(format!(

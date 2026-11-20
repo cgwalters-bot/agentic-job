@@ -724,3 +724,133 @@ fn comments_go_to_the_trusted_target_only() {
         assert_eq!(comment(extra.clone()), [want], "{extra}");
     }
 }
+
+/// A run admitted only by `own_author` comments on the pull request it
+/// pushes to and nowhere else; a run `repos` admits keeps any target.
+#[test]
+fn own_author_comments_only_on_its_pull_request() {
+    let mut own = push_policy();
+    own.safe_outputs
+        .push_to_pull_request_branch
+        .as_mut()
+        .unwrap()
+        .author = Some("example-bot".into());
+    let item = json!({"type": "add_comment", "body": "Disputed."});
+    let refused = "an add_comment in a run admitted for its own_author's pull request goes only \
+                   to that pull request, #42";
+    let upper = REPO.to_uppercase();
+    for (target, allowed) in [
+        (Some((REPO, 42)), true),
+        (Some((upper.as_str(), 42)), true),
+        (Some((REPO, 7)), false),
+        (Some(("other/repo", 42)), false),
+        (None, false),
+    ] {
+        let errors = redirections_to(item.as_object().unwrap(), &own, target, &Fake::default());
+        assert_eq!(errors.is_empty(), allowed, "{target:?}: {errors:?}");
+        assert_eq!(
+            errors.iter().any(|e| e == refused),
+            !allowed,
+            "{target:?}: {errors:?}"
+        );
+    }
+    let listed = push_policy();
+    assert!(
+        redirections_to(
+            item.as_object().unwrap(),
+            &listed,
+            Some((REPO, 7)),
+            &Fake::default()
+        )
+        .is_empty()
+    );
+
+    // Through the whole check, whose trusted comment target is #7: only
+    // beside a push, and only where that push goes to #7.
+    own.safe_outputs.others.insert(
+        "add_comment".into(),
+        OutputLimit {
+            max: 1,
+            ..OutputLimit::default()
+        },
+    );
+    let with = |items: Vec<Value>| Case {
+        items,
+        ..Case::push("src/lib.rs")
+    };
+    let unpushed = format!(
+        "an add_comment without a {PUSH_TO_PULL_REQUEST_BRANCH}, in a run admitted for its \
+         own_author's pull request"
+    );
+    let routed = "an add_comment in a run admitted for its own_author's pull request, where \
+                  native_handlers does not route both add_comment and push_to_pull_request_branch \
+                  to agentic-job publish";
+    let mut to_seven = own.clone();
+    to_seven
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_mut()
+        .unwrap()
+        .target = "7".into();
+    to_seven.native_handlers = vec!["add_comment".into(), PUSH_TO_PULL_REQUEST_BRANCH.into()];
+    own.native_handlers = to_seven.native_handlers.clone();
+    let mut gh_aw = to_seven.clone();
+    gh_aw.native_handlers = Vec::new();
+    let mut split = to_seven.clone();
+    split.native_handlers = vec!["add_comment".into()];
+    for (name, policy, items, want) in [
+        (
+            "beside the push",
+            &to_seven,
+            vec![push(), item.clone()],
+            None,
+        ),
+        (
+            "on another pull request",
+            &own,
+            vec![push(), item.clone()],
+            Some(refused),
+        ),
+        (
+            "without a push",
+            &to_seven,
+            vec![item.clone()],
+            Some(unpushed.as_str()),
+        ),
+        (
+            "before the push, which is published first",
+            &to_seven,
+            vec![item.clone(), push()],
+            None,
+        ),
+        (
+            "routed to gh-aw's handlers",
+            &gh_aw,
+            vec![push(), item.clone()],
+            Some(routed),
+        ),
+        (
+            "routed apart from its push",
+            &split,
+            vec![push(), item.clone()],
+            Some(routed),
+        ),
+    ] {
+        let errors = with(items).check(policy).errors;
+        match want {
+            None => assert_eq!(errors, Vec::<String>::new(), "{name}"),
+            Some(want) => assert!(errors.iter().any(|e| e == want), "{name}: {errors:?}"),
+        }
+    }
+    // Reserve the native publisher's SHA note in addition to the generated footer budget.
+    let budget = 65_536 - 1842 - verified_push_note(&"a".repeat(40)).len();
+    for extra in [0, 1] {
+        let mut comment = item.clone();
+        comment["body"] = json!("é".repeat(budget + extra));
+        let report = with(vec![push(), comment]).check(&to_seven);
+        assert_eq!(report.errors.is_empty(), extra == 0, "{:?}", report.errors);
+        if extra != 0 {
+            assert!(report.errors.iter().any(|error| error.starts_with("E006:")));
+        }
+    }
+}

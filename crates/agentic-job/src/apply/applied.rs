@@ -483,8 +483,8 @@ pub(super) fn name(
 
 /// The local git the guard reads and a replacement series is pushed with.
 pub(super) trait Workspace {
-    /// The parents (`%P`) and tree of [`FETCHED`].
-    fn fetched(&self) -> Result<(String, String)>;
+    /// The commit, parents (`%P`) and tree of [`FETCHED`].
+    fn fetched(&self) -> Result<(String, String, String)>;
 
     /// `agentic-job replacement push`: whether it pushed, not found the
     /// branch already there.
@@ -501,11 +501,16 @@ pub(super) trait Workspace {
 struct Checkout;
 
 impl Workspace for Checkout {
-    fn fetched(&self) -> Result<(String, String)> {
-        let here = Path::new(".");
-        let parents = super::replacement::git(here, &["show", "-s", "--format=%P", FETCHED])?;
-        let tree = super::replacement::git(here, &["rev-parse", &format!("{FETCHED}^{{tree}}")])?;
-        Ok((parents, tree))
+    fn fetched(&self) -> Result<(String, String, String)> {
+        let found = super::replacement::git(
+            Path::new("."),
+            &["show", "-s", "--format=%H%n%P%n%T", FETCHED],
+        )?;
+        let lines: Vec<_> = found.lines().collect();
+        let [commit, parents, tree] = lines.as_slice() else {
+            bail!("could not read the fetched branch's commit, parents and tree");
+        };
+        Ok((commit.to_string(), parents.to_string(), tree.to_string()))
     }
 
     fn push_replacement(
@@ -697,6 +702,8 @@ impl Guard<'_> {
             )
         };
         let (mut kept, mut skipped, mut made) = (Vec::new(), Vec::new(), Vec::new());
+        let mut guarded_push = None;
+        let has_comment = items.iter().any(|item| is_type(item, ADD_COMMENT));
         for (index, item) in items.iter().enumerate() {
             let kind = item.get("type").and_then(Js::as_str).unwrap_or_default();
             if kind == PUSH_TO_PULL_REQUEST_BRANCH {
@@ -704,6 +711,8 @@ impl Guard<'_> {
                 let config = read_js(&args.dir.join("config.json"))?;
                 let config = config.get(PUSH_TO_PULL_REQUEST_BRANCH).unwrap_or(&Js::Null);
                 let head = config.get("head").and_then(Js::as_str);
+                let needs_receipt =
+                    has_comment && config.get("author").and_then(Js::as_str).is_some();
                 let entry = Js::of(&[
                     ("type", Js::String(kind.to_owned())),
                     ("url", Js::String(pull_url(config))),
@@ -721,6 +730,9 @@ impl Guard<'_> {
                         head.unwrap_or_default(),
                         &args.replacement_head,
                     )?;
+                    if needs_receipt {
+                        guarded_push = Some((args.replacement_head.clone(), pushed));
+                    }
                     if pushed {
                         made.push(entry);
                     } else {
@@ -731,8 +743,11 @@ impl Guard<'_> {
                 // The fork was checked and fetched before the trial. Like
                 // the post-push check, require exactly one parent and the
                 // checked tree: an unrelated advance is not applied.
-                let (parents, tree) = self.workspace.fetched()?;
+                let (commit, parents, tree) = self.workspace.fetched()?;
                 if head == Some(parents.as_str()) && tree == args.tree {
+                    if needs_receipt {
+                        guarded_push = Some((commit, false));
+                    }
                     skipped.push(entry);
                 } else {
                     kept.push(item.clone());
@@ -771,6 +786,10 @@ impl Guard<'_> {
                     kept.push(item);
                 }
             }
+        }
+        if let Some((commit, made)) = guarded_push {
+            output("guarded-push", &commit)?;
+            output("guarded-push-made", if made { "true" } else { "false" })?;
         }
         document.set("items", Js::Array(kept));
         Ok(Decided {
@@ -1117,8 +1136,12 @@ mod tests {
     }
 
     impl Workspace for Fake {
-        fn fetched(&self) -> Result<(String, String)> {
-            Ok((self.parents.clone(), self.tree.clone()))
+        fn fetched(&self) -> Result<(String, String, String)> {
+            Ok((
+                "checked-commit".into(),
+                self.parents.clone(),
+                self.tree.clone(),
+            ))
         }
 
         fn push_replacement(

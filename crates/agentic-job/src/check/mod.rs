@@ -458,12 +458,19 @@ pub(crate) fn check_run_outputs_with_public(
     run_id: &str,
     public: &PublicAddresses,
 ) -> Result<Verdict> {
-    // Producer-side feedback uses the policy's destination. The trusted check
-    // still supplies its independently admitted event destination.
+    // Producer-side feedback uses the policy's destination: an advisory
+    // run's, or the pull request an own_author run pushes to, the only one
+    // its comment may go to. The trusted check still supplies its
+    // independently admitted event destination.
     let comment = policy
         .advisory
         .as_ref()
-        .map(|advisory| (advisory.repo.as_str(), advisory.pull));
+        .map(|advisory| (advisory.repo.as_str(), advisory.pull))
+        .or_else(|| {
+            let push = policy.safe_outputs.push_to_pull_request_branch.as_ref()?;
+            push.author.as_ref()?;
+            Some((policy.repo.as_str(), push.target.parse().ok()?))
+        });
     check_outputs_with_public(
         dir,
         collected,

@@ -793,6 +793,8 @@ jobs:
         if: ${{ fromJSON(inputs.policy).apply-staged != 'true' && steps.route.outputs.native == 'true' && steps.project.outcome == 'success' }}
         continue-on-error: true
         env:
+          GUARDED_PUSH: ${{ steps.applied.outputs.guarded-push }}
+          GUARDED_PUSH_MADE: ${{ steps.applied.outputs.guarded-push-made }}
           GH_TOKEN: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUBLICATION_TOKEN }}
           GH_AW_WORKFLOW_ID: agentic-job
           GH_AW_JOB_CHECK_RUN_ID: ${{ job.check_run_id }}

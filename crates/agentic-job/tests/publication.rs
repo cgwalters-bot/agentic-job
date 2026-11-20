@@ -1444,6 +1444,164 @@ fn publish_steps(
     })
 }
 
+#[test]
+fn own_author_replacement_and_dispute_have_one_publication_result() {
+    let doc = &YamlLoader::load_from_str(&apply_text()).unwrap()[0];
+    let scratch = Scratch {
+        dir: tempfile::tempdir().unwrap(),
+    };
+    let tmp = scratch.path("gh-aw");
+    let workspace = scratch.path("workspace");
+    let seed = scratch.path("seed");
+    let fork = scratch.server_repo(FORK);
+    let bin = scratch.path("runner-temp/apply-binary/agentic-job");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_agentic-job"), bin).unwrap();
+    std::fs::write(
+        scratch.path("gitconfig"),
+        format!(
+            "[url \"file://{}/\"]\n\tinsteadOf = {SERVER}/\n",
+            scratch.path("server").display()
+        ),
+    )
+    .unwrap();
+    let mut case = cases()
+        .into_iter()
+        .find(|case| case["name"] == "push-to-pull-request-branch")
+        .unwrap();
+    let push_type = "push_to_pull_request_branch";
+    // Command-shaped, as a dispute must not be able to start its comment.
+    let dispute = "/review The finding does not apply.";
+    case["items"] = json!([{"type":"add_comment", "body":dispute}, case["items"][0]]);
+    case["config"][push_type]["author"] = json!(POSTER);
+    case["config"]["add_comment"] = json!({"max":1});
+    for (key, value) in prepare_git(&scratch, &case, true) {
+        let text = case.to_string().replace(&key, &value);
+        case = serde_json::from_str(&text).unwrap();
+    }
+    let original = case["config"][push_type]["head"].as_str().unwrap();
+    // Rebuild two replacement commits from the target base, not from the pinned head.
+    scratch.git(&seed, &["checkout", "--quiet", "-B", "agent", "main"]);
+    commit_change(
+        &scratch,
+        &seed,
+        &json!({"message":"First", "files":{"first":"one\n"}}),
+    );
+    commit_change(
+        &scratch,
+        &seed,
+        &json!({"message":"Second", "files":{"second":"two\n"}}),
+    );
+    let replacement = scratch.git(&seed, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        scratch.git(&seed, &["rev-list", "--count", "main..HEAD"]),
+        "2"
+    );
+    scratch.git(
+        &workspace,
+        &["fetch", "--quiet", seed.to_str().unwrap(), "agent"],
+    );
+    scratch.git(
+        &workspace,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", fork.display()),
+            &format!("{SERVER}/{FORK}"),
+        ],
+    );
+    assert_eq!(scratch.git(&fork, &["rev-parse", "feature"]), original);
+
+    fresh_tmp(&scratch, &case, &tmp, true);
+    let report_path = tmp.join("report.json");
+    let mut report = read_json(&report_path);
+    report["patch"]["commit_files"] = json!([["first"], ["second"]]);
+    std::fs::write(&report_path, report.to_string()).unwrap();
+    let mut handlers =
+        read_json(&golden("push-to-pull-request-branch"))["attempts"][0]["handler_config"].clone();
+    handlers["add_comment"] = json!({"max":1, "target-repo":REPO, "target":"7"});
+    std::fs::write(tmp.join("handler-config.json"), handlers.to_string()).unwrap();
+
+    let forge = Forge::start(&self::seed(&case), vec![]);
+    let mut env = scratch.git_env();
+    env.extend(
+        [
+            ("PATH", std::env::var("PATH").unwrap()),
+            (
+                "RUNNER_TEMP",
+                scratch.path("runner-temp").display().to_string(),
+            ),
+            ("GH_AW_TMP", tmp.display().to_string()),
+            ("REPORT", report_path.display().to_string()),
+            (
+                "MADE",
+                tmp.join("safe-output-items.jsonl").display().to_string(),
+            ),
+            ("GH_TOKEN", TOKEN.into()),
+            ("TOKEN_IS_PAT", "true".into()),
+            ("OUTPUT_REPO", REPO.into()),
+            ("REPO", REPO.into()),
+            ("ITEM_REPO", REPO.into()),
+            ("BASE", "feature".into()),
+            ("FORK", FORK.into()),
+            ("COMMENT_TARGET", "7".into()),
+            ("BRANCH_PREFIX", String::new()),
+            ("ARTIFACT_PREFIX", String::new()),
+            ("TREE", String::new()),
+            ("REPLACEMENT_HEAD", replacement.clone()),
+            ("GITHUB_REPOSITORY", REPO.into()),
+            ("GITHUB_REPOSITORY_ID", "77".into()),
+            ("GITHUB_JOB", "apply".into()),
+            ("GITHUB_EVENT_NAME", "workflow_dispatch".into()),
+            ("GH_AW_JOB_CHECK_RUN_ID", "9001".into()),
+            ("GITHUB_RUN_ID", RUN_ID.into()),
+            ("GITHUB_RUN_ATTEMPT", "1".into()),
+            ("GITHUB_SERVER_URL", SERVER.into()),
+            ("GITHUB_API_URL", forge.url.clone()),
+        ]
+        .map(|(key, value)| (key.to_owned(), value)),
+    );
+    let (exit, guard, notes, _) = bash_step(doc, &scratch, GUARD_STEP, &env, str::to_owned);
+    assert_eq!(exit, 0, "{notes:?}");
+    assert_eq!(scratch.git(&fork, &["rev-parse", "feature"]), replacement);
+    for (variable, output) in [
+        ("GUARDED_PUSH", "guarded-push"),
+        ("GUARDED_PUSH_MADE", "guarded-push-made"),
+    ] {
+        assert_eq!(
+            step(doc, PUBLISH_STEP)["env"][variable].as_str().unwrap(),
+            format!("${{{{ steps.applied.outputs.{output} }}}}")
+        );
+        env.push((variable.into(), guard[output].clone()));
+    }
+    assert_eq!(guard["guarded-push"], replacement);
+    assert_eq!(guard["guarded-push-made"], "true");
+    let result = publish_steps(doc, &scratch, &forge, &env, &tmp);
+    assert_eq!(result["exit"], 0, "{result:#}");
+    for (key, value) in [
+        ("processed_count", "2"),
+        ("items_succeeded", "2"),
+        ("status", "success"),
+        ("code_push_failure_count", "0"),
+    ] {
+        assert_eq!(result["outputs"][key], value, "{result:#}");
+    }
+    let requests = &forge.state().requests;
+    let writes = writes(&json!(requests), &["publish"]);
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0]["path"], "/repos/owner/repo/issues/7/comments");
+    let body = writes[0]["body"]["body"].as_str().unwrap();
+    assert!(
+        body.starts_with(&format!(
+            "Fix run reply after its verified pushed commit `{replacement}`.\n\n{dispute}"
+        )),
+        "{body}"
+    );
+    let made = read_jsonl(&tmp.join("safe-output-items.jsonl"));
+    assert_eq!(made.as_array().unwrap().len(), 2, "{made}");
+    assert_eq!(made[0]["type"], push_type);
+    assert_eq!(made[1]["type"], "add_comment");
+}
+
 /// Runs CASE as apply.yml would: with PATHS, gh-aw's steps in the pinned
 /// checkouts, and without, the recorded guard's output in the guard's
 /// place and no gh-aw step; with NATIVE, the bounds routing the case's

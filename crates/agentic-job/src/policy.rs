@@ -60,14 +60,21 @@ const NOT_FOR_THE_JOB_TOKEN: &[(&str, &str)] = &[
 ];
 
 /// What a run may ask for in a repository the bounds admit only for a
-/// push to their `own_author`'s pull request: that push, and the outputs
-/// that write nothing to the forge.
+/// push to their `own_author`'s pull request: that push, one comment on
+/// that pull request ([`OWN_PULL_REQUEST_COMMENT`]), and the outputs that
+/// write nothing to the forge.
 const OWN_PULL_REQUEST_OUTPUTS: &[&str] = &[
     PUSH_TO_PULL_REQUEST_BRANCH,
+    OWN_PULL_REQUEST_COMMENT,
     NOOP,
     "missing_tool",
     MISSING_DATA,
 ];
+
+/// The one comment a fix run admitted by `own_author` may make, to
+/// dispute a review finding. Check holds it to the pull request the push
+/// goes to, and agentic-job publish posts it only once that push is made.
+const OWN_PULL_REQUEST_COMMENT: &str = "add_comment";
 
 /// The forge whose private-repository rules a bounds file's `push_repo`
 /// leaves as they are (docs/private-repositories.md).
@@ -385,9 +392,10 @@ impl Compile for Bounds {
         }
         // The operator's rule that the bot may always work on a pull
         // request it opened (#3162): a push to one by the login the bounds
-        // name is admitted outside `repos`. That admits the push and the
-        // outputs that write nothing, and no comment, label or close in a
-        // repository the bounds never listed.
+        // name is admitted outside `repos`. That admits the push, one
+        // comment on that pull request and the outputs that write nothing,
+        // and no label, close or other comment in a repository the bounds
+        // never listed.
         let own_author = limits
             .get(PUSH_TO_PULL_REQUEST_BRANCH)
             .and_then(|limit| limit.own_author.as_deref())
@@ -422,7 +430,8 @@ impl Compile for Bounds {
                     .map(|output| {
                         format!(
                             "output type {output:?} is not for {repo:?}, which the bounds admit \
-                             only for a push to their own_author's pull request"
+                             only for a push to, and one comment on, their own_author's pull \
+                             request"
                         )
                     }),
             );
@@ -611,10 +620,21 @@ impl Compile for Bounds {
             return Err(errors);
         };
 
-        // The lower of what was asked for and what the bounds allow.
+        // The lower of what was asked for and what the bounds allow, and
+        // one comment where only `own_author` admits the repository.
+        let cap = |output: &str| {
+            if by_author && output == OWN_PULL_REQUEST_COMMENT {
+                1
+            } else {
+                max
+            }
+        };
         let limit = |output: &str| OutputLimit {
             document: limits.get(output).and_then(|bound| bound.document.clone()),
-            max: limits.get(output).map_or(0, |bound| bound.max).min(max),
+            max: limits
+                .get(output)
+                .map_or(0, |bound| bound.max)
+                .min(cap(output)),
             allowed: limits.get(output).and_then(|bound| bound.allowed.clone()),
             blocked: limits
                 .get(output)
@@ -3885,17 +3905,25 @@ max_patch_files = 10
     }
 
     /// A push to the bounds' `own_author`'s pull request, in a repository
-    /// `repos` does not list, and what else that admits: nothing.
+    /// `repos` does not list, and what else that admits: one comment, and
+    /// no other write.
     #[test]
     fn own_author_admits_only_a_push_to_its_own_pull_request() {
         const BOT: &str = "example-bot";
         let mut bounds = push_bounds();
-        bounds
-            .outputs_mut()
-            .unwrap()
+        let outputs = bounds.outputs_mut().unwrap();
+        outputs
             .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
             .unwrap()
             .own_author = Some(BOT.into());
+        outputs.insert(
+            "add_labels".to_owned(),
+            OutputLimit {
+                max: 1,
+                allowed: Some(vec!["triage".to_owned()]),
+                ..OutputLimit::default()
+            },
+        );
         bounds.validate().unwrap();
         let ok = Request {
             repo: "upstream-org/project",
@@ -3965,8 +3993,16 @@ max_patch_files = 10
                     outputs: "push_to_pull_request_branch,add_comment",
                     ..ok
                 },
+                Ok(Some(BOT)),
+            ),
+            (
+                "a label beside the push",
+                Request {
+                    outputs: "push_to_pull_request_branch,add_labels",
+                    ..ok
+                },
                 Err(
-                    "output type \"add_comment\" is not for \"upstream-org/project\", which the bounds admit only for a push",
+                    "output type \"add_labels\" is not for \"upstream-org/project\", which the bounds admit only for a push",
                 ),
             ),
             (
@@ -4033,6 +4069,20 @@ max_patch_files = 10
                 (result, _) => panic!("{name}: {result:?}"),
             }
         }
+        // One comment, where the bounds allow three; `repos` keeps them.
+        let comment = |request: &Request<'_>| {
+            bounds
+                .compile(&Request {
+                    outputs: "push_to_pull_request_branch,add_comment",
+                    max_outputs: "max",
+                    ..*request
+                })
+                .unwrap()
+                .safe_outputs
+                .max_of("add_comment")
+        };
+        assert_eq!(comment(&ok), Some(1));
+        assert_eq!(comment(&push_request()), Some(3));
         // Off by default: the same request without the key is refused.
         let errors = push_bounds().compile(&ok).unwrap_err();
         assert!(

@@ -93,12 +93,26 @@ impl Measure {
 /// said. A field of
 /// another shape is the collector's to refuse.
 pub fn refusals(request: &Map<String, Value>) -> Vec<String> {
+    refusals_with_extra_length(request, 0)
+}
+
+/// Like [`refusals`], with an additional native-only suffix in UTF-16 units.
+pub(super) fn refusals_with_extra_length(
+    request: &Map<String, Value>,
+    extra: usize,
+) -> Vec<String> {
     let output = request.get("type").and_then(Value::as_str);
     LIMITS
         .iter()
         .filter(|limit| Some(limit.output.as_str()) == output)
         .filter_map(|limit| {
             let written = limit.measure.of(request.get(&limit.field)?)?;
+            let footer = limit.footer
+                + if matches!(limit.measure, Measure::Length) {
+                    extra
+                } else {
+                    0
+                };
             let error = |got: usize| {
                 limit
                     .message
@@ -107,11 +121,11 @@ pub fn refusals(request: &Map<String, Value>) -> Vec<String> {
             };
             if written > limit.max {
                 Some(error(written))
-            } else if written + limit.footer > limit.max {
+            } else if written + footer > limit.max {
                 Some(format!(
                     "{} (apply and gh-aw's footer add {} of those)",
-                    error(written + limit.footer),
-                    limit.footer
+                    error(written + footer),
+                    footer
                 ))
             } else {
                 None

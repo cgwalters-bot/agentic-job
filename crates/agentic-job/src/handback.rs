@@ -1293,6 +1293,56 @@ mod tests {
         }
     }
 
+    /// A fix run admitted by `own_author` hears from `handback check` what
+    /// the trusted check, given its pull request, says of its comment.
+    #[test]
+    fn own_author_handback_accepts_its_comment_with_the_push() {
+        let (dir, mut run) = home(json!({"add_comment": {"max": 1}, "noop": {"max": 1}}));
+        run.policy.safe_outputs = serde_json::from_value(json!({
+            "add_comment": {"max": 1},
+            "noop": {"max": 1},
+            "push_to_pull_request_branch": {
+                "max": 1, "target": "7", "head": run.base, "author": "example-bot",
+                "protected_files": [], "protect_top_level_dot_folders": true,
+                "protected_files_policy": "blocked", "max_patch_size": 65536,
+                "max_patch_files": 10,
+            },
+        }))
+        .unwrap();
+        run.policy.validate().unwrap();
+        std::fs::write(run.checkout.join("a.txt"), "two\n").unwrap();
+        std::fs::write(
+            dir.path().join(AGENT_OUTCOME),
+            r#"{"summary":"Done.","tests":[],"stopped_early":null}"#,
+        )
+        .unwrap();
+        let push = json!({"type": "push_to_pull_request_branch", "message": "Fix a"});
+        let comment = json!({"type": "add_comment", "body": "The finding does not apply."});
+        let routed = "an add_comment in a run admitted for its own_author's pull request, where \
+                      native_handlers does not route both add_comment and \
+                      push_to_pull_request_branch to agentic-job publish";
+        let native = ["add_comment", "push_to_pull_request_branch"].map(str::to_owned);
+        for (requests, routes, want) in [
+            ([&push, &comment], &native[..], None),
+            ([&comment, &push], &native[..], None),
+            ([&push, &comment], &[][..], Some(routed)),
+        ] {
+            run.policy.native_handlers = routes.to_vec();
+            let lines = requests.map(Value::to_string).join("\n");
+            std::fs::write(dir.path().join(AGENT_OUTPUTS), lines).unwrap();
+            let problems: Vec<String> = validate(dir.path(), &run)
+                .unwrap()
+                .problems
+                .into_iter()
+                .map(|problem| problem.what)
+                .collect();
+            match want {
+                None => assert_eq!(problems, Vec::<String>::new()),
+                Some(want) => assert_eq!(problems, [want], "{requests:?}"),
+            }
+        }
+    }
+
     fn pull_requests() -> Value {
         json!({
             "create_pull_request": {

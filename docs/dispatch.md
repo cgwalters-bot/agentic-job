@@ -97,7 +97,14 @@ with globs of the branches a fix may push to; see
 [pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch).
 With `own_author` set to the applying account's login there, a fix of a
 pull request that account opened is admitted in a repository `repos` does
-not list. The scripted session is implement's.
+not list. Such a fix may also comment once on that pull request, after
+its push, but only where the caller opts in: this workflow's fix profile
+requests no `add_comment`, so a caller adds it to the profile's `outputs`
+(`outputs: all` already requests it), lists it in the bounds with both it
+and `push_to_pull_request_branch` in `native_handlers`, passes the pull
+request as the comment target, and leaves `max-outputs` room for both
+requests.
+The scripted session is implement's.
 
 A target with issues turned off can take its item from another repository:
 `-f item-repo=OWNER/TRACKER` with an issue number there, for `implement`,

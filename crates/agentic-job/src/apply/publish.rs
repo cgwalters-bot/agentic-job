@@ -117,5 +117,10 @@ fn publish_all(args: &Args) -> Result<bool> {
             crate::run::enter::one_line(&line.text)
         );
     };
-    apply(&checked, &run, &publisher, &records, &mut log)
+    let commit = std::env::var("GUARDED_PUSH").unwrap_or_default();
+    let guarded = (!commit.is_empty()).then_some(GuardedPush {
+        commit: &commit,
+        made: std::env::var("GUARDED_PUSH_MADE").as_deref() == Ok("true"),
+    });
+    apply_with_guarded_push(&checked, guarded, &run, &publisher, &records, &mut log)
 }
