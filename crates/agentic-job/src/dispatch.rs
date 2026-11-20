@@ -100,7 +100,9 @@ what a weakened permission, gate, bound, pin, token placement or trigger now let
 change that should not exist as written, because an existing mechanism, another place or \
 language the project's conventions name, or a much smaller change would do the same, is also a \
 blocker: report it as \"should not exist as written: X instead\", naming X. \
-Anything less is important or a nit. For supply-chain hardening, a blocker requires that the \
+Anything less is important or a nit. A finding that requires malicious control of a trusted ref \
+or configuration already granting that authority is at most important, unless the change weakens \
+that boundary. For supply-chain hardening, a blocker requires that the \
 change newly runs third-party code with a write credential in reach, including in apply, with a \
 PAT, in a write-permission pull_request_target job, or on the broker host. Otherwise \
 supply-chain findings are important at most and go under Follow-ups. Supply-chain hardening is \

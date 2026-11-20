@@ -173,14 +173,11 @@ is proven by the offline tests.
 Each finding is tagged blocker, important or nit, and only a blocker earns
 CHANGES. The standing task requires a concrete failure of the change's main
 purpose or a material defect the change introduces or makes reachable. It
-groups findings by cause and asks for the root fix. A re-review treats an
-otherwise blocking finding as a follow-up only when the same failure was
-already introduced or made reachable by the last reviewed revision relative
-to its own base, and the prior findings show no unresolved blocker for it.
-A failure of the main purpose, a security hole, data loss or a
-confirmed dependency-integrity failure introduced or made reachable by the
-pull request still blocks in any round. Carried blockers must satisfy the
-same concrete-defect rules.
+groups findings by cause and asks for the root fix. With a verified prior
+review, [re-reviews](#review-history) also distinguish regressions in the
+latest changes from newly reported defects that the last review could have
+seen. Both tasks cap findings that require malicious control of already trusted
+configuration or refs at important, unless the change weakens that boundary.
 Both prompts ask for every finding in one pass
 and, in an approving review, for important findings and nits under
 "Follow-ups" with file and line, for later pull requests; a fix for a blocker
@@ -489,17 +486,42 @@ asks the reviewer to say first, per earlier finding, whether the new head
 resolves it, confirmed in its code and citing the commit, and to record
 each resolved one on a `Resolved:` line, so the next round's file carries
 it; a `resolved_by`, reply or comment is a claim to check, and a finding
-that still holds is raised again. Then it reviews the whole diff, looking
-first at code changed since the last review when it can identify those changes.
-History is a hint, not a basis for demoting a finding. The reviewer must
-independently identify the latest verdict across reviews and comments, verify
-that a review actually ran at its exact head, compare that revision with its
-own base, and check the prior verdicts and findings, including inline ones.
-A carried approval or a comment-only verdict without an independent
-head binding does not establish a reviewed baseline. A guessed SHA, an
-unavailable tree, or an earlier severity label does not prove the failure
-was already present. When the comparison is inconclusive, the reviewer
-applies the ordinary rules to the whole diff.
+that still holds is raised again. Related findings are grouped by their
+verified cause, not just a similar symptom.
+
+With `REVIEW_HISTORY=true`, authors and maintainers can put evidence disputing
+earlier findings in a "Disputed" section near the top of the PR description.
+Automated fix runs leave the description alone. Editing it doesn't trigger a
+review: add the dispute before the next review starts, or ask someone with
+write access to request `/review`. An edit after policy captures the description
+isn't visible to that run. The reviewer answers each matching history ID once;
+IDs no longer in the supplied history are ignored. It drops or downgrades a
+finding only if the admitted code confirms evidence that refutes it or changes
+its severity.
+
+The reviewer still examines the whole diff. Re-review scoping needs a verified
+comparison with the latest verdict across submitted reviews and PR comments:
+a review must have actually run at an independently bound head whose tree and
+base can be compared with the current revision. An unbound verdict comment,
+a carried approval or an unavailable
+comparison after a rewrite leaves the first-review rules in force. Earlier
+findings and disputes remain leads, not proof. The SHA in a verdict comment
+is prose, so scoped re-reviews need verdicts submitted as reviews, which
+[`AGENT_REAL_REVIEWS=true`](#real-reviews-and-the-poll-contract) provides.
+With it unset, or where submission fell back to a comment, history still
+tracks findings and disputes, but each re-review applies first-review rules.
+
+With that comparison, an unresolved blocker still blocks if it meets the
+ordinary rubric. A material, concrete regression introduced or made reachable
+since the last review can also block, even if it occurs in older code. In that
+case, show why the last reviewed revision did not put the failure in scope.
+Another failure already in scope at that review blocks only with a concrete
+trigger and an evidenced reason the last review missed it, such as its Tried
+section showing it never ran the failing invocation; an unknown reason sends
+it to Follow-ups. A confirmed failure of the change's
+main purpose, data loss, security hole or dependency-integrity failure that the
+PR introduces or makes reachable can still block without an explanation for the
+miss. The ordinary severity limits still apply.
 Check holds the verdict to its usual bounds;
 the `Resolved:` lines are text in it, which only the next history reads.
 
@@ -758,7 +780,7 @@ It needs these repository or organization variables, and with a broker no secret
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
 | `REVIEW_BOT_IDS` | optional, a JSON array of the user ids of bots whose pull requests are reviewed automatically ([above](#pull-request-review)); its bounds must list their logins too |
 | `REVIEW_CARRY_APPROVAL` | optional, `true` carries an approval across a rebase or rustfmt-only push ([above](#carried-approvals)) |
-| `REVIEW_HISTORY` | optional, `true` gives the agent the pull request's earlier reviews ([above](#review-history)) |
+| `REVIEW_HISTORY` | optional, `true` gives the agent the pull request's earlier reviews ([above](#review-history)); scoped re-reviews also need `AGENT_REAL_REVIEWS` |
 | `REVIEW_POOLS` | for dispatched reviews, a JSON object mapping each pool to its `agent`, `model` and optional `config` ([above](#dispatched-reviews)); unset refuses every dispatch |
 | `REVIEW_RECORD_ONLY` | optional, a JSON array of user ids whose fork pull requests' pushes only record that the head needs a dispatched review ([above](#record-only-pushes)); for them it also carries approvals as `REVIEW_CARRY_APPROVAL` does, whether or not that is set |
 
