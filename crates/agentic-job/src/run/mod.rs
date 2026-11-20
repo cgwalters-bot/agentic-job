@@ -150,10 +150,10 @@ pub struct Args {
     /// wrote, put in the agent's home as review-history.json
     #[arg(long, value_name = "FILE", requires = "review_head")]
     pub review_history: Option<PathBuf>,
-    /// The issue or pull request the run was made for, whose new comments
-    /// and body edits the agent is sent while it works where the
-    /// configuration says (`[session] watch-item`)
-    #[arg(long, value_name = "OWNER/NAME#NUMBER")]
+    /// Item to watch with `[session] watch-item`: GitHub's
+    /// `OWNER/NAME#NUMBER` (new comments and body edits), or a public
+    /// GitLab issue's `https://` address (new public comments only)
+    #[arg(long, value_name = "ITEM")]
     pub watch_item: Option<String>,
     /// Trusted runner configuration. External isolation uses this without
     /// setup; managed jobs use the default root-owned copy setup made.
@@ -459,21 +459,48 @@ fn github_token() -> Result<Option<String>> {
 }
 
 /// The watch of the run's ITEM, polled at INTERVAL where the configuration
-/// asks for one, with the agent's own read-only TOKEN and nothing more:
-/// a run without that token or without an item says why it watches
-/// nothing. GitHub's API is at API, where the CI system says it is.
-/// The item is read only then: a run that watches nothing never fails
-/// for it.
+/// asks for one. A run without an item says why it watches nothing.
+///
+/// Which forge the item is on is what the caller named and nothing else:
+/// a `https://` address is a GitLab issue, read anonymously
+/// at the installation SERVER the caller names
+/// and the item must be under; anything else is GitHub's
+/// `OWNER/NAME#NUMBER`, read with the agent's own token at API, where
+/// the CI system says it is.
 fn watch_item(
     interval: Option<Duration>,
     item: Option<&str>,
-    token: Option<String>,
+    github: Option<String>,
+    server: Option<String>,
     api: Option<String>,
 ) -> Result<Option<Watch>> {
     let Some(interval) = interval else {
         return Ok(None);
     };
-    let (Some(item), Some(token)) = (item, token) else {
+    let Some(item) = item else {
+        eprintln!(
+            "warning: session.watch-item is set, but the run's item is not watched: it needs \
+             --watch-item"
+        );
+        return Ok(None);
+    };
+    if item.starts_with("https://") {
+        let Some(server) = server.filter(|server| !server.is_empty()) else {
+            eprintln!(
+                "warning: session.watch-item is set, but the run's item is not watched: it \
+                 needs the GitLab installation's address {}",
+                steer::gitlab::SERVER_VAR
+            );
+            return Ok(None);
+        };
+        let target = steer::gitlab::Target::parse(item, &server)?;
+        return Ok(Some(Watch::Gitlab(steer::gitlab::Watch {
+            target,
+            interval,
+            roots: crate::sandbox::setup::agents::system_roots(),
+        })));
+    }
+    let Some(token) = github else {
         eprintln!(
             "warning: session.watch-item is set, but the run's item is not watched: it needs \
              --watch-item and the read-only token {}",
@@ -727,6 +754,7 @@ impl Plan {
             watch,
             args.watch_item.as_deref(),
             github_token()?,
+            std::env::var(steer::gitlab::SERVER_VAR).ok(),
             std::env::var(API_URL_VAR).ok(),
         )?;
         if limits.max_requests.is_none() && limits.budget_aic.is_none() {
@@ -809,8 +837,7 @@ impl Plan {
         if let (true, Some(home)) = (args.runner_gate, &args.runner_home) {
             ensure!(
                 !asks_watch,
-                "run --runner-gate: session.watch-item reads the run's item with the agent's \
-                 GitHub token, which a hardened run does not give it"
+                "run --runner-gate: a hardened run does not allow session.watch-item"
             );
             gate::check(&config, home)?;
         }
@@ -2310,13 +2337,15 @@ mod tests {
             (minute, Some("o/r"), token(), None, Err("OWNER/NAME#NUMBER")),
         ];
         for (interval, item, token, api, want) in cases {
-            let got = watch_item(interval, item, token, api.clone());
+            let server = Some("https://gitlab.example".to_owned());
+            let got = watch_item(interval, item, token, server, api.clone());
             match want {
                 Ok(want) => {
                     let got = got.unwrap();
                     assert_eq!(
                         got.as_ref().map(|w| match w {
                             Watch::Github(w) => w.api.as_str(),
+                            Watch::Gitlab(_) => unreachable!(),
                         }),
                         want,
                         "{item:?} {api:?}"
@@ -2324,6 +2353,7 @@ mod tests {
                     if let Some(watch) = got {
                         let (token, interval) = match &watch {
                             Watch::Github(w) => (w.token.as_str(), w.interval),
+                            Watch::Gitlab(_) => unreachable!(),
                         };
                         assert_eq!((token, interval), ("t", Duration::from_secs(60)));
                     }
@@ -2333,6 +2363,81 @@ mod tests {
                     assert!(e.contains(want), "{e}");
                 }
             }
+        }
+    }
+
+    /// A `https://` item is a GitLab issue, read at the installation the
+    /// caller names — any path it is mounted under included, nowhere
+    /// else, whatever the GitHub API and token settings say.
+    #[test]
+    fn what_watches_a_gitlab_item() {
+        let minute = Some(Duration::from_secs(60));
+        let token = || Some("t".to_owned());
+        let some = |s: &str| Some(s.to_owned());
+        let server = || some("https://gitlab.example");
+        let item = "https://gitlab.example/g/s/p/-/issues/7";
+        let mounted = "https://shared.example/gitlab/g/s/p/-/issues/7";
+        for (item, github, server, api, want) in [
+            (item, token(), server(), None, {
+                Some("https://gitlab.example")
+            }),
+            (item, token(), None, None, None),
+            (item, None, server(), some("https://elsewhere/api"), {
+                Some("https://gitlab.example")
+            }),
+            (
+                mounted,
+                None,
+                some("https://shared.example/gitlab/"),
+                None,
+                Some("https://shared.example/gitlab"),
+            ),
+        ] {
+            let got = watch_item(minute, Some(item), github, server, api.clone());
+            let got = got.unwrap();
+            assert_eq!(
+                got.as_ref().map(|w| match w {
+                    Watch::Gitlab(w) => w.target.server.as_str(),
+                    Watch::Github(_) => unreachable!(),
+                }),
+                want,
+                "{item} {api:?}"
+            );
+            if let Some(Watch::Gitlab(watch)) = &got {
+                assert_eq!(watch.interval, Duration::from_secs(60));
+            }
+        }
+        for (item, server, why) in [
+            (
+                "https://gitlab.example/g/p/-/issues/x",
+                server(),
+                "is not a GitLab issue",
+            ),
+            (
+                "https://gitlab.example/p/-/issues/1",
+                server(),
+                "is not a GitLab issue",
+            ),
+            (
+                "https://gitlab.example/g/p/merge_requests/1",
+                server(),
+                "is not a GitLab issue",
+            ),
+            // Not under the installation the caller names.
+            (
+                "https://shared.example/g/p/-/issues/1",
+                some("https://shared.example/gitlab"),
+                "is not a GitLab issue",
+            ),
+            (item, some("http://gitlab.example"), "CI_SERVER_URL"),
+        ] {
+            let e = format!(
+                "{:#}",
+                watch_item(minute, Some(item), token(), server, None)
+                    .err()
+                    .unwrap()
+            );
+            assert!(e.contains(why), "{item}: {e}");
         }
     }
 

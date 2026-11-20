@@ -27,6 +27,7 @@
 //! as a prompt queued behind the step it is on for one that takes notices.
 
 pub mod github;
+pub mod gitlab;
 
 use std::time::Duration;
 
@@ -88,12 +89,14 @@ pub fn interval(table: &config::Session) -> Result<Option<Duration>> {
 #[derive(Clone)]
 pub enum Watch {
     Github(github::Watch),
+    Gitlab(gitlab::Watch),
 }
 
 impl Watch {
     fn poller(self) -> Poller {
         match self {
             Watch::Github(watch) => Poller::Github(github::Poller::new(watch)),
+            Watch::Gitlab(watch) => Poller::Gitlab(gitlab::Poller::new(watch)),
         }
     }
 }
@@ -246,18 +249,21 @@ pub(crate) fn polled(
 /// The poller of whichever forge the watched item is on.
 enum Poller {
     Github(github::Poller),
+    Gitlab(gitlab::Poller),
 }
 
 impl Poller {
     fn poll(&mut self) -> (Vec<Seen>, Duration) {
         match self {
             Poller::Github(poller) => poller.poll(),
+            Poller::Gitlab(poller) => poller.poll(),
         }
     }
 
     fn done(&self) -> bool {
         match self {
             Poller::Github(poller) => poller.done(),
+            Poller::Gitlab(poller) => poller.done(),
         }
     }
 }

@@ -478,7 +478,7 @@ watch-item = true
 watch-seconds = 60   # the default; 10 to 3600
 ```
 
-`run` polls the issue or pull request the run is for (`--watch-item`,
+For GitHub, `run` polls the issue or pull request the run is for (`--watch-item`,
 which the reusable workflow sets from the event or the `issue` input)
 with the agent's own read-only token, and sends the agent each comment
 made on it (not a pull request's review comments), and each edit of the
@@ -488,11 +488,48 @@ the token or an item it watches nothing, and says so. The polls are
 conditional (`If-None-Match`), so an unchanged item costs no rate limit,
 and a poll GitHub refuses for a limit waits as long as GitHub asks.
 
+A GitLab item is watched too, where `--watch-item` names its web
+address instead: `SERVER/GROUP/…/PROJECT/-/issues/NUMBER` (nested
+namespaces as the address writes them), where SERVER is the GitLab
+installation's web address in `CI_SERVER_URL`, any path it is mounted
+under included (`https://example.org/gitlab`). GitLab CI sets it; a
+caller elsewhere sets it, and without it the run watches nothing. An
+item not under it is refused, since the item's address alone cannot say
+where an installation under a path ends. The issue is read under that
+server only: the page URLs are built from it, and redirects are refused.
+GitLab watches use the GraphQL notes connection anonymously, with GET
+requests, which an egress policy that admits reads alone lets through,
+and read only publicly readable issues in public projects. No token is
+used. Only notes GitLab marks as neither internal nor system notes are
+delivered; internal text must not enter transcripts that may be
+published. A gated run refuses the watch on either forge.
+The installation's certificate must chain to a certificate in
+`SSL_CERT_FILE` or, without it, in the system's CA bundle
+(`/etc/ssl/certs/ca-certificates.crt` or
+`/etc/pki/tls/certs/ca-bundle.crt`), where an egress proxy's authority
+is installed; with neither, to the Mozilla roots in the binary.
+Only comments made in the session watch's starting second or later are
+updates, because the API reports whole seconds. Comments from earlier
+checkout or preparation are not picked up, and edits do not replay them.
+Each poll asks for comments alone, starts with the newest page and
+follows GitLab's cursors back to the first page with a comment older
+than the watch, so an idle issue costs one page a poll; it has
+a two-second deadline and bounds of twenty requests and 8 MiB. A page over
+1 MiB is requested in smaller pages. If a single note exceeds the page
+bound, the run logs that it skipped the note and reads only its cursor.
+A poll that stops at its bounds or at a page GitLab refuses delivers
+the notes it read and logs why it stopped; the next reads them all
+again, so a note it did not reach comes later, and one past the bounds
+is not read while it stays there. A poll GitLab refuses for a rate limit with a `Retry-After` in
+seconds waits that long, but no less than the poll interval and at
+most an hour.
+
 Every update is passed on, whoever wrote it, and none claims authority:
 it is quoted with its author and link as new input on the item, which
 the agent weighs as any other text it reads. Anyone who can comment on
-the item could already put text before an agent that reads it with `gh`.
-A run takes at most ten updates, each cut to 8000 characters.
+the item could already put text before an agent that reads it with the
+forge's own tools (`gh`, `glab`). A run takes at most ten updates, each
+cut to 8000 characters.
 
 Updates go into a running turn only: by claude-agent-acp's
 `_session/steering` for an entry with `steering = true`, which asks the

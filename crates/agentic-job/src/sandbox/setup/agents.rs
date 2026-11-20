@@ -475,8 +475,10 @@ const CA_BUNDLES: [&str; 2] = [
     "/etc/pki/tls/certs/ca-bundle.crt",
 ];
 
-fn http() -> Result<ureq::Agent> {
-    let mut tls = ureq::tls::TlsConfig::builder();
+/// The roots of the first of `SSL_CERT_FILE` and [`CA_BUNDLES`] that has
+/// a certificate, or ureq's own: the system's, so that an egress proxy's
+/// authority installed there is trusted without turning verification off.
+pub fn system_roots() -> ureq::tls::RootCerts {
     let bundles = std::env::var_os("SSL_CERT_FILE")
         .map(PathBuf::from)
         .into_iter()
@@ -489,9 +491,14 @@ fn http() -> Result<ureq::Agent> {
             })
             .collect();
         if !certs.is_empty() {
-            tls = tls.root_certs(ureq::tls::RootCerts::new_with_certs(&certs));
+            return ureq::tls::RootCerts::new_with_certs(&certs);
         }
     }
+    ureq::tls::RootCerts::WebPki
+}
+
+fn http() -> Result<ureq::Agent> {
+    let tls = ureq::tls::TlsConfig::builder().root_certs(system_roots());
     Ok(ureq::Agent::config_builder()
         .tls_config(tls.build())
         .timeout_global(Some(FETCH_TIMEOUT))
