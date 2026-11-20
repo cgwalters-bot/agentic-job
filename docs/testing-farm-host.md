@@ -287,6 +287,114 @@ for validation work (the guest's test harness, running as root, may
 gather host facts the container agent then reasons about — a useful
 pattern, but a caller concern, not a contract).
 
+## Interactive attach over an egress-only relay
+
+> Design only. Nothing in this section is built, specified for
+> configuration, or scheduled; no runtime configuration key or broker
+> deployment exists for it. It is written to state a contract that
+> would have to be accepted before any of it is.
+
+Everything above treats the run as unattended: the guest does its
+work and posts one proposal. The tailnet bridge that a runner-based
+session run offers
+([interactive sessions](interactive.md)) cannot simply be reused
+here, because its premise does not hold on a Testing Farm guest: the
+guest is egress-only. Nothing can dial in to the VM's bridge, so the
+tailnet listener — and likewise the `[session] bind` attach-gateway
+path, which assumes the gateway can reach the job's port — has no
+counterpart. The design below is the shape an interactive channel
+would have to take instead: the guest dials out.
+
+**Comparison with the removed relay.** This is not a new idea in this
+tree. Commit `c26b3b4` introduced an outbound relay for exactly this
+purpose — attach without inbound connectivity — and commit `9b1461c`
+replaced it with the inbound tailnet bridge; the session spec records
+the removal ([session.md](../specs/session.md), "Breaking change to
+unreleased behaviour"). The assumptions that made removal right there
+do not hold here. On a runner, the machine is long-lived and can
+accept incoming connections on a tailnet, so a relay was extra moving
+surface for no need; a Testing Farm guest is single-use and
+egress-only, so an outbound connection is the only option short of no
+interactive channel at all. The relay also differs from the one
+removed in one structural way: it must terminate at the bridge's
+existing WebSocket interface, not carry a new protocol of its own.
+
+**What it would bridge.** The implemented attach interface is the
+TCP/WebSocket listener in `session/bridge.rs`: `session/new` with a
+`since` cursor, `session/prompt`, `session/cancel` and
+`_session/status`; client-supplied `mcpServers` is ignored, every
+other request is refused, permission requests stay with the run's
+policy, and replay and reconnect are bounded (a fixed notification
+budget, one client slot, an idle timeout, close-frame semantics). A
+relay prototype is a *transport* in front of that interface — the
+guest-side half connects to the bridge's WebSocket as the one client,
+the operator-side half serves the same WebSocket protocol — and never
+a splice of raw ACP stdio. Raw proxying would bypass the bridge's
+method restrictions and its permission handling, and would hand the
+client the agent's unredacted stream; the relay has no such
+authority. (The root-only Unix-socket bridge in specs/session.md's
+alternative design (b) is a different, runner-shaped proposal and is
+not what this extends.) The semantics it must add are
+connection-loss semantics: today a normal client close ends the
+session, and a relay hop that drops must not be indistinguishable
+from the operator leaving on purpose; and after a reconnect, a prompt
+whose answer is uncertain is not replayed, to avoid duplicate work —
+the same rule the existing client already follows.
+
+**Credentials.** The relay credential authorizes only this run's chat
+transport. It is not a forge credential and confers no write
+authority — nothing over it reaches the end-of-run check or apply.
+Required properties, none of which exist today:
+
+- Two separate short-lived, run-scoped capabilities: one for the
+  guest to connect out, one for the operator to connect in. A guest
+  that steals its own capability must not thereby gain the
+  operator's.
+- Trusted-caller registration: the caller's submit job registers the
+  run's relay session with the broker, and the broker admits
+  connections only for registered runs — role separation between the
+  party that registers (the caller) and the parties that connect.
+- TLS on both legs, expiration tied to the run's deadline, and
+  cleanup of the broker-side session state when the run is terminal.
+- Bounded message sizes and queue depths, the bridge's existing
+  replay/reconnect semantics carried through, and an explicit
+  retention and access policy for the broker-side transcript: what it
+  keeps, for how long, and who may read it.
+
+**Threat model.** Assume the guest can steal its own relay
+capability, as it can every value in its environment. With that, it
+must not gain: the operator's identity, access to another run's
+session, any CI or forge write credential, authority to change the
+run's policy, or any approval role over apply. A more uncomfortable
+point must be stated plainly: a broker that carries session traffic
+sees the chat — the agent's reasoning over private code, tracker
+content, and whatever the operator types. That makes the broker a
+sensitive data processor, which is an architectural decision about
+who may see the work, not a transport detail. Choosing to run one is
+choosing a party to trust with the transcript; the same choice does
+not arise for the tailnet bridge, where the traffic stays on the
+operator's own network.
+
+This must also stay separate from two adjacent open questions: it is
+not the inference-credential broker question (a relay capability
+must never double as a model key or vice versa), and it is not
+mid-session apply. Writes wait for the end-of-run apply either way.
+
+**Honest v0.** None of this is needed for the v0 interactive channel
+on TF guests, which already exists in the reference deployment's
+shape: steering through the tracker — the operator writes an issue
+note, the agent polls for it with its read-only token. That is slow,
+but it needs no new credential, no new trust decision, and no
+broker. The relay is a future option, gated on acceptance of the
+auth/confidentiality/lifecycle contract above. Context, not
+endorsement: the session architecture and its history are tracked in
+[#536](https://github.com/cgwalters-forge/agentic-job/issues/536);
+the bind/attach-secret path closed a related precedent in
+[#3249](https://github.com/cgwalters-forge/agentic-job/issues/3249);
+[#3617](https://github.com/cgwalters-forge/agentic-job/issues/3617)
+carries the packaging context. None of those issues proposes or
+endorses this design.
+
 ## Open questions
 
 - **Inference on ephemeral guests.** Is a documented
