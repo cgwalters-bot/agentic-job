@@ -481,21 +481,21 @@ fn watch_item(
         );
         return Ok(None);
     };
-    let item: steer::Item = item.parse()?;
+    let item: steer::github::Item = item.parse()?;
     let api = api
         .filter(|url| !url.is_empty())
-        .unwrap_or_else(|| steer::DEFAULT_API.to_owned());
+        .unwrap_or_else(|| steer::github::DEFAULT_API.to_owned());
     // The token goes with every request.
     ensure!(
         api.starts_with("https://"),
         "{API_URL_VAR} {api:?} is not an https URL"
     );
-    Ok(Some(Watch {
+    Ok(Some(Watch::Github(steer::github::Watch {
         item,
         api: api.trim_end_matches('/').to_owned(),
         token,
         interval,
-    }))
+    })))
 }
 
 /// Refuses a provider's KEY that is also the agent's read-only GitHub
@@ -2284,14 +2284,14 @@ mod tests {
                 Some("o/r#1"),
                 token(),
                 None,
-                Ok(Some(steer::DEFAULT_API)),
+                Ok(Some(steer::github::DEFAULT_API)),
             ),
             (
                 minute,
                 Some("o/r#1"),
                 token(),
                 some(""),
-                Ok(Some(steer::DEFAULT_API)),
+                Ok(Some(steer::github::DEFAULT_API)),
             ),
             (
                 minute,
@@ -2315,15 +2315,17 @@ mod tests {
                 Ok(want) => {
                     let got = got.unwrap();
                     assert_eq!(
-                        got.as_ref().map(|w| w.api.as_str()),
+                        got.as_ref().map(|w| match w {
+                            Watch::Github(w) => w.api.as_str(),
+                        }),
                         want,
                         "{item:?} {api:?}"
                     );
                     if let Some(watch) = got {
-                        assert_eq!(
-                            (watch.token.as_str(), watch.interval),
-                            ("t", Duration::from_secs(60))
-                        );
+                        let (token, interval) = match &watch {
+                            Watch::Github(w) => (w.token.as_str(), w.interval),
+                        };
+                        assert_eq!((token, interval), ("t", Duration::from_secs(60)));
                     }
                 }
                 Err(want) => {
