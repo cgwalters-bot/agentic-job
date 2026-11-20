@@ -1620,12 +1620,12 @@ impl StubItem {
                 );
             }
         });
-        Watch {
+        Watch::Github(agentic_job::session::steer::github::Watch {
             item: "o/r#7".parse().unwrap(),
             api,
             token: "read-token".to_owned(),
             interval: Duration::from_millis(100),
-        }
+        })
     }
 
     /// After AFTER, someone comments with TEXT; its link.
