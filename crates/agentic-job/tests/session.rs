@@ -1797,6 +1797,138 @@ fn updates_of_the_item_reach_the_turn() {
     }
 }
 
+/// A GitLab issue's notes, served on loopback as the notes API would:
+/// newest first, one page.
+#[derive(Clone, Default)]
+struct StubGitLabItem(Arc<Mutex<GitLabItemState>>);
+
+#[derive(Default)]
+struct GitLabItemState {
+    notes: Vec<Value>,
+}
+
+impl StubGitLabItem {
+    /// Serves the issue's notes on loopback; the watch of it polls every
+    /// 100ms.
+    fn serve(&self) -> Watch {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let state = self.0.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) == 0
+                        || line == "\r\n"
+                    {
+                        break;
+                    }
+                    head.push_str(&line.to_ascii_lowercase());
+                }
+                assert!(head.contains("authorization: bearer read-token"), "{head}");
+                let body = {
+                    let s = state.lock().unwrap();
+                    let mut notes = s.notes.clone();
+                    notes.reverse();
+                    Value::from(notes).to_string()
+                };
+                let _ = (&stream).write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        Watch::Gitlab(agentic_job::session::steer::gitlab::Watch {
+            target: agentic_job::session::steer::gitlab::Target {
+                origin,
+                project: "g/p".to_owned(),
+                iid: 7,
+            },
+            token: "read-token".to_owned(),
+            interval: Duration::from_millis(100),
+        })
+    }
+
+    /// After AFTER, someone comments with TEXT; its link, on ITEM.
+    fn comment(&self, after: Duration, id: u64, text: &str, item: &str) -> String {
+        let (state, text) = (self.0.clone(), text.to_owned());
+        let url = format!("{item}#note_{id}");
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            state.lock().unwrap().notes.push(json!({"id": id,
+                "created_at": now, "body": text, "system": false,
+                "author": {"username": "someone"}}));
+        });
+        url
+    }
+}
+
+/// What changes on the run's GitLab item reaches the agent during its
+/// turn as GitHub's does: steered into the turn for an agent that takes
+/// `_session/steering`, queued as a notice for one that takes notices.
+/// Only a note made after the watch began is an update, and each is sent
+/// once.
+#[test]
+fn gitlab_notes_of_the_item_reach_the_turn() {
+    const SCRIPT: &str = r#"[{"sleep": 3}, {"say": "Done."}]"#;
+    let cases = [
+        ("steered", true, true, "_session/steering"),
+        ("as a notice", false, false, "session/prompt"),
+    ];
+    for (name, no_notices, steering, method) in cases {
+        let stub = StubGitLabItem::default();
+        let watch = stub.serve();
+        let item = match &watch {
+            Watch::Gitlab(w) => format!("{}/g/p/-/issues/7", w.target.origin),
+            Watch::Github(_) => unreachable!(),
+        };
+        let comment = stub.comment(Duration::from_millis(500), 41, "Also do Z.\nThanks", &item);
+        let r = run(
+            SCRIPT_MODE,
+            Setup {
+                no_notices,
+                steering,
+                watch: Some(watch),
+                files: &[("script.json", SCRIPT)],
+                timeout_s: 60,
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, 0, "success");
+        assert_eq!(r.result["stop_reason"], "end_turn", "{name}");
+        let sent: Vec<&Value> = r
+            .records
+            .iter()
+            .filter(|x| x["dir"] == "send")
+            .map(|x| &x["msg"])
+            .filter(|m| m["params"]["_meta"]["botHarness"]["notice"] == "update")
+            .collect();
+        assert_eq!(sent.len(), 1, "{name}: {sent:?}");
+        let m = sent[0];
+        assert_eq!(m["method"], method, "{name}");
+        assert_eq!(
+            m["params"]["_meta"]["botHarness"]["url"].as_str().unwrap(),
+            comment,
+            "{name}"
+        );
+        let text = m["params"]["prompt"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with(&format!("[item update] New input on {item}, 20"))
+                && text.contains(&format!("a comment by @someone, {comment}."))
+                && text.ends_with("\n\n> Also do Z.\n> Thanks"),
+            "{name}: {text}"
+        );
+        assert_eq!(r.digest().updates, [comment.as_str()], "{name}");
+    }
+}
+
 /// The nudges on the clock reach the turn as an item's updates do, each
 /// once, in order and before the hand-back; an agent that takes no
 /// message during its turn goes without, and the log says so.

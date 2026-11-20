@@ -38,6 +38,8 @@ const NOT_INHERITED: &[&str] = &[
     crate::run::api_key::API_KEY_VAR,
     crate::run::mcp::TOKEN_VAR,
     crate::session::bridge::ATTACH_TOKEN_VAR,
+    // The watch of a GitLab item reads with this; the agent does not.
+    crate::session::steer::gitlab::TOKEN_VAR,
     "ANTHROPIC_",
     "CLAUDE_",
     "OPENCODE_",

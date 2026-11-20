@@ -488,11 +488,28 @@ the token or an item it watches nothing, and says so. The polls are
 conditional (`If-None-Match`), so an unchanged item costs no rate limit,
 and a poll GitHub refuses for a limit waits as long as GitHub asks.
 
+A GitLab item is watched too, where `--watch-item` names its web
+address instead: `https://SERVER/GROUP/…/PROJECT/-/issues/NUMBER`
+(nested namespaces as the address writes them). The issue is read at
+that server only — the page URLs are built from it, and a redirect is
+refused — with the read-only token `GITLAB_READ_TOKEN`, which the run
+holds for this watch and the agent is not given. Only an issue's notes
+are watched, and only a comment made after the run began: a note
+written before is not an update however often it is edited since.
+GitLab's notes API has no `since` and no conditional poll, so each poll
+lists the issue's notes newest first and works back to the run's start,
+at most ten pages and so many bytes; what a poll cannot read all of is
+said as reduced coverage and picked up by the next poll. GitLab's own
+system notes are skipped, as are notes carrying the harness's
+run-status marker. A poll GitLab refuses for a limit waits as long as
+GitLab asks.
+
 Every update is passed on, whoever wrote it, and none claims authority:
 it is quoted with its author and link as new input on the item, which
 the agent weighs as any other text it reads. Anyone who can comment on
-the item could already put text before an agent that reads it with `gh`.
-A run takes at most ten updates, each cut to 8000 characters.
+the item could already put text before an agent that reads it with the
+forge's own tools (`gh`, `glab`). A run takes at most ten updates, each
+cut to 8000 characters.
 
 Updates go into a running turn only: by claude-agent-acp's
 `_session/steering` for an entry with `steering = true`, which asks the

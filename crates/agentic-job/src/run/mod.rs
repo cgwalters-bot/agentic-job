@@ -150,9 +150,10 @@ pub struct Args {
     #[arg(long, value_name = "FILE", requires = "review_head")]
     pub review_history: Option<PathBuf>,
     /// The issue or pull request the run was made for, whose new comments
-    /// and body edits the agent is sent while it works where the
-    /// configuration says (`[session] watch-item`)
-    #[arg(long, value_name = "OWNER/NAME#NUMBER")]
+    /// the agent is sent while it works where the configuration says
+    /// (`[session] watch-item`): GitHub's `OWNER/NAME#NUMBER`, or a
+    /// GitLab issue's `https://` address
+    #[arg(long, value_name = "ITEM")]
     pub watch_item: Option<String>,
     /// Trusted runner configuration. External isolation uses this without
     /// setup; managed jobs use the default root-owned copy setup made.
@@ -455,22 +456,64 @@ fn github_token() -> Result<Option<String>> {
     }
 }
 
+/// The run's read-only GitLab token, if it was given one: for the watch
+/// of a GitLab item only, and the agent is not given it. Redacted as
+/// every *_TOKEN of this process is (`own_tokens`).
+fn gitlab_token() -> Result<Option<String>> {
+    match std::env::var(steer::gitlab::TOKEN_VAR) {
+        Ok(token) => Ok(Some(token).filter(|token| !token.is_empty())),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{} is not a token", steer::gitlab::TOKEN_VAR)
+        }
+    }
+}
+
 /// The watch of the run's ITEM, polled at INTERVAL where the configuration
-/// asks for one, with the agent's own read-only TOKEN and nothing more:
-/// a run without that token or without an item says why it watches
-/// nothing. GitHub's API is at API, where the CI system says it is.
-/// The item is read only then: a run that watches nothing never fails
-/// for it.
+/// asks for one, with a read-only TOKEN and nothing more: a run without
+/// that token or without an item says why it watches nothing. The item is
+/// read only then: a run that watches nothing never fails for it.
+///
+/// Which forge the item is on is what the caller named and nothing else:
+/// a `https://` address is a GitLab issue, read at that server with the
+/// GitLab token; anything else is GitHub's `OWNER/NAME#NUMBER`, read
+/// with the agent's own token at API, where the CI system says it is.
 fn watch_item(
     interval: Option<Duration>,
     item: Option<&str>,
-    token: Option<String>,
+    github: Option<String>,
+    gitlab: Option<String>,
     api: Option<String>,
 ) -> Result<Option<Watch>> {
     let Some(interval) = interval else {
         return Ok(None);
     };
-    let (Some(item), Some(token)) = (item, token) else {
+    let Some(item) = item else {
+        eprintln!(
+            "warning: session.watch-item is set, but the run's item is not watched: it needs \
+             --watch-item and the read-only token of its forge ({} or {})",
+            agent::GITHUB_TOKEN_VAR,
+            steer::gitlab::TOKEN_VAR
+        );
+        return Ok(None);
+    };
+    if item.starts_with("https://") {
+        let target: steer::gitlab::Target = item.parse()?;
+        let Some(token) = gitlab else {
+            eprintln!(
+                "warning: session.watch-item is set, but the run's item is not watched: it \
+                 needs the read-only token {}",
+                steer::gitlab::TOKEN_VAR
+            );
+            return Ok(None);
+        };
+        return Ok(Some(Watch::Gitlab(steer::gitlab::Watch {
+            target,
+            token,
+            interval,
+        })));
+    }
+    let Some(token) = github else {
         eprintln!(
             "warning: session.watch-item is set, but the run's item is not watched: it needs \
              --watch-item and the read-only token {}",
@@ -724,6 +767,7 @@ impl Plan {
             watch,
             args.watch_item.as_deref(),
             github_token()?,
+            gitlab_token()?,
             std::env::var(API_URL_VAR).ok(),
         )?;
         if limits.max_requests.is_none() && limits.budget_aic.is_none() {
@@ -806,8 +850,8 @@ impl Plan {
         if let (true, Some(home)) = (args.runner_gate, &args.runner_home) {
             ensure!(
                 !asks_watch,
-                "run --runner-gate: session.watch-item reads the run's item with the agent's \
-                 GitHub token, which a hardened run does not give it"
+                "run --runner-gate: session.watch-item reads the run's item with a read token, \
+                 which a hardened run does not give it"
             );
             gate::check(&config, home)?;
         }
@@ -2295,13 +2339,14 @@ mod tests {
             (minute, Some("o/r"), token(), None, Err("OWNER/NAME#NUMBER")),
         ];
         for (interval, item, token, api, want) in cases {
-            let got = watch_item(interval, item, token, api.clone());
+            let got = watch_item(interval, item, token, None, api.clone());
             match want {
                 Ok(want) => {
                     let got = got.unwrap();
                     assert_eq!(
                         got.as_ref().map(|w| match w {
                             Watch::Github(w) => w.api.as_str(),
+                            Watch::Gitlab(_) => unreachable!(),
                         }),
                         want,
                         "{item:?} {api:?}"
@@ -2309,6 +2354,7 @@ mod tests {
                     if let Some(watch) = got {
                         let (token, interval) = match &watch {
                             Watch::Github(w) => (w.token.as_str(), w.interval),
+                            Watch::Gitlab(_) => unreachable!(),
                         };
                         assert_eq!((token, interval), ("t", Duration::from_secs(60)));
                     }
@@ -2318,6 +2364,62 @@ mod tests {
                     assert!(e.contains(want), "{e}");
                 }
             }
+        }
+    }
+
+    /// A `https://` item is a GitLab issue, read at the server its
+    /// address names — nowhere else, whatever the GitHub API setting
+    /// says — and with the GitLab token alone.
+    #[test]
+    fn what_watches_a_gitlab_item() {
+        let minute = Some(Duration::from_secs(60));
+        let token = || Some("t".to_owned());
+        let some = |s: &str| Some(s.to_owned());
+        let item = "https://gitlab.example/g/s/p/-/issues/7";
+        for (github, gitlab, api, want) in [
+            (token(), token(), None, Some("https://gitlab.example")),
+            (token(), None, None, None),
+            (None, token(), some("https://elsewhere/api"), {
+                Some("https://gitlab.example")
+            }),
+        ] {
+            let got = watch_item(minute, Some(item), github, gitlab, api.clone()).unwrap();
+            assert_eq!(
+                got.as_ref().map(|w| match w {
+                    Watch::Gitlab(w) => w.target.origin.as_str(),
+                    Watch::Github(_) => unreachable!(),
+                }),
+                want,
+                "{api:?}"
+            );
+            if let Some(Watch::Gitlab(watch)) = &got {
+                assert_eq!(
+                    (watch.token.as_str(), watch.interval),
+                    ("t", Duration::from_secs(60))
+                );
+            }
+        }
+        for (item, why) in [
+            (
+                "https://gitlab.example/g/p/-/issues/x",
+                "is not a GitLab issue",
+            ),
+            (
+                "https://gitlab.example/p/-/issues/1",
+                "is not a GitLab issue",
+            ),
+            (
+                "https://gitlab.example/g/p/merge_requests/1",
+                "is not a GitLab issue",
+            ),
+        ] {
+            let e = format!(
+                "{:#}",
+                watch_item(minute, Some(item), token(), token(), None)
+                    .err()
+                    .unwrap()
+            );
+            assert!(e.contains(why), "{item}: {e}");
         }
     }
 
