@@ -873,6 +873,11 @@ jobs:
             # requires in external mode, rather than letting it assume one.
             [ "$PRIVATE" = true ] || set -- "$@" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
           fi
+          # An unprotected_files metadata rule exempts only a patch applied to
+          # the checkout, so name the destination where it is the checkout.
+          dest=${OUTPUT_REPO:-$GITHUB_REPOSITORY}
+          [ -n "$PUSH_ITEM$EXTERNAL_RECEIPT" ] || [ "$PRIVATE" = true ] || [ "${dest,,}" != "${REPO,,}" ] ||
+            set -- "$@" --output-repo "$REPO"
           "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" --context-request "$CONTEXT_REPOS" \
             --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json" ||
             { echo "::error::The request was refused; this step's log says why"; exit 1; }

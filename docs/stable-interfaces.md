@@ -240,7 +240,13 @@ the next in the same major version.
   fork and archived metadata at policy time. Rules may require `properties`
   (a table of exact string values) and `topics` (an array of exact names).
   `forks = true` requires both to be nonempty and the live fork's parent to be
-  known; metadata failures refuse admission. `allowed_domains` is accepted and ignored.
+  known; metadata failures refuse admission. `[unprotected_files].repos`
+  accepts exact checkout repository names (no globs) and the same organization
+  rules for primary patches whose `--output-repo` is the checkout itself.
+  Nonmatches, other destinations and metadata failures leave protections
+  in place without refusing an otherwise-admitted run. A secondary pull
+  request's exemption accepts only its own exact repository name.
+  `allowed_domains` is accepted and ignored.
   `[github.outputs] own-branch-repos` optionally lists repository patterns
   accepting new PR branches and fix pushes without a per-repository file;
   it defaults to empty ([acceptance policy](safe-outputs.md#pushing-to-a-pull-requests-branch)).

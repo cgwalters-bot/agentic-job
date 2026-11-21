@@ -1937,7 +1937,8 @@ work under `ready_when_complete`. An `analysis` run may
 not ask for one. gh-aw's default list of protected file names, less
 `README.md`, and every top-level dot-folder are protected by default; a bounds file can take names off
 that list and exempt the `.github` folder for repositories it names exactly
-(case-insensitive OWNER/REPO, no globs), and cannot add to the list. No
+(case-insensitive OWNER/REPO, no globs) or admits by an organization rule,
+and cannot add to the list. No
 other dot-folder can be exempted: check refuses `.husky/`, `.vscode/`,
 `.circleci/` and `.tekton/` whatever the policy says.
 For example, to allow CONTRIBUTING.md and workflow edits in one repository, add this to the
@@ -1949,6 +1950,27 @@ repos = ["OWNER/REPO"]
 files = ["CONTRIBUTING.md"]
 dot_folders = [".github"] # optional, and only ".github"; see the protections below
 ```
+
+`repos` there also takes the organization rules that top-level `repos`
+does, with the same requirements (GitHub only, and a fork rule needs
+`topics` and `properties`). Policy reads each metadata endpoint at most once
+per invocation, sharing the result with admission and both bounds files:
+
+```toml
+[unprotected_files]
+repos = [{ org = "OWNER", forks = true, topics = ["TOPIC"], properties = { origin = "fork" } }]
+dot_folders = [".github"]
+```
+
+A bare `{ org = "OWNER", forks = false }` exempts every otherwise-admitted,
+active non-fork repository in that organization, without a topic or property
+opt-in. If you use topics or custom properties as selectors, make sure only
+people trusted to authorize these patch exemptions can change the selector
+values on repositories. A repository the rule does not match, or whose
+metadata policy cannot read, keeps every protection. Policy logs the reason
+when a matching organization's rule cannot grant the exemption; that is not
+a refusal of the run itself. A secondary pull request's exemptions take no
+rule, only its one repository's name.
 
 A bounds file can also protect more paths, in every repository it admits,
 with a top-level `protected` list of globs: paths a run must never change,
@@ -1991,8 +2013,13 @@ The exemption does not reach protected file names, git's own files
 inside `.github/` (`.github/CODEOWNERS`, `.github/.git/`) or the review's
 [merge policy](review.md#merge-policy), `.github/agentic-job/merge.toml`. Organization and
 caller bounds must both permit it. It applies to `create_pull_request` and
-`push_to_pull_request_branch`, including replacement series, only for the
-same listed repositories. A fix push still requires the open PR and head
+`push_to_pull_request_branch`, including replacement series. The match is on
+the checkout repository. An exact name exempts a new pull request even in a
+separate `output-repo`. A rule describes only the checkout's metadata, so it
+exempts a patch only where policy is told that its destination is that
+checkout. The policy workflow says so when `output-repo` is unset or names
+the checkout. A pull request to any other repository keeps every protection.
+A fix push still requires the open PR and head
 repository/branch checks described above, and is refused the exemption
 anywhere but apply's own fork. A repository
 [its applying account owns](workflow.md#a-repository-the-applying-account-owns), whose
