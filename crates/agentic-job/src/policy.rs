@@ -924,9 +924,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     match compiled {
         Ok(mut policy) => {
             if let Some(path) = &args.external_receipt {
-                let receipt = crate::external::Receipt::load(path)?;
-                receipt.record.caller_env()?;
-                receipt.record.policy(&policy)?;
+                let external = crate::external::admit(path, &policy)?;
                 // Apply takes an omitted output repository to be the calling
                 // one, so external mode needs it named, not assumed.
                 ensure!(
@@ -934,15 +932,7 @@ pub fn run(args: &Args) -> Result<Exit> {
                     "external output repository must be named and be the trusted target {:?}",
                     policy.repo
                 );
-                policy.external = Some(ExternalRun {
-                    caller_repository: receipt.record.caller_repository,
-                    caller_run_id: receipt.record.caller_run_id,
-                    caller_attempt: receipt.record.caller_attempt,
-                    repository: receipt.record.repository,
-                    run_id: receipt.run_id,
-                    base_commit: receipt.record.base_commit,
-                    raw_digest: receipt.raw.digest,
-                });
+                policy.external = Some(external);
                 // External mode can only narrow the caller's publication policy.
                 if let Some(pull) = &mut policy.safe_outputs.create_pull_request {
                     pull.draft = true;

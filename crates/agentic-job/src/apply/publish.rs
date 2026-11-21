@@ -72,6 +72,7 @@ pub fn run(args: &Args) -> Result<Exit> {
 /// [`run`], which returns whether every request was published.
 fn publish_all(args: &Args) -> Result<bool> {
     let policy = Policy::load(&args.policy)?;
+    policy.publishable()?;
     ensure!(
         !policy.native_handlers.is_empty(),
         "the policy routes no output type to agentic-job publish"

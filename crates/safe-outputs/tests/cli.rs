@@ -615,6 +615,40 @@ fn gitlab_receipt_binds_forge_and_context() {
     assert!(f.writes.lock().unwrap().is_empty());
 }
 
+#[test]
+fn standalone_gitlab_refuses_an_external_policy_without_detection() {
+    let f = Fixture::new();
+    let mut context = gitlab_context(
+        &f,
+        json!({"create_pull_request":{
+            "max":1,"protected_files":[],"protect_top_level_dot_folders":true,
+            "protected_files_policy":"blocked","draft":true,"max_patch_size":1024,"max_patch_files":10
+        },"add_comment":{"max":1}}),
+    );
+    context["policy"]["kind"] = json!("branch");
+    context["policy"]["push_repo"] = json!("bot/project");
+    write_context(&f, &context);
+    f.input(r#"{"type":"add_comment","body":"Producer text"}"#);
+    assert_gitlab_ok(&f, "check");
+    std::fs::remove_file(f.dir.path().join("checked.json")).unwrap();
+    context["policy"]["external"] = json!({
+        "caller_repository": "group/caller", "caller_run_id": 5001, "caller_attempt": 1,
+        "repository": "group/producer", "run_id": 5002, "base_commit": "2".repeat(40),
+        "raw_digest": format!("sha256:{}", "6".repeat(64)),
+        "gitlab": {"server": "https://gitlab.example.com", "caller_project_id": 11}
+    });
+    write_context(&f, &context);
+    // Refused while planning, before apply reads SAFE_OUTPUTS_TOKEN.
+    for command in ["check", "apply"] {
+        let result = f.run_forge(command, "gitlab");
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("native forge plan refused"), "{stderr}");
+        assert!(!f.dir.path().join("checked.json").exists());
+    }
+    assert!(f.writes.lock().unwrap().is_empty());
+}
+
 fn patch_fixture(f: &Fixture, file: &str) -> String {
     let base = "1".repeat(40);
     std::fs::write(

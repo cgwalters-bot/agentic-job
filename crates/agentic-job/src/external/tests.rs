@@ -228,6 +228,7 @@ fn actions_http_transport_fetches_raw_by_id() {
         root,
         token: "read-only-fixture".into(),
         deadline: record.deadline,
+        accept: GITHUB_ACCEPT,
     };
     let (receipt, fetched) = fetch(&mut api, &record).unwrap();
     assert_eq!(receipt.raw.id, 11);
@@ -380,6 +381,7 @@ fn fetched_raw_passes_real_collect_check_git_trial_and_staged_apply() {
         run_id: receipt.run_id,
         base_commit: record.base_commit.clone(),
         raw_digest: receipt.raw.digest,
+        gitlab: None,
     });
     policy.validate().unwrap();
     record.policy(&policy).unwrap();
@@ -577,4 +579,20 @@ fn raw_directory_is_bounded_before_zip_indexes_or_deduplicates_it() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("exceeds archive limit"), "{error}");
+}
+
+#[test]
+fn a_receipt_policy_could_not_read_is_never_written() {
+    let root = tempfile::tempdir().unwrap();
+    let args = Args {
+        forge: Caller::Github,
+        record: root.path().join("record.json"),
+        archive: root.path().join("raw.zip"),
+        outputs: root.path().join("raw"),
+        receipt: root.path().join("receipt.json"),
+    };
+    let receipt = json!({"record": {"padding": "x".repeat(MAX_RECORD as usize)}});
+    let error = write(&args, b"", &receipt).unwrap_err().to_string();
+    assert!(error.contains("external receipt exceeds"), "{error}");
+    assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
 }

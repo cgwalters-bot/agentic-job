@@ -22,11 +22,25 @@ const APPEAR_SECONDS: i64 = 600;
 const MAX_LIFETIME_SECONDS: i64 = 330 * 60;
 const POLL: Duration = Duration::from_secs(15);
 
+mod gitlab;
+
 #[cfg(test)]
 mod tests;
 
+/// The CI system of the caller and the producer it dispatched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Caller {
+    #[default]
+    Github,
+    Gitlab,
+}
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
+    /// The record's CI system: a GitHub Actions run, or a GitLab pipeline
+    /// on the caller's own instance
+    #[arg(long, value_enum, default_value_t)]
+    pub forge: Caller,
     /// Caller-owned record, never downloaded from the external run
     #[arg(long)]
     pub record: PathBuf,
@@ -56,6 +70,14 @@ pub struct ReleaseArgs {
 /// another run or an earlier attempt cannot reuse the caller's policy.
 pub fn caller_policy(policy: &Policy) -> Result<()> {
     if let Some(external) = &policy.external {
+        if let Some(caller) = &external.gitlab {
+            return gitlab::caller_env(
+                &caller.server,
+                caller.caller_project_id,
+                external.caller_run_id,
+            )
+            .context("external policy belongs to another caller pipeline");
+        }
         ensure!(
             std::env::var("GITHUB_REPOSITORY")? == external.caller_repository
                 && std::env::var("GITHUB_RUN_ID")?.parse::<u64>()? == external.caller_run_id
@@ -77,6 +99,7 @@ pub fn release(args: &ReleaseArgs) -> Result<Exit> {
 }
 
 fn authorize(policy: &Policy, report: &Value, detection: &str) -> Result<()> {
+    policy.publishable()?;
     if let Some(external) = &policy.external {
         ensure!(
             detection == "success",
@@ -268,16 +291,44 @@ impl Record {
     }
 
     pub fn policy(&self, policy: &Policy) -> Result<()> {
-        ensure!(
-            policy.repo == self.target_repository
-                && policy.base == self.target_branch
-                && policy.kind == crate::policy::Kind::Branch
-                && policy.safe_outputs.push_to_pull_request_branch.is_none()
-                && policy.secondary_pull_request.is_none(),
-            "external record requires its exact implement target/base, without push or secondary target"
-        );
-        Ok(())
+        target(policy, &self.target_repository, &self.target_branch)
     }
+}
+
+fn target(policy: &Policy, repository: &str, branch: &str) -> Result<()> {
+    ensure!(
+        policy.repo == repository
+            && policy.base == branch
+            && policy.kind == crate::policy::Kind::Branch
+            && policy.safe_outputs.push_to_pull_request_branch.is_none()
+            && policy.secondary_pull_request.is_none(),
+        "external record requires its exact implement target/base, without push or secondary target"
+    );
+    Ok(())
+}
+
+/// The caller-owned receipt at PATH, of either CI system, checked against
+/// this caller and POLICY's target and reduced to what check and apply keep.
+/// A GitHub record has no `forge` field, and refuses one.
+pub fn admit(path: &Path, policy: &Policy) -> Result<crate::policy::ExternalRun> {
+    let bytes = crate::files::read_regular(path, MAX_RECORD)?;
+    let value: Value = serde_json::from_slice(&bytes)?;
+    if value["record"]["forge"] == gitlab::FORGE {
+        return gitlab::Receipt::parse(&bytes)?.admit(policy);
+    }
+    let receipt = Receipt::load(path)?;
+    receipt.record.caller_env()?;
+    receipt.record.policy(policy)?;
+    Ok(crate::policy::ExternalRun {
+        caller_repository: receipt.record.caller_repository,
+        caller_run_id: receipt.record.caller_run_id,
+        caller_attempt: receipt.record.caller_attempt,
+        repository: receipt.record.repository,
+        run_id: receipt.run_id,
+        base_commit: receipt.record.base_commit,
+        raw_digest: receipt.raw.digest,
+        gitlab: None,
+    })
 }
 
 fn hex(text: &str, len: usize) -> bool {
@@ -344,19 +395,25 @@ trait Actions {
 }
 
 fn timely(record: &Record, now: DateTime<Utc>) -> Result<()> {
+    window(record.dispatched_at, record.deadline, now)
+}
+
+fn window(dispatched_at: DateTime<Utc>, deadline: DateTime<Utc>, now: DateTime<Utc>) -> Result<()> {
     ensure!(
-        now >= record.dispatched_at - chrono::Duration::seconds(120) && now < record.deadline,
+        now >= dispatched_at - chrono::Duration::seconds(120) && now < deadline,
         "external dispatch deadline passed or clock predates dispatch"
     );
     Ok(())
 }
 
+/// The rows of a paginated list, under KEY, or the whole answer if empty.
 fn pages(api: &mut impl Actions, path: &str, key: &str) -> Result<Vec<Value>> {
     let mut result = Vec::new();
     for page in 1..=MAX_PAGES {
         let sep = if path.contains('?') { '&' } else { '?' };
         let value = api.get(&format!("{path}{sep}per_page=100&page={page}"))?;
-        let rows = value[key].as_array().context("Actions API omitted list")?;
+        let rows = if key.is_empty() { &value } else { &value[key] };
+        let rows = rows.as_array().context("Actions API omitted list")?;
         ensure!(rows.len() <= 100, "Actions API page exceeds limit");
         result.extend(rows.iter().cloned());
         if rows.len() < 100 {
@@ -631,7 +688,10 @@ struct Api {
     root: String,
     token: String,
     deadline: DateTime<Utc>,
+    accept: &'static str,
 }
+
+const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 
 impl Api {
     fn request(
@@ -651,7 +711,7 @@ impl Api {
         let agent = ureq::Agent::new_with_config(config);
         let mut request = agent
             .get(url)
-            .header("Accept", "application/vnd.github+json")
+            .header("Accept", self.accept)
             .header("User-Agent", "agentic-job");
         if authenticated {
             request = request.header("Authorization", format!("Bearer {}", self.token));
@@ -711,6 +771,9 @@ impl Actions for Api {
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
+    if args.forge == Caller::Gitlab {
+        return gitlab::run(args);
+    }
     let record = Record::load(&args.record)?;
     record.caller_env()?;
     timely(&record, Utc::now())?;
@@ -726,21 +789,33 @@ pub fn run(args: &Args) -> Result<Exit> {
         root: root.trim_end_matches('/').to_owned(),
         token,
         deadline: record.deadline,
+        accept: GITHUB_ACCEPT,
     };
     let (receipt, bytes) = fetch(&mut api, &record)?;
-    extract(&bytes, &args.outputs)?;
+    write(args, &bytes, &receipt)
+}
+
+fn write(args: &Args, bytes: &[u8], receipt: &impl Serialize) -> Result<Exit> {
+    // Policy reads a receipt under the record's bound, which a record near
+    // it would exceed once wrapped.
+    let receipt = serde_json::to_vec_pretty(receipt)?;
+    ensure!(
+        receipt.len() as u64 <= MAX_RECORD,
+        "external receipt exceeds {MAX_RECORD} bytes; shorten the record"
+    );
+    extract(bytes, &args.outputs)?;
     // No partially verified result is written, and existing files are never replaced.
     use std::io::Write;
     let mut archive = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&args.archive)?;
-    archive.write_all(&bytes)?;
+    archive.write_all(bytes)?;
     let mut output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&args.receipt)?;
-    serde_json::to_writer_pretty(&mut output, &receipt)?;
+    output.write_all(&receipt)?;
     Ok(Exit::Success)
 }
 

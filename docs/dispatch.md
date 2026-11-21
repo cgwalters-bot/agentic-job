@@ -1008,7 +1008,13 @@ reuse it. The draft includes the external run URL, attempt and raw digest.
 Hosted calls omit `external-receipt` and retain optional detection and all
 existing same-run artifact associations. No shipped caller sets this input.
 [The GitLab caller spec](../specs/gitlab-caller.md) defines this contract's
-GitLab CI equivalent; it is not built.
+GitLab CI equivalent. `external-fetch --forge gitlab` fetches a recorded
+producer pipeline's agent-job archive under the same bounds, and policy and
+check take its receipt, checking the caller's `CI_SERVER_URL`,
+`CI_PROJECT_ID` and `CI_PIPELINE_ID`. `external-release`, `publish` and every
+apply, standalone `safe-outputs` included, still refuse every GitLab receipt's
+policy, since how GitLab detection reaches them is not
+specified, and nothing has run against a live GitLab.
 
 ### Checked hand-back and trusted apply
 
