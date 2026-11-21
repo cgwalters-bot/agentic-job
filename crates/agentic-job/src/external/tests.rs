@@ -234,6 +234,7 @@ fn actions_http_transport_fetches_raw_by_id() {
         token: "read-only-fixture".into(),
         deadline: record.deadline,
         storage: STORAGE.into(),
+        accept: GITHUB_ACCEPT,
     };
     let fetched = fetch(&mut api, &record).unwrap();
     assert_eq!(fetched.receipt.raw.id, 11);
@@ -393,6 +394,7 @@ fn fetched_raw_passes_real_collect_check_git_trial_and_staged_apply() {
         base_commit: record.base_commit.clone(),
         raw_digest: receipt.raw.digest,
         files: receipt.files.clone(),
+        gitlab: None,
     });
     policy.validate().unwrap();
     record.policy(&policy).unwrap();
@@ -597,6 +599,7 @@ fn raw_archive_never_supplies_trusted_config_or_paths() {
 fn fetch_receipt_round_trips_a_large_record_and_full_manifest() {
     let root = tempfile::tempdir().unwrap();
     let args = Args {
+        forge: Caller::Github,
         record: root.path().join("record.json"),
         archive: root.path().join("raw.zip"),
         outputs: root.path().join("raw"),
@@ -815,6 +818,7 @@ fn storage_redirect_is_followed_once_without_the_credential() {
         token: "read-only-fixture".into(),
         deadline: record.deadline,
         storage,
+        accept: GITHUB_ACCEPT,
     };
     for (name, refused) in [
         ("ok", None),
@@ -825,6 +829,7 @@ fn storage_redirect_is_followed_once_without_the_credential() {
         *case.lock().unwrap() = name;
         let dir = tempfile::tempdir().unwrap();
         let args = Args {
+            forge: Caller::Github,
             record: dir.path().join("record.json"),
             archive: dir.path().join("raw.zip"),
             outputs: dir.path().join("raw"),
@@ -870,4 +875,23 @@ fn storage_redirect_is_followed_once_without_the_credential() {
             .count(),
         3
     );
+}
+
+/// Either CI system's receipt goes through the one writer.
+#[test]
+fn a_receipt_policy_could_not_read_is_never_written() {
+    let root = tempfile::tempdir().unwrap();
+    let args = Args {
+        forge: Caller::Github,
+        record: root.path().join("record.json"),
+        archive: root.path().join("raw.zip"),
+        outputs: root.path().join("raw"),
+        receipt: root.path().join("receipt.json"),
+    };
+    let receipt = json!({"record": {"padding": "x".repeat(MAX_RECEIPT as usize)}});
+    let error = write(&args, b"", &BTreeMap::new(), &receipt)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("external receipt exceeds"), "{error}");
+    assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
 }

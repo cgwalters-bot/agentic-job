@@ -952,6 +952,37 @@ pub struct ExternalRun {
     /// no others. Without it the caller's upload between fetch and check
     /// could be substituted for the fetched hand-back.
     pub files: BTreeMap<String, String>,
+    /// Present for a GitLab CI caller (specs/gitlab-caller.md). Then
+    /// `caller_repository` is its project path, `caller_run_id` its
+    /// pipeline ID and `caller_attempt` 1, GitLab having no pipeline
+    /// attempts; `repository` and `run_id` are the producer's project and
+    /// pipeline, and the target is a GitLab one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gitlab: Option<GitlabCaller>,
+}
+
+/// The GitLab caller identities [`ExternalRun`]'s GitHub-shaped fields lack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitlabCaller {
+    /// The instance's HTTPS URL, as the caller's `CI_SERVER_URL`.
+    pub server: String,
+    pub caller_project_id: u64,
+}
+
+impl GitlabCaller {
+    /// An HTTPS origin, optionally with a relative path, and nothing a URL
+    /// could hide another host or a query in.
+    pub fn is_server(server: &str) -> bool {
+        server.strip_prefix("https://").is_some_and(|rest| {
+            !rest.is_empty()
+                && !rest.ends_with('/')
+                && rest.split('/').all(|part| !part.is_empty() && part != "..")
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-:/_".contains(&b))
+        })
+    }
 }
 
 /// Admitted target and producer attempt supplied by the trusted caller.
@@ -1394,6 +1425,20 @@ impl Policy {
         crate::keeps_link(&self.allowed_domains, host)
     }
 
+    /// How a GitLab caller's detect job reports its result is not specified
+    /// (specs/gitlab-caller.md), so no publisher takes a GitLab caller's
+    /// external policy yet, whether or not the caller runs a release gate.
+    /// [`crate::apply::plan`] enforces this for every apply front end.
+    pub fn publishable(&self) -> Result<()> {
+        ensure!(
+            self.external
+                .as_ref()
+                .is_none_or(|external| external.gitlab.is_none()),
+            "external apply has no GitLab detection result to require yet"
+        );
+        Ok(())
+    }
+
     /// What the types cannot say: `policy` writes only the output types
     /// that have a configuration here, and only draft pull requests with
     /// the dot-folders protected.
@@ -1409,9 +1454,25 @@ impl Policy {
         );
         check_context(&self.context)?;
         if let Some(external) = &self.external {
+            let caller = match &external.gitlab {
+                Some(gitlab) => {
+                    ensure!(
+                        GitlabCaller::is_server(&gitlab.server)
+                            && gitlab.caller_project_id > 0
+                            && external.caller_attempt == 1,
+                        "invalid trusted GitLab caller identity"
+                    );
+                    Forge::Gitlab
+                }
+                None => Forge::Github,
+            };
+            let repo = |repo: &str| match caller {
+                Forge::Github => REPO_RE.is_match(repo),
+                _ => caller.is_repo(repo),
+            };
             ensure!(
-                REPO_RE.is_match(&external.caller_repository)
-                    && REPO_RE.is_match(&external.repository)
+                repo(&external.caller_repository)
+                    && repo(&external.repository)
                     && external.caller_run_id > 0
                     && external.caller_attempt > 0
                     && external.run_id > 0
@@ -1431,7 +1492,7 @@ impl Policy {
                 "invalid trusted external file manifest"
             );
             ensure!(
-                self.forge == Forge::Github
+                self.forge == caller
                     && self.kind == Kind::Branch
                     && self.advisory.is_none()
                     && self.secondary_pull_request.is_none()
@@ -1441,7 +1502,12 @@ impl Policy {
                         .create_pull_request
                         .as_ref()
                         .is_some_and(|p| !p.ready_when_complete),
-                "external runs require one draft-only GitHub implement target"
+                "external runs require one draft-only {} implement target",
+                if caller == Forge::Github {
+                    "GitHub"
+                } else {
+                    "GitLab"
+                }
             );
         }
         if let Some(advisory) = &self.advisory {

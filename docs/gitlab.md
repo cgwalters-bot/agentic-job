@@ -33,8 +33,11 @@ CI configuration from the default branch, not merge-request code. Do not
 restore caches or execute scripts or binaries from producer artifacts in
 check or apply. The CI operator owns runner isolation, artifact provenance
 and token issuance. Fetching a producer pipeline's hand-back across
-pipelines is specified, not built, in
-[the GitLab caller spec](../specs/gitlab-caller.md).
+pipelines is specified in [the GitLab caller spec](../specs/gitlab-caller.md).
+Its fetch, `external-fetch --forge gitlab` with a read-only
+`GITLAB_READ_TOKEN`, and its policy and check are built and tested
+offline only; its release gate refuses until GitLab detection is specified,
+so it cannot publish yet.
 
 **Agent inference on GitLab is unsupported pending
 [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) and

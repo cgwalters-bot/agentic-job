@@ -174,6 +174,8 @@ pub fn run(args: &Args) -> Result<Exit> {
         "--comment-target-kind is GitLab's: Forgejo numbers issues and pull requests together"
     );
     let policy = Policy::load(&args.policy)?;
+    // Before any credential is read; `plan` refuses it again.
+    policy.publishable()?;
     // Only the caller's environment binds roles: never a request or the
     // agent's output. With a mapping, the forge token is not read at all.
     let publisher: Box<dyn Publisher> = match roles::read(&|key| std::env::var(key).ok())? {

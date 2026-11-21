@@ -560,6 +560,9 @@ pub fn plan(
             policy.forge
         ));
     }
+    if let Err(err) = policy.publishable() {
+        errors.push(format!("{err:#}"));
+    }
     if let Err(err) = footer(target.provenance.name, target.run_url) {
         errors.push(format!("{err:#}"));
     }

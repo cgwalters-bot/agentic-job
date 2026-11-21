@@ -867,10 +867,16 @@ pub fn run(args: &Args) -> Result<Exit> {
         for item in &mut verdict.items {
             if item_type(item) == crate::policy::CREATE_PULL_REQUEST {
                 let body = item.get("body").and_then(Value::as_str).unwrap_or_default();
-                let provenance = format!(
-                    "{body}\n\nExternal run: https://github.com/{}/actions/runs/{} (attempt 1).\nRaw hand-back API digest: `{}` (transfer integrity, not test provenance).",
-                    external.repository, external.run_id, external.raw_digest
-                );
+                let provenance = match &external.gitlab {
+                    Some(gitlab) => format!(
+                        "{body}\n\nExternal pipeline: {}/{}/-/pipelines/{}.\nRaw hand-back digest: `{}` (computed by the caller's fetch, not test provenance).",
+                        gitlab.server, external.repository, external.run_id, external.raw_digest
+                    ),
+                    None => format!(
+                        "{body}\n\nExternal run: https://github.com/{}/actions/runs/{} (attempt 1).\nRaw hand-back API digest: `{}` (transfer integrity, not test provenance).",
+                        external.repository, external.run_id, external.raw_digest
+                    ),
+                };
                 if provenance.encode_utf16().count() > 60_000 {
                     verdict
                         .errors

@@ -251,3 +251,295 @@ fn receipt_is_caller_owned_and_does_not_bypass_policy_check_or_detection() {
         .env("GITHUB_RUN_ATTEMPT", "1");
     status(&retry.output().unwrap(), 2);
 }
+
+/// Run in GitLab caller pipeline PIPELINE, with no GitHub context.
+fn gitlab_command(dir: &Path, pipeline: &str, args: &[&str]) -> Output {
+    Command::new(BIN)
+        .current_dir(dir)
+        .args(args)
+        .env_remove("GITHUB_REPOSITORY")
+        .env_remove("GITHUB_RUN_ID")
+        .env_remove("GITHUB_RUN_ATTEMPT")
+        .env("CI_SERVER_URL", "https://gitlab.example.com")
+        .env("CI_PROJECT_ID", "11")
+        .env("CI_PIPELINE_ID", pipeline)
+        .env_remove("GITLAB_READ_TOKEN")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn gitlab_fetch_refuses_another_caller_pipeline_and_a_missing_token_before_any_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let now = chrono::Utc::now();
+    let record = json!({
+        "forge": "gitlab", "server": "https://gitlab.example.com",
+        "caller_project": "group/caller", "caller_project_id": 11, "caller_pipeline_id": 5001, "caller_job_id": 90001,
+        "profile_commit": "1".repeat(40), "kind": "implement", "target_repository": "group/sub/project",
+        "target_branch": "main", "base_commit": "2".repeat(40), "item": 7,
+        "project": "group/producer", "project_id": 12, "reference": "main", "commit": "3".repeat(40),
+        "ci_config_path": "", "pipeline_id": 5002, "user_id": 42,
+        "variables": {"AGENTIC_JOB_RELEASE": "v0.6.13", "AGENTIC_JOB_SHA256": "4".repeat(64)},
+        "agentic_job": "5".repeat(40), "agent_job": "agent", "check_job": "check", "detect_job": "detect",
+        "dispatched_at": now, "deadline": now + chrono::Duration::minutes(30)
+    });
+    std::fs::write(dir.join("record.json"), record.to_string()).unwrap();
+    let fetch = [
+        "external-fetch",
+        "--forge",
+        "gitlab",
+        "--record",
+        "record.json",
+        "--archive",
+        "raw.zip",
+        "--outputs",
+        "raw",
+        "--receipt",
+        "receipt.json",
+    ];
+    for (pipeline, reason) in [
+        ("5002", "another caller pipeline"),
+        ("5001", "GITLAB_READ_TOKEN is required"),
+    ] {
+        let output = gitlab_command(dir, pipeline, &fetch);
+        status(&output, 2);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(reason), "{stderr}");
+        assert!(!dir.join("receipt.json").exists());
+    }
+    // The GitHub default refuses a GitLab record.
+    let github = [&fetch[..1], &fetch[3..]].concat();
+    let output = command(dir, &github);
+    status(&output, 2);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown field `forge`"), "{stderr}");
+}
+
+#[test]
+fn gitlab_receipt_binds_the_caller_pipeline_and_producer_branch_but_is_not_released() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    std::fs::write(dir.join("bounds.toml"), "hosts = ['gitlab.example.com']\nrepos = ['group/sub/project']\nbases = ['main', 'other']\nmax_outputs = 2\nmax_patch_bytes = 1048576\nmax_patch_files = 50\n[gitlab]\npush_repo = 'bot/project'\n[gitlab.outputs]\ncreate_pull_request = { max = 1 }\nnoop = { max = 1 }\n").unwrap();
+    let receipt = json!({
+        "record": {
+            "forge": "gitlab", "server": "https://gitlab.example.com",
+            "caller_project": "group/caller", "caller_project_id": 11, "caller_pipeline_id": 5001, "caller_job_id": 90001,
+            "profile_commit": "1".repeat(40), "kind": "implement", "target_repository": "group/sub/project",
+            "target_branch": "main", "base_commit": "2".repeat(40), "item": 7,
+            "project": "group/producer", "project_id": 12, "reference": "main", "commit": "3".repeat(40),
+            "ci_config_path": "", "pipeline_id": 5002, "user_id": 42,
+            "variables": {"AGENTIC_JOB_RELEASE": "v0.6.13", "AGENTIC_JOB_SHA256": "4".repeat(64)},
+            "agentic_job": "5".repeat(40), "agent_job": "agent", "check_job": "check", "detect_job": "detect",
+            "dispatched_at": "2026-11-13T10:00:00Z", "deadline": "2026-11-13T15:30:00Z"
+        },
+        "agent_job_id": 201, "check_job_id": 202, "detect_job_id": 203,
+        "raw": {"size": 100, "digest": format!("sha256:{}", "6".repeat(64))}
+    });
+    const NOOP: &str = "{\"type\":\"noop\",\"message\":\"No change\"}\n";
+    // The receipt fetch would write for raw FILES.
+    let receipted = |files: &[(&str, &str)]| {
+        let mut receipt = receipt.clone();
+        receipt["files"] = files
+            .iter()
+            .map(|(name, content)| (name.to_string(), json!(sha256(content.as_bytes()))))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        std::fs::write(dir.join("receipt.json"), receipt.to_string()).unwrap();
+    };
+    receipted(&[("outputs.jsonl", NOOP)]);
+    let policy_args = [
+        "policy",
+        "--allow",
+        "bounds.toml",
+        "--repo",
+        "group/sub/project",
+        "--clone-url",
+        "https://gitlab.example.com/group/sub/project",
+        "--base",
+        "main",
+        "--kind",
+        "branch",
+        "--outputs",
+        "create_pull_request,noop",
+        "--max-outputs",
+        "2",
+        "--external-receipt",
+        "receipt.json",
+        "--output-repo",
+        "group/sub/project",
+    ];
+    // Another caller pipeline, or a GitHub-only environment, cannot use it.
+    for (output, reason) in [
+        (
+            gitlab_command(dir, "5002", &policy_args),
+            "another caller pipeline",
+        ),
+        (command(dir, &policy_args), "missing CI_SERVER_URL"),
+    ] {
+        status(&output, 2);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(reason), "{stderr}");
+    }
+    let compiled = gitlab_command(dir, "5001", &policy_args);
+    status(&compiled, 0);
+    std::fs::write(dir.join("policy.json"), &compiled.stdout).unwrap();
+    let policy: Value = serde_json::from_slice(&compiled.stdout).unwrap();
+    assert_eq!(
+        policy["external"],
+        json!({
+            "caller_repository": "group/caller", "caller_run_id": 5001, "caller_attempt": 1,
+            "repository": "group/producer", "run_id": 5002, "base_commit": "2".repeat(40),
+            "raw_digest": format!("sha256:{}", "6".repeat(64)),
+            "files": {"outputs.jsonl": sha256(NOOP.as_bytes())},
+            "gitlab": {"server": "https://gitlab.example.com", "caller_project_id": 11}
+        })
+    );
+    assert_eq!(policy["safe_outputs"]["create_pull_request"]["draft"], true);
+    // The receipt's target is the only one it admits, of those the bounds do.
+    let mut changed = policy_args.to_vec();
+    changed[8] = "other";
+    let other = gitlab_command(dir, "5001", &changed);
+    status(&other, 2);
+    let stderr = String::from_utf8_lossy(&other.stderr);
+    assert!(stderr.contains("exact implement target/base"), "{stderr}");
+    // No publisher takes it, even if the caller leaves out external-release.
+    let apply = gitlab_command(
+        dir,
+        "5001",
+        &[
+            "apply",
+            "--forge",
+            "gitlab",
+            "--server",
+            "https://gitlab.example.com",
+            "--repo",
+            "group/sub/project",
+            "--policy",
+            "policy.json",
+            "--checked",
+            "checked",
+            "--run-url",
+            "https://gitlab.example.com/group/caller/-/pipelines/5001",
+        ],
+    );
+    status(&apply, 2);
+    let stderr = String::from_utf8_lossy(&apply.stderr);
+    assert!(stderr.contains("no GitLab detection result"), "{stderr}");
+    // Check raw FILES, fetched and receipted as they are.
+    let check = |files: &[(&str, &str)]| {
+        let _ = std::fs::remove_dir_all(dir.join("raw"));
+        std::fs::create_dir(dir.join("raw")).unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.join("raw").join(name), content).unwrap();
+        }
+        receipted(files);
+        let compiled = gitlab_command(dir, "5001", &policy_args);
+        status(&compiled, 0);
+        std::fs::write(dir.join("policy.json"), &compiled.stdout).unwrap();
+        for file in ["collected.json", "report.json"] {
+            let _ = std::fs::remove_file(dir.join(file));
+        }
+        status(
+            &gitlab_command(
+                dir,
+                "5001",
+                &[
+                    "collect",
+                    "--policy",
+                    "policy.json",
+                    "--outputs",
+                    "raw",
+                    "--collected",
+                    "collected.json",
+                ],
+            ),
+            0,
+        );
+        let output = gitlab_command(
+            dir,
+            "5001",
+            &[
+                "check",
+                "--policy",
+                "policy.json",
+                "--outputs",
+                "raw",
+                "--collected",
+                "collected.json",
+                "--report",
+                "report.json",
+                "--run-id",
+                "5001",
+            ],
+        );
+        let report: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("report.json")).unwrap()).unwrap();
+        (output, report)
+    };
+    let (output, _) = check(&[("outputs.jsonl", NOOP)]);
+    status(&output, 0);
+    // The producer pipeline names the branch, not the caller's.
+    const BRANCH_ERROR: &str = "external request branch is not the trusted external run's";
+    for (branch, refused) in [("agent-run-5001", true), ("agent-run-5002", false)] {
+        let item = json!({"type": "create_pull_request", "title": "Change", "body": "Why.", "branch": branch});
+        let (_, report) = check(&[("outputs.jsonl", &format!("{item}\n"))]);
+        assert_eq!(
+            report["errors"].to_string().contains(BRANCH_ERROR),
+            refused,
+            "{branch}: {report}"
+        );
+    }
+    let (output, _) = check(&[("outputs.jsonl", NOOP)]);
+    status(&output, 0);
+    // How GitLab detection reaches this gate is not specified yet.
+    let release = gitlab_command(
+        dir,
+        "5001",
+        &[
+            "external-release",
+            "--policy",
+            "policy.json",
+            "--report",
+            "report.json",
+            "--detection-result",
+            "success",
+        ],
+    );
+    status(&release, 2);
+    assert!(
+        String::from_utf8_lossy(&release.stderr).contains("no GitLab detection result"),
+        "{}",
+        String::from_utf8_lossy(&release.stderr)
+    );
+    let base =
+        json!({"repo": "group/sub/project", "ref": "main", "commit": "f".repeat(40)}).to_string();
+    let (output, report) = check(&[("outputs.jsonl", NOOP), ("base.json", &base)]);
+    status(&output, 1);
+    assert!(
+        report["errors"]
+            .to_string()
+            .contains("differs from the trusted dispatch base"),
+        "{report}"
+    );
+    status(
+        &gitlab_command(
+            dir,
+            "5009",
+            &[
+                "check",
+                "--policy",
+                "policy.json",
+                "--outputs",
+                "raw",
+                "--collected",
+                "collected.json",
+                "--report",
+                "other.json",
+                "--run-id",
+                "5009",
+            ],
+        ),
+        2,
+    );
+}

@@ -27,7 +27,8 @@ from detected delegation, not proof of host controls; see
 The opt-in [external correlation interface](dispatch.md#binary-correlation-interface)
 is currently internal: `policy.yml`'s `external-receipt` input and
 `external-run-id` output, `check.yml`'s `detection-result` output, the
-dispatch record/receipt and the binary fetch/release commands. These do
+dispatch record/receipt, their GitLab forms, and the binary fetch/release
+commands with `external-fetch --forge`. These do
 not add an external mode to the stable complete reusable workflow, enable
 a caller, or change hosted defaults.
 

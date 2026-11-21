@@ -2,9 +2,15 @@
 
 > This text is LLM generated.
 
-**Status: specified, not built.** Part of
-[#3406](https://github.com/cgwalters-forge/agentic-job/issues/3406). Nothing
-here has run. GitLab facts are from GitLab's
+**Status: fetch built, release refused, not run live.** Part of
+[#3406](https://github.com/cgwalters-forge/agentic-job/issues/3406).
+`external-fetch --forge gitlab` ([gitlab.rs](../crates/agentic-job/src/external/gitlab.rs))
+implements the record, the re-derivation, the archive identity and the
+receipt, and policy and check take its receipt; offline API fixtures cover
+the [Acceptance](#acceptance) refusals. `external-release` refuses every
+GitLab receipt until detection is specified, the producer's `run` does not
+yet name its branch from `CI_PIPELINE_ID`, and the Testing Farm layer is
+not started. Nothing here has run against a live GitLab. GitLab facts are from GitLab's
 [jobs](https://docs.gitlab.com/api/jobs/),
 [pipelines](https://docs.gitlab.com/api/pipelines/) and
 [job artifacts](https://docs.gitlab.com/api/job_artifacts/) API pages and
@@ -86,7 +92,9 @@ limit and `deny_unknown_fields` as `Record`
 - `reference` and `commit`: the producer pipeline's branch and full SHA.
 - `ci_config_path`: the producer project's CI configuration path as
   reviewed. An empty string means GitLab's default `.gitlab-ci.yml`, which
-  the API may report as `null` or `""`.
+  the API may report as `null` or `""`. Otherwise it must be a file in the
+  producer repository: a path with `@`, which GitLab reads from another
+  project's ref, or a URL is refused.
 - `pipeline_id`: the ID the create call returned.
 - `user_id`: the numeric GitLab user of the dispatch credential.
 - `variables`: the exact pipeline variables passed at creation, as
@@ -161,9 +169,12 @@ fields against GitLab. The target fields (`profile_commit`, `target_*`,
    `caller_attempt` stops the same thing.
 2. **Project.** `GET /projects/:id` returns `project_id` with
    `path_with_namespace` equal to `project`, and `ci_config_path` equal to
-   the record's. Threat: a Maintainer points the project's CI configuration
+   the record's, null or empty for the default. GitLab omits the key for a
+   reader without `read_code`, and an omitted key is refused. Threat: a Maintainer points the project's CI configuration
    at a file in another project or on a moving ref, so `commit` no longer
-   pins the jobs that ran. This reads the setting at fetch time, and GitLab
+   pins the jobs that ran. A record naming such a path is refused before
+   any request, since writers to that ref could change the jobs without
+   changing the setting. This reads the setting at fetch time, and GitLab
    does not report which configuration a pipeline was created from. The
    jobs are pinned by `commit` only when the reviewed configuration
    includes nothing but local files and full-SHA project refs. The producer
@@ -171,8 +182,8 @@ fields against GitLab. The target fields (`profile_commit`, `target_*`,
    dispatch and fetch, and to keep project, group and instance CI/CD
    variables in order. Neither shows in this API.
 3. **Pipeline.** `GET /projects/:id/pipelines/:pipeline_id` has
-   `project_id`, `sha` equal to `commit`, `ref` equal to `reference`,
-   `source` `api`, `user.id` equal to `user_id`, and `created_at` no
+   `project_id`, `sha` equal to `commit`, `ref` equal to `reference` with
+   `tag` false, since a same-named tag can run other CI rules, `source` `api`, `user.id` equal to `user_id`, and `created_at` no
    earlier than 2 minutes before `dispatched_at`. That is the same
    clock-skew margin `identity` allows
    ([external.rs](../crates/agentic-job/src/external.rs#L394-L403)). Its
@@ -222,7 +233,8 @@ The job listing gives only `artifacts_file.filename` and `size`. So:
   ([external.rs](../crates/agentic-job/src/external.rs#L685-L704)).
 - The receipt holds the record, `agent_job_id`, `check_job_id`,
   `detect_job_id` and `raw` as `{size, digest}`, where `digest` is
-  `sha256:HEX` of the downloaded bytes.
+  `sha256:HEX` of the downloaded bytes, and the GitHub receipt's `files`
+  manifest of the extracted files, which check binds the outputs to.
 
 The digest does not prove provenance. On GitHub, the digest comes from the
 same API that serves the bytes, so it protects only the transfer
@@ -321,9 +333,20 @@ One mechanism carries this: `external-fetch --forge gitlab` takes the
 record above, and the receipt carries `forge` so policy and release check
 the caller with the matching variables. The GitLab path is opt-in, used
 only when a caller passes `--forge gitlab`, and the GitHub path stays
-unchanged. Detection on GitLab is not
+unchanged. Fetch reads the read token from `GITLAB_READ_TOKEN`; it must
+read both the caller's and the producer's pipelines and jobs. Its user's
+role in the producer project must also grant the `read_code` permission,
+without which GitLab withholds `ci_config_path`, and
+`read_pipeline_variable`, which GitLab grants separately from reading
+pipelines. These are role permissions, not token scopes. In the
+checked policy, `external.gitlab` holds `server` and `caller_project_id`,
+and `caller_repository`, `caller_run_id` and `caller_attempt` hold the
+caller project path, its pipeline ID and 1. Detection on GitLab is not
 shipped. How the caller's detect job reports its result to
-`external-release` is open, and apply refuses without that result.
+`external-release` is open. Until it is specified, `external-release`,
+`publish` and every apply, standalone `safe-outputs check` and `apply`
+included, refuse every GitLab caller's policy, so leaving the gate out of
+the caller's pipeline does not publish either.
 
 ## Out of scope
 
@@ -352,4 +375,8 @@ project ID or path, a changed `ci_config_path`, a wrong `sha`, `ref`,
 erased, missing or failed `agent_job`, `check_job` or `detect_job`, an
 expired archive, a size or digest mismatch, a result after the deadline, and a hand-back on another
 base or branch. A live proof against the disposable GitLab used by CI's
-`gitlab` job follows the offline fixtures.
+`gitlab` job follows the offline fixtures. The fixtures are in
+[gitlab/tests.rs](../crates/agentic-job/src/external/gitlab/tests.rs) and
+[tests/external.rs](../crates/agentic-job/tests/external.rs). A digest
+mismatch has no API to be caught against, since the fetcher computes the
+digest; the listed `size` is the cross-check. The live proof is not done.
