@@ -122,6 +122,37 @@ pub struct Organization {
     pub topics: Vec<String>,
 }
 
+impl Organization {
+    /// What a rule must say wherever it admits repositories by their live
+    /// metadata: in `repos` and in `unprotected_files.repos` alike.
+    fn validate(&self, forge: Forge, hosts: &[String]) -> Result<()> {
+        ensure!(
+            forge == Forge::Github
+                && hosts
+                    .iter()
+                    .all(|host| host.eq_ignore_ascii_case("github.com")),
+            "organization repos rules require GitHub and hosts = [\"github.com\"]"
+        );
+        ensure!(
+            !self.forks || (!self.properties.is_empty() && !self.topics.is_empty()),
+            "organization fork rules require nonempty properties and topics"
+        );
+        ensure!(
+            self.properties
+                .iter()
+                .all(|(key, value)| !key.is_empty() && !value.is_empty())
+                && self.topics.iter().all(|topic| !topic.is_empty()),
+            "organization properties and topics must not contain empty names or values"
+        );
+        ensure!(
+            REPO_RE.is_match(&format!("{}/repo", self.org)) && !self.org.starts_with(['.', '-']),
+            "invalid repository organization {:?}",
+            self.org
+        );
+        Ok(())
+    }
+}
+
 impl From<String> for RepoRule {
     fn from(pattern: String) -> Self {
         Self::Pattern(pattern)
@@ -263,9 +294,10 @@ impl SecondaryPullRequest {
         )?;
         for repo in &self.unprotected_files.repos {
             ensure!(
-                repo.eq_ignore_ascii_case(&self.repo),
-                "secondary_pull_request.unprotected_files.repos may name only {:?}, not {repo:?}",
-                self.repo
+                matches!(repo, RepoRule::Pattern(name) if name.eq_ignore_ascii_case(&self.repo)),
+                "secondary_pull_request.unprotected_files.repos may name only {:?}, not {:?}",
+                self.repo,
+                repo.to_string()
             );
         }
         validate_dot_folders(
@@ -278,6 +310,7 @@ impl SecondaryPullRequest {
     /// its own exemptions alone, never the primary repository's. The
     /// bounds' `protected` globs only take away, so they hold here too.
     pub fn compile(&self, host: &str, protected_paths: &[String]) -> Secondary {
+        let exempt = self.unprotected_files.names(&self.repo);
         Secondary {
             repo: self.repo.clone(),
             clone_url: format!("https://{host}/{}", self.repo),
@@ -286,23 +319,25 @@ impl SecondaryPullRequest {
             max: self.max,
             max_patch_bytes: self.max_patch_bytes,
             max_patch_files: self.max_patch_files,
-            protected_files: protected_files(&self.unprotected_files, &self.repo),
+            protected_files: protected_files(&self.unprotected_files, exempt),
             protect_top_level_dot_folders: true,
-            unprotected_dot_folders: dot_folders(&self.unprotected_files, &self.repo),
+            unprotected_dot_folders: dot_folders(&self.unprotected_files, exempt),
             protected_paths: protected_paths.to_vec(),
         }
     }
 }
 
 /// Where names come off [`DEFAULT_PROTECTED_FILES`]: only in the
-/// repositories named exactly (no globs), only the names listed. So the
-/// rest of the list and everything `check` refuses on its own stay protected.
-/// The top-level `.github` folder, and no other, can also be exempted there.
+/// repositories named exactly (no globs) or matched by an organization
+/// rule's live metadata, as `repos` matches them, and only the names
+/// listed. So the rest of the list and everything `check` refuses on its
+/// own stay protected. The top-level `.github` folder, and no other, can
+/// also be exempted there.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Unprotected {
     #[serde(default)]
-    pub repos: Vec<String>,
+    pub repos: Vec<RepoRule>,
     #[serde(default)]
     pub files: Vec<String>,
     #[serde(default)]
@@ -458,33 +493,7 @@ impl<Trigger> Bounds<Trigger> {
                         "organization repos rules may be combined only with exact repository entries, not {pattern:?}"
                     );
                 }
-                RepoRule::Organization(rule) => {
-                    ensure!(
-                        forge == Forge::Github
-                            && self
-                                .hosts
-                                .iter()
-                                .all(|host| host.eq_ignore_ascii_case("github.com")),
-                        "organization repos rules require GitHub and hosts = [\"github.com\"]"
-                    );
-                    ensure!(
-                        !rule.forks || (!rule.properties.is_empty() && !rule.topics.is_empty()),
-                        "organization fork rules require nonempty properties and topics"
-                    );
-                    ensure!(
-                        rule.properties
-                            .iter()
-                            .all(|(key, value)| !key.is_empty() && !value.is_empty())
-                            && rule.topics.iter().all(|topic| !topic.is_empty()),
-                        "organization properties and topics must not contain empty names or values"
-                    );
-                    ensure!(
-                        REPO_RE.is_match(&format!("{}/repo", rule.org))
-                            && !rule.org.starts_with(['.', '-']),
-                        "invalid repository organization {:?}",
-                        rule.org
-                    );
-                }
+                RepoRule::Organization(rule) => rule.validate(forge, &self.hosts)?,
             }
         }
         for pattern in &self.bases {
@@ -551,11 +560,17 @@ impl<Trigger> Bounds<Trigger> {
             outputs.contains_key(output)
         })?;
         check_comment_on_duplicate(outputs.get("create_issue"), &self.native_handlers)?;
-        for repo in &self.unprotected_files.repos {
-            ensure!(
-                forge.is_repo(repo) && !dotted(repo),
-                "unprotected_files.repos requires exact repository names: {repo:?}"
-            );
+        // Never a name pattern: a glob would exempt any repository someone
+        // creates or transfers under a matching name.
+        for rule in &self.unprotected_files.repos {
+            match rule {
+                RepoRule::Pattern(repo) => ensure!(
+                    forge.is_repo(repo) && !dotted(repo),
+                    "unprotected_files.repos requires exact repository names or organization \
+                     rules: {repo:?}"
+                ),
+                RepoRule::Organization(rule) => rule.validate(forge, &self.hosts)?,
+            }
         }
         validate_dot_folders(
             &self.unprotected_files.dot_folders,
@@ -627,12 +642,19 @@ pub fn under(host: &str, domain: &str) -> bool {
     host == domain || host.ends_with(&format!(".{domain}"))
 }
 
-/// The protected file names for a patch to `repo`, under UNPROTECTED.
-pub fn protected_files(unprotected: &Unprotected, repo: &str) -> Vec<String> {
-    let exempt = unprotected
-        .repos
-        .iter()
-        .any(|own| own.eq_ignore_ascii_case(repo));
+impl Unprotected {
+    /// Whether `repos` names `repo` exactly. Organization rules need the
+    /// repository's live metadata, which the caller's `policy` reads.
+    pub fn names(&self, repo: &str) -> bool {
+        self.repos
+            .iter()
+            .any(|rule| matches!(rule, RepoRule::Pattern(name) if name.eq_ignore_ascii_case(repo)))
+    }
+}
+
+/// The protected file names for a patch to a repository UNPROTECTED
+/// exempts or not.
+pub fn protected_files(unprotected: &Unprotected, exempt: bool) -> Vec<String> {
     DEFAULT_PROTECTED_FILES
         .iter()
         .filter(|name| !(exempt && unprotected.files.iter().any(|file| file.as_str() == **name)))
@@ -640,13 +662,10 @@ pub fn protected_files(unprotected: &Unprotected, repo: &str) -> Vec<String> {
         .collect()
 }
 
-/// The dot-folders UNPROTECTED exempts for a patch to `repo`.
-pub fn dot_folders(unprotected: &Unprotected, repo: &str) -> Vec<String> {
-    if unprotected
-        .repos
-        .iter()
-        .any(|own| own.eq_ignore_ascii_case(repo))
-    {
+/// The dot-folders UNPROTECTED exempts for a patch to a repository it
+/// exempts or not.
+pub fn dot_folders(unprotected: &Unprotected, exempt: bool) -> Vec<String> {
+    if exempt {
         unprotected.dot_folders.clone()
     } else {
         Vec::new()

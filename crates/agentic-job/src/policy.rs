@@ -8,6 +8,7 @@
 //! starts, and what is within them becomes the run's [`Policy`]: the one
 //! thing `run`, `collect` and `check` all read.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -259,13 +260,31 @@ pub trait Compile {
 }
 
 impl Compile for Bounds {
+    fn compile_with(
+        &self,
+        request: &Request<'_>,
+        read: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
+    ) -> Result<Policy, Vec<String>> {
+        compile_bounds(self, None, request, &mut Metadata::new(read))
+    }
+}
+
+trait Admit {
+    fn admit(
+        &self,
+        request: &Request<'_>,
+        read: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
+    ) -> Result<Policy, Vec<String>>;
+}
+
+impl Admit for Bounds {
     /// The policy of a run, or every reason its request is refused.
     ///
     /// The request's strings are untrusted. Each is matched against a
     /// pattern before it is used, the messages quote them escaped, and
     /// the policy is serialized by serde: a quote or a newline in one can
     /// neither add a key to `policy.json` nor a line to the log.
-    fn compile_with(
+    fn admit(
         &self,
         request: &Request<'_>,
         read: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
@@ -685,9 +704,9 @@ impl Compile for Bounds {
                 .map_or(0, |github| github.outputs.stack_steps),
             create_pull_request: types.contains(&CREATE_PULL_REQUEST).then(|| PullRequest {
                 max: limit(CREATE_PULL_REQUEST).max,
-                protected_files: protected_files(&self.unprotected_files, repo),
+                protected_files: protected_files(&self.unprotected_files, false),
                 protect_top_level_dot_folders: true,
-                unprotected_dot_folders: dot_folders(&self.unprotected_files, repo),
+                unprotected_dot_folders: Vec::new(),
                 protected_paths: self.protected.clone(),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 draft: true,
@@ -708,9 +727,9 @@ impl Compile for Bounds {
                 replacement_base: None,
                 author: own_author.filter(|_| by_author).map(str::to_owned),
                 ready_when_complete: ready(PUSH_TO_PULL_REQUEST_BRANCH),
-                protected_files: protected_files(&self.unprotected_files, repo),
+                protected_files: protected_files(&self.unprotected_files, false),
                 protect_top_level_dot_folders: true,
-                unprotected_dot_folders: dot_folders(&self.unprotected_files, repo),
+                unprotected_dot_folders: Vec::new(),
                 protected_paths: self.protected.clone(),
                 protected_files_policy: ProtectedFilesPolicy::Blocked,
                 max_patch_size: self.max_patch_bytes.map(|bytes| bytes / KB),
@@ -888,14 +907,127 @@ fn admits_repo(
     )
 }
 
+/// One observation per API path for this policy invocation. A failed read is
+/// also an observation: do not retry it under a different bounds file or rule.
+struct Metadata<'a> {
+    fetch: &'a mut dyn FnMut(&str) -> Result<serde_json::Value>,
+    paths: BTreeMap<String, Result<serde_json::Value, String>>,
+}
+
+impl<'a> Metadata<'a> {
+    fn new(fetch: &'a mut dyn FnMut(&str) -> Result<serde_json::Value>) -> Self {
+        Self {
+            fetch,
+            paths: BTreeMap::new(),
+        }
+    }
+
+    fn read(&mut self, path: &str) -> Result<serde_json::Value> {
+        // Normalize repos/OWNER/NAME, where case is not significant. Keep
+        // the suffix as-is: it can contain a case-sensitive context ref.
+        let repo_end = path
+            .match_indices('/')
+            .nth(2)
+            .map_or(path.len(), |(i, _)| i);
+        let key = path[..repo_end].to_ascii_lowercase() + &path[repo_end..];
+        self.paths
+            .entry(key)
+            .or_insert_with(|| (self.fetch)(path).map_err(|error| format!("{error:#}")))
+            .clone()
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+fn compile_bounds(
+    bounds: &Bounds,
+    org: Option<&Bounds>,
+    request: &Request<'_>,
+    metadata: &mut Metadata<'_>,
+) -> Result<Policy, Vec<String>> {
+    let mut read = |path: &str| metadata.read(path);
+    let caller = bounds.admit(request, &mut read)?;
+    let organization = org
+        .map(|org| org.admit(request, &mut read).map(|policy| (org, policy)))
+        .transpose()?;
+    // Only once both files admit the run's patch, each file's own
+    // exemption, which the one intersection of patch protections combines.
+    let Some((org, other)) = organization else {
+        return Ok(exempt(caller, bounds, "caller", request, &mut read));
+    };
+    if other.safe_outputs.patch_carrier().is_none() {
+        return intersect(caller, other);
+    }
+    let caller = exempt(caller, bounds, "caller", request, &mut read);
+    intersect(
+        caller,
+        exempt(other, org, "organization", request, &mut read),
+    )
+}
+
+/// POLICY with the patch exemptions its BOUNDS make for the request: in a
+/// repository `unprotected_files.repos` names exactly, or one a rule
+/// matches by live metadata where the patch also lands. A rule speaks only
+/// for the checkout's metadata, never for another destination's. A
+/// nonmatch, or metadata that cannot be read, keeps every protection.
+fn exempt(
+    mut policy: Policy,
+    bounds: &Bounds,
+    label: &str,
+    request: &Request<'_>,
+    read: &mut dyn FnMut(&str) -> Result<serde_json::Value>,
+) -> Policy {
+    let unprotected = &bounds.unprotected_files;
+    let (files, folders) = if let Some(pr) = &mut policy.safe_outputs.create_pull_request {
+        (&mut pr.protected_files, &mut pr.unprotected_dot_folders)
+    } else if let Some(push) = &mut policy.safe_outputs.push_to_pull_request_branch {
+        (&mut push.protected_files, &mut push.unprotected_dot_folders)
+    } else {
+        return policy;
+    };
+    let owner = request.repo.split_once('/').map_or("", |(owner, _)| owner);
+    let rules: Vec<RepoRule> = unprotected
+        .repos
+        .iter()
+        .filter(|rule| matches!(rule, RepoRule::Organization(rule) if rule.org.eq_ignore_ascii_case(owner)))
+        .cloned()
+        .collect();
+    let exempted = unprotected.names(request.repo)
+        || (!rules.is_empty()
+            && match request.output_repo {
+                Some(output) if output.eq_ignore_ascii_case(request.repo) => {
+                    admits_repo(&rules, request.repo, read).unwrap_or_else(|error| {
+                        eprintln!(
+                            "warning: {label} unprotected_files did not exempt {:?}: {error:#}",
+                            request.repo
+                        );
+                        false
+                    })
+                }
+                output => {
+                    eprintln!(
+                        "warning: {label} unprotected_files rules exempt only patches applied \
+                         to the checkout {:?}, not to {}",
+                        request.repo,
+                        output.map_or_else(|| "an unnamed one".to_owned(), |o| format!("{o:?}"))
+                    );
+                    false
+                }
+            });
+    *files = protected_files(unprotected, exempted);
+    *folders = dot_folders(unprotected, exempted);
+    policy
+}
+
 pub fn run(args: &Args) -> Result<Exit> {
     let bounds = Bounds::load(&args.allow)?;
     let org_bounds = args.org_allow.as_deref().map(Bounds::load).transpose()?;
     dispatch_admission(bounds.dedupe || org_bounds.as_ref().is_some_and(|b| b.dedupe))?;
+    let mut fetch = context::forge();
+    let mut metadata = Metadata::new(&mut fetch);
     // A dispatcher must not turn context into a way to read outside the caller's
     // authority. Both bounds files admit every URL and repository, independently.
     let context: Vec<ContextRepo> = match &args.context_request {
-        Some(request) => context::resolve(request, &mut context::forge())?,
+        Some(request) => context::resolve(request, &mut |path| metadata.read(path))?,
         None => {
             ensure!(
                 args.context.len() <= context::MAX_REQUEST,
@@ -912,7 +1044,8 @@ pub fn run(args: &Args) -> Result<Exit> {
     for item in &context {
         for bound in std::iter::once(&bounds).chain(org_bounds.iter()) {
             ensure!(
-                item.public || admits_repo(&bound.repos, &item.repo, &mut context::forge())?,
+                item.public
+                    || admits_repo(&bound.repos, &item.repo, &mut |path| metadata.read(path))?,
                 "context repository {:?} is outside caller bounds",
                 item.repo
             );
@@ -938,14 +1071,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         item_repo: args.item_repo.as_deref(),
         private: args.private,
     };
-    let compiled = bounds
-        .compile(&request)
-        .and_then(|policy| match &org_bounds {
-            Some(org) => org
-                .compile(&request)
-                .and_then(|other| intersect(policy, other)),
-            None => Ok(policy),
-        });
+    let compiled = compile_bounds(&bounds, org_bounds.as_ref(), &request, &mut metadata);
     match compiled {
         Ok(mut policy) => {
             if let Some(path) = &args.external_receipt {
@@ -1342,6 +1468,275 @@ missing_data = { max = 3 }
                 .compile_with(&request, &mut |_| Ok(live.clone()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn unprotected_organization_rules_match_live_metadata() {
+        use serde_json::json;
+
+        let mut bounds = bounds();
+        bounds.unprotected_files = toml::from_str(
+            r#"repos = [{org = "example-org", forks = true, properties = { category = "mirror" }, topics = ["managed-fork"]}]
+            files = ["CONTRIBUTING.md"]
+            dot_folders = [".github"]"#,
+        )
+        .unwrap();
+        bounds.validate().unwrap();
+        let live = json!({"full_name": REPO,
+            "owner": {"login": "example-org", "type": "Organization"},
+            "fork": true, "archived": false, "parent": {"full_name": "upstream/example"},
+            "topics": ["managed-fork"]});
+        let properties = json!([{"property_name": "category", "value": "mirror"}]);
+        // A rule exempts only a patch applied to the checkout it matched.
+        let here = Request {
+            output_repo: Some(REPO),
+            ..request()
+        };
+        let compile =
+            |bounds: &Bounds, live: &serde_json::Value, properties: &serde_json::Value| {
+                bounds
+                    .compile_with(&here, &mut |path| match path {
+                        "repos/example-org/example" => Ok(live.clone()),
+                        "repos/example-org/example/properties/values" => Ok(properties.clone()),
+                        _ => panic!("unexpected read: {path}"),
+                    })
+                    .unwrap()
+            };
+        let exempted = |policy: &Policy| {
+            let pr = policy.safe_outputs.create_pull_request.as_ref().unwrap();
+            let unprotected = !pr
+                .protected_files
+                .iter()
+                .any(|name| name == "CONTRIBUTING.md");
+            assert_eq!(unprotected, !pr.unprotected_dot_folders.is_empty());
+            unprotected
+        };
+        let matched = compile(&bounds, &live, &properties);
+        assert_eq!(
+            matched
+                .safe_outputs
+                .create_pull_request
+                .as_ref()
+                .unwrap()
+                .unprotected_dot_folders,
+            [".github"]
+        );
+        assert!(exempted(&matched));
+        for output_repo in [None, Some("upstream/example")] {
+            let elsewhere = Request {
+                output_repo,
+                ..request()
+            };
+            assert!(!exempted(
+                &bounds
+                    .compile_with(&elsewhere, &mut |path| panic!("unexpected read: {path}"))
+                    .unwrap()
+            ));
+        }
+        for (pointer, value) in [
+            // A repository of the organization that is not a fork.
+            ("/fork", json!(false)),
+            ("/topics", json!([])),
+            ("/parent", json!(null)),
+            ("/archived", json!(true)),
+        ] {
+            let mut answer = live.clone();
+            *answer.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                !exempted(&compile(&bounds, &answer, &properties)),
+                "{pointer}"
+            );
+        }
+        for answer in [
+            json!([]),
+            json!([{"property_name": "category", "value": "first-party"}]),
+        ] {
+            assert!(!exempted(&compile(&bounds, &live, &answer)), "{answer}");
+        }
+        // Metadata that cannot be read keeps every protection, and the
+        // run, which `repos` admits by name, still compiles.
+        let policy = bounds
+            .compile_with(&here, &mut |_| bail!("metadata unavailable"))
+            .unwrap();
+        assert!(!exempted(&policy));
+        // Another organization's repository is never read.
+        let mut other = bounds.clone();
+        if let RepoRule::Organization(rule) = &mut other.unprotected_files.repos[0] {
+            rule.org = "example-forge".into();
+        }
+        assert!(!exempted(
+            &other
+                .compile_with(&here, &mut |path| panic!("unexpected read: {path}"))
+                .unwrap()
+        ));
+        // Organization bounds that do not exempt it take the exemption away.
+        let plain = compile(&self::bounds(), &live, &properties);
+        for (left, right) in [(matched.clone(), plain.clone()), (plain, matched)] {
+            assert!(!exempted(&intersect(left, right).unwrap()));
+        }
+        // A fork rule needs the metadata, and a secondary pull request's
+        // exemptions name its one repository.
+        let mut bare = self::bounds();
+        bare.unprotected_files.repos = toml::from_str::<toml::Table>(
+            r#"repos = [{org = "example-org", forks = true, topics = ["managed-fork"]}]"#,
+        )
+        .unwrap()["repos"]
+            .clone()
+            .try_into()
+            .unwrap();
+        assert!(
+            bare.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("nonempty properties and topics")
+        );
+        let secondary: Bounds = toml::from_str(&format!(
+            "{BOUNDS}{SECONDARY}\n[github.secondary_pull_request.unprotected_files]\n\
+             repos = [{{org = \"example-forge\", forks = false}}]\n"
+        ))
+        .unwrap();
+        assert!(
+            secondary
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("may name only \"example-forge/tools\"")
+        );
+    }
+
+    #[test]
+    fn workflow_exemptions_use_one_observation_across_bounds() {
+        use safe_outputs::check::{BASE_COMMIT_HEADER, read_patch};
+        use serde_json::json;
+
+        let exemption = |category| {
+            toml::from_str(&format!(
+                r#"repos = [{{org = "example-org", forks = false, properties = {{ category = "{category}" }} }}]
+                dot_folders = [".github"]"#
+            ))
+            .unwrap()
+        };
+        let mut caller = bounds();
+        caller.unprotected_files = exemption("mirror");
+        caller.repos = caller.unprotected_files.repos.clone();
+        let mut org = bounds();
+        let live = json!({"full_name": REPO, "owner": {"login": "example-org", "type": "Organization"},
+            "fork": false, "archived": false});
+        const BASE: &str = "1111111111111111111111111111111111111111";
+        let path = ".github/workflows/ci.yml";
+        let patch = format!(
+            "From 2222222222222222222222222222222222222222 Mon Sep 17 00:00:00 2001\n\
+             {BASE_COMMIT_HEADER}: {BASE}\n\
+             From: agent <agent@localhost>\nSubject: [PATCH] Name the workflow\n\n---\n\
+             diff --git a/{path} b/{path}\nindex f328e4d..a83147c 100644\n\
+             --- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-name: Old\n+name: New\n"
+        );
+        for (org_category, allowed) in [("first-party", false), ("mirror", true)] {
+            org.unprotected_files = exemption(org_category);
+            caller.validate().unwrap();
+            org.validate().unwrap();
+            let mut properties = ["mirror", "first-party"].into_iter();
+            let mut repo_reads = 0;
+            let mut read = |path: &str| match path {
+                "repos/example-org/example" => {
+                    repo_reads += 1;
+                    Ok(live.clone())
+                }
+                "repos/example-org/example/properties/values" => Ok(json!([{
+                    "property_name": "category", "value": properties.next().unwrap()
+                }])),
+                _ => panic!("unexpected read: {path}"),
+            };
+            let policy = compile_bounds(
+                &caller,
+                Some(&org),
+                &Request {
+                    output_repo: Some(REPO),
+                    ..request()
+                },
+                &mut Metadata::new(&mut read),
+            )
+            .unwrap();
+            let (_, rules) = policy.safe_outputs.patch_carrier().unwrap();
+            let reading = read_patch(&patch, &rules, BASE);
+            assert_eq!(reading.files, [path]);
+            if allowed {
+                assert!(reading.problems.is_empty(), "{:?}", reading.problems);
+            } else {
+                assert!(
+                    reading
+                        .problems
+                        .contains(&format!("protected files: {path}"))
+                );
+            }
+            assert_eq!(properties.next(), Some("first-party"));
+            assert_eq!(repo_reads, 1);
+        }
+    }
+
+    #[test]
+    fn exemption_metadata_is_not_read_without_an_admitted_primary_patch() {
+        let mut caller = bounds();
+        caller.unprotected_files = toml::from_str(
+            r#"repos = [{org = "example-org", forks = false}]
+            dot_folders = [".github"]"#,
+        )
+        .unwrap();
+        let mut org = bounds();
+        let mut read = |path: &str| panic!("unexpected read: {path}");
+        let here = Request {
+            output_repo: Some(REPO),
+            ..request()
+        };
+
+        let analysis = Request {
+            kind: Kind::Analysis,
+            outputs: "add_comment",
+            ..here
+        };
+        assert!(caller.compile_with(&analysis, &mut read).is_ok());
+        let invalid = Request {
+            base: "not-allowed",
+            ..here
+        };
+        assert!(caller.compile_with(&invalid, &mut read).is_err());
+
+        let mut metadata = Metadata::new(&mut read);
+        org.repos = vec!["another-org/example".into()];
+        assert!(compile_bounds(&caller, Some(&org), &here, &mut metadata).is_err());
+        org.repos = caller.repos.clone();
+        org.github
+            .as_mut()
+            .unwrap()
+            .outputs
+            .types
+            .remove(CREATE_PULL_REQUEST);
+        let all = Request {
+            outputs: ALL_OUTPUTS,
+            ..here
+        };
+        let policy = compile_bounds(&caller, Some(&org), &all, &mut metadata).unwrap();
+        assert!(policy.safe_outputs.patch_carrier().is_none());
+    }
+
+    #[test]
+    fn metadata_failures_are_memoized_across_repository_casing() {
+        let mut calls = 0;
+        let mut read = |_: &str| -> Result<serde_json::Value> {
+            calls += 1;
+            bail!("metadata unavailable")
+        };
+        let mut metadata = Metadata::new(&mut read);
+        for repo in ["example-org/example", "EXAMPLE-ORG/Example"] {
+            assert_eq!(
+                metadata
+                    .read(&format!("repos/{repo}/properties/values"))
+                    .unwrap_err()
+                    .to_string(),
+                "metadata unavailable"
+            );
+        }
+        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -1894,7 +2289,7 @@ max_patch_files = 10
             (vec!["example-org/other"], false),
         ] {
             let mut bounds = bounds();
-            bounds.unprotected_files.repos = repos.into_iter().map(str::to_owned).collect();
+            bounds.unprotected_files.repos = repos.into_iter().map(RepoRule::from).collect();
             bounds.unprotected_files.dot_folders = vec![".github".into()];
             bounds.validate().unwrap();
             let policy = bounds.compile(&request()).unwrap();
@@ -5232,7 +5627,10 @@ max_patch_files = 10
             ("example-forge/config", false),
         ];
         for (repo, own) in cases {
-            let protected = protected_files(&bounds.unprotected_files, repo);
+            let protected = protected_files(
+                &bounds.unprotected_files,
+                bounds.unprotected_files.names(repo),
+            );
             let dropped: Vec<&str> = DEFAULT_PROTECTED_FILES
                 .iter()
                 .copied()

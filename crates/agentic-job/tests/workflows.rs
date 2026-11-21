@@ -6479,9 +6479,28 @@ fn the_request_step_tells_the_policy_command_its_token_and_targets() {
         Result<Vec<&'a str>, &'a str>,
     );
     let cases: Vec<Case> = vec![
-        ("", "", vec![], Ok(vec!["--job-token"])),
-        ("", "64", vec![], Ok(vec!["--job-token"])),
-        ("apply", "64", vec![], Ok(vec![])),
+        // A pull request applied to the checkout names it, for a metadata
+        // rule's exemption; one to another repository does not.
+        (
+            "",
+            "",
+            vec![],
+            Ok(vec!["--job-token", "--output-repo", "o/r"]),
+        ),
+        (
+            "",
+            "64",
+            vec![],
+            Ok(vec!["--job-token", "--output-repo", "o/r"]),
+        ),
+        ("apply", "64", vec![], Ok(vec!["--output-repo", "o/r"])),
+        (
+            "apply",
+            "64",
+            vec![("OUTPUT_REPO", "O/R")],
+            Ok(vec!["--output-repo", "o/r"]),
+        ),
+        ("apply", "64", vec![("OUTPUT_REPO", "x/y")], Ok(vec![])),
         ("apply", "0", vec![], Err("issue is not a number")),
         ("apply", "64 ", vec![], Err("issue is not a number")),
         (
@@ -6513,7 +6532,7 @@ fn the_request_step_tells_the_policy_command_its_token_and_targets() {
             "apply",
             "64",
             item.to_vec(),
-            Ok(vec!["--item-repo", "o/tracker"]),
+            Ok(vec!["--item-repo", "o/tracker", "--output-repo", "o/r"]),
         ),
         (
             "apply",

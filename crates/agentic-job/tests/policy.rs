@@ -362,6 +362,85 @@ fn organization_bounds_cli() {
     }
 }
 
+/// Both bounds files' `unprotected_files`, through the command: exact names
+/// exempt `.github`, and a metadata rule never does for a patch applied
+/// anywhere but the checkout it matched, before any metadata is read.
+#[test]
+fn unprotected_files_rules_hold_to_the_checkout_destination() {
+    const REPO: &str = "example-org/example";
+    let temp = tempfile::tempdir().unwrap();
+    let write = |name: &str, exempt: &str| {
+        let path = temp.path().join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "hosts = ['github.com']\nrepos = ['{REPO}']\nbases = ['main']\n\
+                 max_outputs = 2\nmax_patch_bytes = 65536\nmax_patch_files = 10\n\
+                 [github.outputs]\ncreate_pull_request = {{ max = 1 }}\nnoop = {{ max = 1 }}\n\
+                 [unprotected_files]\nrepos = [{exempt}]\ndot_folders = ['.github']\n"
+            ),
+        )
+        .unwrap();
+        path
+    };
+    let rule = "{ org = 'example-org', forks = false, topics = ['managed'] }";
+    // The exemption, the destination, whether `.github` is exempted, and
+    // a part of the warning.
+    for (exempt, output_repo, exempted, warning) in [
+        ("'example-org/example'", None, true, None),
+        (rule, None, false, Some("not to an unnamed one")),
+        (
+            rule,
+            Some("upstream/example"),
+            false,
+            Some("not to \"upstream/example\""),
+        ),
+        // Named, so read: this API cannot answer, which keeps protection.
+        (rule, Some(REPO), false, Some("did not exempt")),
+    ] {
+        let caller = write("caller.toml", exempt);
+        let org = write("org.toml", exempt);
+        let mut command = Command::new(BIN);
+        command
+            .arg("policy")
+            .arg("--allow")
+            .arg(&caller)
+            .arg("--org-allow")
+            .arg(&org)
+            .args(REQUEST.iter().flat_map(|(flag, value)| {
+                [
+                    *flag,
+                    match *flag {
+                        "--repo" => REPO,
+                        "--clone-url" => "https://github.com/example-org/example",
+                        _ => value,
+                    },
+                ]
+            }))
+            .env("GITHUB_API_URL", "https://127.0.0.1:9")
+            .env("GH_TOKEN", "fixture-read-token");
+        if let Some(output_repo) = output_repo {
+            command.args(["--output-repo", output_repo]);
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let folders = &policy["safe_outputs"]["create_pull_request"]["unprotected_dot_folders"];
+        assert_eq!(
+            folders
+                .as_array()
+                .is_some_and(|folders| !folders.is_empty()),
+            exempted,
+            "{exempt} {output_repo:?}: {policy}"
+        );
+        match warning {
+            Some(warning) => assert!(stderr.contains(warning), "{stderr}"),
+            None => assert!(!stderr.contains("unprotected_files"), "{stderr}"),
+        }
+    }
+}
+
 /// `--private` reaches the bounds: refused unless the caller's and the
 /// organization's files both set `private = true`, and then recorded.
 #[test]
