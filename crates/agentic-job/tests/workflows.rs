@@ -8590,10 +8590,10 @@ const FORGEJO_DISPATCH: &str = "workflow/forgejo/dispatch.yml";
 /// The Forgejo caller takes agent-board's job plan as strings, names runs
 /// as its in-flight listing matches them, never cancels or shares a
 /// concurrency group across items, and takes runners and configuration
-/// only from the caller's variables, with no credential.
+/// only from the caller's variables. Its one job runs no action, as
+/// Forgejo's automatic token can write to the caller's repository.
 #[test]
 fn forgejo_dispatch_takes_agent_boards_plan() {
-    let text = workflow(FORGEJO_DISPATCH);
     let doc = definition(FORGEJO_DISPATCH);
     let inputs = doc["on"]["workflow_dispatch"]["inputs"].as_hash().unwrap();
     let names: Vec<&str> = inputs.keys().map(|k| k.as_str().unwrap()).collect();
@@ -8612,40 +8612,55 @@ fn forgejo_dispatch_takes_agent_boards_plan() {
         assert!(group.contains(part), "{group}");
     }
     let jobs = doc["jobs"].as_hash().unwrap();
-    for (name, job) in jobs {
-        assert!(job["concurrency"].is_badvalue(), "{name:?}: own group");
-        assert_eq!(
-            job["runs-on"].as_str(),
-            Some("${{ fromJSON(vars.AGENT_RUNNER) }}"),
-            "{name:?}"
-        );
-    }
-    for credential in ["secrets.", ".token", "TOKEN"] {
-        assert!(!text.contains(credential), "{credential}");
+    assert_eq!(jobs.len(), 1);
+    let job = &doc["jobs"]["trial"];
+    assert!(job["concurrency"].is_badvalue(), "own group");
+    assert_eq!(
+        job["runs-on"].as_str(),
+        Some("${{ fromJSON(vars.TRIAL_RUNNER) }}")
+    );
+    for step in job["steps"].as_vec().unwrap() {
+        assert!(step["uses"].is_badvalue(), "{step:?}");
+        assert!(step["run"].as_str().is_some(), "{step:?}");
     }
 }
 
-/// The agent job refuses first: without the caller's configuration, and
-/// on a runner that cannot provide the sandbox, naming #1347.
+/// The trial refuses before anything else runs unless the caller opts in
+/// and asks for an implement dispatch on the exact default branch.
 #[test]
 fn forgejo_dispatch_refuses_before_anything_runs() {
     let doc = definition(FORGEJO_DISPATCH);
-    let first = &doc["jobs"]["agent"]["steps"][0];
+    let first = &doc["jobs"]["trial"]["steps"][0];
+    assert_eq!(first["id"].as_str(), Some("admit"));
+    let env = &first["env"];
+    assert_eq!(env["SCRIPTED"].as_str(), Some("${{ vars.TRIAL_SCRIPTED }}"));
+    assert_eq!(env["KIND"].as_str(), Some("${{ inputs.kind }}"));
+    assert_eq!(
+        env["DEFAULT_BRANCH"].as_str(),
+        Some("${{ forgejo.event.repository.default_branch }}")
+    );
     let script = first["run"].as_str().unwrap();
-    assert!(script.contains("#1347"), "{script}");
-    for (url, bounds, missing) in [
-        ("", "", "FORGEJO_URL"),
-        ("https://forgejo.example", "", "AGENT_BOUNDS"),
+    for (scripted, kind, git_ref, expected) in [
+        ("", "implement", "refs/heads/main", false),
+        ("TRUE", "implement", "refs/heads/main", false),
+        ("true", "triage", "refs/heads/main", false),
+        ("true", "implement", "refs/heads/Main", false),
+        ("true", "implement", "refs/tags/main", false),
+        ("true", "implement", "refs/heads/main", true),
     ] {
         let output = Command::new("bash")
             .args(["-c", script])
-            .env("FORGEJO_URL", url)
-            .env("AGENT_BOUNDS", bounds)
+            .env("SCRIPTED", scripted)
+            .env("KIND", kind)
+            .env("DEFAULT_BRANCH", "main")
+            .env("FORGEJO_REF", git_ref)
             .output()
             .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(!output.status.success(), "{missing}: {output:?}");
-        assert!(stdout.contains(missing), "{stdout}");
+        assert_eq!(
+            output.status.success(),
+            expected,
+            "{scripted} {kind} {git_ref}: {output:?}"
+        );
     }
 }
 

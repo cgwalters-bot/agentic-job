@@ -359,7 +359,8 @@ jobs:
           tool: just@1.58.0
       - run: just claude-acp-test
 
-  # `agentic-job apply` against a real Forgejo (crates/agentic-job/tests/forgejo.rs):
+  # `agentic-job apply`, and the Forgejo caller's lint and producer/check
+  # scripts, against a real Forgejo (crates/agentic-job/tests/forgejo.rs):
   # a throwaway service container on loopback, bootstrapped by the test,
   # with no secret of this repository. Read-only job token. Not listed in
   # required-checks until it has proven stable (tests/workflows.rs's
@@ -384,7 +385,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo test --locked --test forgejo -- --ignored --nocapture
+      - run: cargo test --locked --test forgejo -- --include-ignored --nocapture
         env:
           AGENTIC_JOB_TEST_FORGEJO: http://127.0.0.1:3000
           AGENTIC_JOB_TEST_FORGEJO_CONTAINER: ${{ job.services.forgejo.id }}

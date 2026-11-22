@@ -1,6 +1,8 @@
 //! `agentic-job apply` against a real Forgejo, where the unit tests of
 //! `apply::forgejo` have recorded answers: the API, its token scopes and
-//! the git push to a fork, as a release of the forge has them.
+//! the git push to a fork, as a release of the forge has them. Also the
+//! Forgejo caller's credential lint and its scripted producer and check
+//! steps, which end at check.
 //!
 //! Needs a fresh Forgejo at `AGENTIC_JOB_TEST_FORGEJO` (`http://127.0.0.1:3000`)
 //! running in the container `AGENTIC_JOB_TEST_FORGEJO_CONTAINER`, where
@@ -8,12 +10,13 @@
 //! CI's `forgejo` job starts one and runs:
 //!
 //! ```text
-//! cargo test --test forgejo -- --ignored --nocapture
+//! cargo test --locked --test forgejo -- --include-ignored --nocapture
 //! ```
 
 // Helpers outside a #[test] function are still test code.
 #![allow(clippy::unwrap_used)]
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -21,6 +24,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
+use yaml_rust2::{Yaml, YamlLoader};
 
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
@@ -45,6 +49,57 @@ const SCOPES: &[&str] = &["write:repository", "write:issue"];
 
 const NAME: &str = "target";
 const RUN_URL: &str = "https://ci.example/runs/1";
+
+fn dispatch_source() -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflow/forgejo/dispatch.yml"),
+    )
+    .unwrap()
+}
+
+fn dispatch(source: &str) -> Yaml {
+    let mut docs = YamlLoader::load_from_str(source).unwrap();
+    assert_eq!(docs.len(), 1);
+    docs.remove(0)
+}
+
+fn step<'a>(doc: &'a Yaml, job: &str, id: &str) -> &'a Yaml {
+    doc["jobs"][job]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some(id))
+        .unwrap()
+}
+
+/// Reject explicit publishing credentials wherever they are wired: a
+/// tripwire for wiring one in, not a test of what a job can reach. The
+/// automatic job token is separate and is not a publication credential.
+fn no_publishing_credentials(node: &Yaml, credential: &regex::Regex) -> bool {
+    match node {
+        Yaml::Hash(map) => map.iter().all(|(key, value)| {
+            no_publishing_credentials(key, credential)
+                && no_publishing_credentials(value, credential)
+        }),
+        Yaml::Array(items) => items
+            .iter()
+            .all(|node| no_publishing_credentials(node, credential)),
+        Yaml::String(text) => !credential.is_match(text),
+        _ => true,
+    }
+}
+
+#[test]
+fn forgejo_dispatch_has_no_publishing_credential() {
+    let source = dispatch_source();
+    let doc = dispatch(&source);
+    // Any token spelling, `.token` aliases of the automatic one included.
+    let credential = regex::Regex::new(r"(?i)\bsecrets\b|token|\bforgejo_apply_runner\b").unwrap();
+    assert!(no_publishing_credentials(&doc, &credential));
+    let trial = &doc["jobs"]["trial"];
+    assert!(trial["if"].is_badvalue());
+    assert!(trial["continue-on-error"].is_badvalue());
+}
 
 /// One user's way in to the API.
 enum Auth<'a> {
@@ -81,6 +136,12 @@ impl Forge {
             ("POST", Some(body)) => self
                 .http
                 .post(&url)
+                .header("authorization", &authorization)
+                .header("content-type", "application/json")
+                .send(body.to_string().as_bytes()),
+            ("PATCH", Some(body)) => self
+                .http
+                .patch(&url)
                 .header("authorization", &authorization)
                 .header("content-type", "application/json")
                 .send(body.to_string().as_bytes()),
@@ -484,6 +545,217 @@ fn branches(forge: &Forge, auth: &Auth, repo: &str) -> Vec<String> {
     names
 }
 
+/// Execute the trial's produce and verify scripts, which end at check: the
+/// caller publishes nothing.
+fn scripted_dispatch(forge: &Forge, dir: &Path) {
+    let target = format!("{ADMIN}/{NAME}");
+    let doc = dispatch(&dispatch_source());
+    let temp = dir.join("trial");
+    std::fs::create_dir(&temp).unwrap();
+
+    let run_with = |id: &str, inherited: &[(&str, String)]| {
+        let path = std::env::var_os("PATH").unwrap();
+        let path = std::env::join_paths(
+            [Path::new(BIN).parent().unwrap().to_owned()]
+                .into_iter()
+                .chain(std::env::split_paths(&path)),
+        )
+        .unwrap();
+        let mut command = Command::new("bash");
+        for name in PROXY_VARS {
+            command.env_remove(name);
+        }
+        command
+            .args([
+                "-eo",
+                "pipefail",
+                "-c",
+                step(&doc, "trial", id)["run"].as_str().unwrap(),
+            ])
+            .env_remove("FORGEJO_TOKEN")
+            .env_remove("APPLY_ROLE_BINDINGS")
+            .env("PATH", path)
+            .env("RUNNER_TEMP", &temp)
+            .env("FORGEJO_URL", &forge.server)
+            .env("AGENT_BOUNDS", dir.join("publishing.toml"))
+            .env("TARGET_REPO", &target)
+            .env("TARGET_BASE", "main")
+            .env("FORGEJO_RUN_ID", "450")
+            .env("FORGEJO_REPOSITORY", "example/dispatch")
+            .envs(inherited.iter().map(|(name, value)| (name, value)));
+        command.output().unwrap()
+    };
+    let run = |id: &str| run_with(id, &[]);
+
+    let edit = |name: &str, change: Value| {
+        let (status, answer) = forge.call(
+            &Auth::Basic(ADMIN),
+            "PATCH",
+            &format!("/repos/{ADMIN}/{name}"),
+            Some(&change),
+        );
+        assert_eq!(status, 200, "edit {name} with {change}: {answer}");
+    };
+
+    // The base lookup is anonymous: a private target is refused even when
+    // the runner's Git configuration, netrc (by `HOME` or `NETRC`) or
+    // askpass holds a credential for it.
+    let header = format!(
+        "Authorization: Basic {}",
+        STANDARD.encode(format!("{ADMIN}:{PASSWORD}"))
+    );
+    let creds = dir.join("creds");
+    let config_home = creds.join("config-home");
+    let xdg_home = creds.join("xdg-home");
+    let netrc_home = creds.join("netrc-home");
+    let repo = creds.join("repo");
+    for path in [&config_home, &xdg_home.join("git"), &netrc_home, &repo] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let gitconfig = config_home.join(".gitconfig");
+    std::fs::write(&gitconfig, format!("[http]\n\textraHeader = {header}\n")).unwrap();
+    std::fs::copy(&gitconfig, xdg_home.join("git/config")).unwrap();
+    let askpass = creds.join("askpass");
+    std::fs::write(
+        &askpass,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in Username*) echo {ADMIN} ;; *) echo {PASSWORD} ;; esac\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = forge.server.strip_prefix("http://").unwrap();
+    let host = host.split(':').next().unwrap();
+    std::fs::write(
+        netrc_home.join(".netrc"),
+        format!("machine {host} login {ADMIN} password {PASSWORD}\n"),
+    )
+    .unwrap();
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "http.extraHeader", &header],
+    ] {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert_success("git init", &output);
+    }
+    let path = |path: &Path| path.to_str().unwrap().to_owned();
+    let inherited: [(&str, Vec<(&str, String)>); 9] = [
+        ("global", vec![("HOME", path(&config_home))]),
+        ("xdg", vec![("XDG_CONFIG_HOME", path(&xdg_home))]),
+        ("askpass", vec![("GIT_ASKPASS", path(&askpass))]),
+        ("system", vec![("GIT_CONFIG_SYSTEM", path(&gitconfig))]),
+        ("repository", vec![("GIT_DIR", path(&repo.join(".git")))]),
+        (
+            "environment",
+            vec![
+                ("GIT_CONFIG_COUNT", "1".to_owned()),
+                ("GIT_CONFIG_KEY_0", "http.extraHeader".to_owned()),
+                ("GIT_CONFIG_VALUE_0", header.clone()),
+            ],
+        ),
+        (
+            "parameters",
+            vec![(
+                "GIT_CONFIG_PARAMETERS",
+                format!("'http.extraheader'='{header}'"),
+            )],
+        ),
+        ("netrc", vec![("HOME", path(&netrc_home))]),
+        (
+            "netrc-path",
+            vec![("NETRC", path(&netrc_home.join(".netrc")))],
+        ),
+    ];
+    let clone_url = format!("{}/{target}", forge.server);
+    edit(NAME, json!({"private": true}));
+    for (case, env) in &inherited {
+        // The credential works where the lookup does not shed it.
+        let mut git = Command::new("git");
+        for name in PROXY_VARS {
+            git.env_remove(name);
+        }
+        let reachable = git
+            .args([
+                "ls-remote",
+                "--exit-code",
+                "--",
+                &clone_url,
+                "refs/heads/main",
+            ])
+            .current_dir(&creds)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .output()
+            .unwrap();
+        assert_success(&format!("{case} credential"), &reachable);
+        let refused = run_with("produce", env);
+        assert!(!refused.status.success(), "{case}: {refused:?}");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            stderr.contains("terminal prompts disabled"),
+            "{case}: {stderr}"
+        );
+        assert!(!temp.join("handback").exists(), "{case}: {refused:?}");
+    }
+    edit(NAME, json!({"private": false}));
+
+    // A renamed target redirects from the name the bounds allow; the
+    // producer must not read the new name's base through it.
+    edit(NAME, json!({"name": "renamed"}));
+    let redirected = run("produce");
+    edit("renamed", json!({"name": NAME}));
+    assert!(!redirected.status.success(), "{redirected:?}");
+    // Git's own refusal, not the separation check or a missing repository.
+    let stderr = String::from_utf8_lossy(&redirected.stderr);
+    assert!(
+        stderr.contains("The requested URL returned error: 30"),
+        "{stderr}"
+    );
+    assert!(temp.join("policy.json").exists(), "{redirected:?}");
+    assert!(!temp.join("handback").exists(), "{redirected:?}");
+
+    assert_success("Forgejo producer", &run("produce"));
+
+    let patch = temp.join("handback/aw-agent-run-450.patch");
+    let original = std::fs::read(&patch).unwrap();
+    let mut oversized = original.clone();
+    oversized.extend(std::iter::repeat_n(b'x', 65536));
+    std::fs::write(&patch, oversized).unwrap();
+    let refused = run("verify");
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let checked = temp.join("checked");
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(checked.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["ok"], false, "{report}");
+    assert!(!checked.join("aw-agent-run-450.patch").exists());
+    std::fs::remove_dir_all(&checked).unwrap();
+    std::fs::write(&patch, original).unwrap();
+
+    assert_success("Forgejo check", &run("verify"));
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(checked.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["ok"], true, "{report}");
+    // The trial opens no draft, so the checked request is what apply
+    // would publish.
+    assert_eq!(
+        report["items"],
+        json!([{
+            "type": "create_pull_request",
+            "branch": "agent-run-450",
+            "title": "Exercise the Forgejo caller",
+            "body": "Deterministic publishing trial.",
+            "draft": true,
+        }]),
+        "{report}"
+    );
+    assert!(checked.join("aw-agent-run-450.patch").exists());
+    assert!(!checked.join("outputs.jsonl").exists());
+}
+
 #[test]
 #[ignore = "needs a Forgejo container; CI's forgejo job runs it"]
 fn apply_publishes_to_forgejo() {
@@ -580,6 +852,7 @@ fn apply_publishes_to_forgejo() {
     assert_eq!(files, ["src/x"]);
     assert_eq!(branches(&forge, &admin, &target), ["main"]);
     assert_eq!(branches(&forge, &admin, &fork), ["agent-run-2", "main"]);
+    scripted_dispatch(&forge, dir.path());
 
     // Labels, where Forgejo's endpoints act on more than they name: a
     // removal takes a name before an ID, and an exclusive label replaces

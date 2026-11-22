@@ -1147,10 +1147,9 @@ requirement for adopting agentic-job.
 caller agent-board's Forgejo dispatch starts; a caller copies it to
 `.forgejo/workflows/dispatch.yml` in its own repository. It is kept out of
 this repository's `.forgejo/workflows/`, because any file there makes a
-Forgejo mirror of this repository ignore `.github/workflows/`. It is a first slice of
-[#2399](https://github.com/cgwalters-forge/agentic-job/issues/2399): it
-takes the dispatch and refuses an unsuitable runner, then stops with an
-error. No session, check or apply runs yet.
+Forgejo mirror of this repository ignore `.github/workflows/`. It only
+supports an opt-in scripted trial through check; it neither publishes nor
+runs an agent.
 
 Its `workflow_dispatch` inputs are strings matching agent-board's job plan:
 `task`, `repo` (`OWNER/NAME`), `item`, `kind`, `pool` and `base`. The run is
@@ -1159,38 +1158,71 @@ Runs are grouped per kind, repository and item with `cancel-in-progress: false`,
 so a second dispatch for an item waits for the first; no group is shared
 across items.
 
-It reads only the caller's repository variables and has no token or secret:
+The caller sets these repository variables:
 
-- `AGENT_RUNNER`: the agent job's runner labels as JSON, for example
-  `["agentic-job"]`. There is no default label; unset, the run fails to start.
-- `FORGEJO_URL`: the Forgejo instance's URL, never taken from the event.
-- `AGENT_BOUNDS`: the path of the caller's bounds file.
+- `TRIAL_FORGEJO_URL`: the Forgejo instance's URL, never taken from the event.
+- `AGENT_BOUNDS`: the absolute path of the caller's bounds file on the
+  runner, provisioned there by the runner's owner and not writable by jobs.
 
-The agent job refuses first when `FORGEJO_URL` or `AGENT_BOUNDS` is empty,
-and when the runner cannot provide the [sandbox](sandbox.md): it needs
-systemd as the init, passwordless sudo and no container around the job.
-A container runner would run the agent with no sandbox at all, so it is
-refused until [#1347](https://github.com/cgwalters-forge/agentic-job/issues/1347)
-gives container runners one.
+### Scripted Forgejo trial
 
-It differs from the [GitHub caller](../.github/workflows/dispatch.yml):
-`kind` is a free string rather than a choice, and `pool` and `base` are
-new; there is no `item-repo` or `status-comment`, no `scripted` trial, no
-reusable `workflow_call` and no target job running `agentic-job dispatch`.
-Its configuration is three variables with no hosted default, rather than
-`AGENT_CONFIG` falling back to `hosted.toml`, and the bounds are the
-caller's own rather than `.github/agentic-job/dispatch.toml`.
+- Set `TRIAL_SCRIPTED` to `true` to enable the trial. The job otherwise
+  refuses before anything else runs; it only accepts an `implement` dispatch
+  on the caller's exact default branch.
+- Set `TRIAL_RUNNER` to the JSON label or array for a trusted, isolated
+  runner. Provision a pinned `agentic-job` binary, Bash, Git and jq.
+- In `AGENT_BOUNDS`, admit the trial's public target and base, allow one
+  `create_pull_request` under `[forgejo.outputs]`, and set `[forgejo].push_repo`
+  to the bot's fork. The other keys are top-level, as in
+  [the bounds and the policy](safe-outputs.md#the-bounds-and-the-policy);
+  `allow_http` is needed only for a plain-HTTP forge and names its
+  authority, port included. A minimal trial file:
 
-Still open in #2399:
+    ```toml
+    hosts = ["forgejo.example:3000"]
+    allow_http = ["forgejo.example:3000"]
+    repos = ["example/target"]
+    bases = ["main"]
+    max_outputs = 1
+    max_patch_bytes = 65536
+    max_patch_files = 1
 
-- The session, its inference registration mode and the transport carrying
-  its hand-back between jobs.
-- The check and apply jobs, with `agentic-job apply --forge forgejo` and its
-  bot PAT reachable only in a protected apply step, and fork pushes kept
-  apart from upstream writes.
-- Lint for that token's placement, and a scripted run against CI's Forgejo
-  container.
-- Running the agent on container runners, with #1347.
+    [forgejo]
+    push_repo = "example-bot/target"
+
+    [forgejo.outputs]
+    create_pull_request = { max = 1 }
+    ```
+
+- Do not provision a publishing PAT, even a trial PAT, as a dispatch repository
+  secret or on any runner available to that repository. A runner label does not
+  restrict access to a workflow or ref, and the automatic job token can write
+  to the dispatch repository. If you installed the earlier draft, detach its
+  apply runner and revoke its PAT before enabling this trial.
+- Use a dispatch repository distinct from the target and the fork. Forgejo's
+  automatic job token can write to the dispatch repository. The job refuses,
+  before any Git read, a target or publishing fork that is that repository.
+
+The trial is one job of shell steps with no `uses:` step: Forgejo's automatic
+job token can write to the dispatch repository despite `permissions: {}`, so
+no action code, checkout or artifact transfer runs beside it. The job compiles
+the policy once, reads the admitted base SHA anonymously without following
+redirects, so a renamed target is refused until the bounds name it. The read
+starts from an empty environment apart from `PATH`, so a private target is
+refused whatever credential the runner's Git configuration, netrc or askpass
+holds; it also uses no proxy, so the runner must reach the forge directly. It
+then writes a one-file patch and one draft PR request, and checks them
+against the runner's bounds. A refused check fails the job. The checked hand-back stays in the job's temporary directory; nothing
+is uploaded or published. This is not an agent sandbox. CI checks that no
+publication credential is wired into the caller, a tripwire rather than a
+test of what a job can reach, and runs its producer and check scripts
+against its test service. It does not exercise the Forgejo Actions runner.
+
+The trial ends at check: it opens no draft pull request. Publication from
+Actions, the agent session, its inference registration and its hand-back
+transport remain unwired. Publication needs a credential
+boundary enforced by workflow and ref outside the dispatch runners' reach.
+Container runners for the session still need #1347.
 
 ## Verification
 

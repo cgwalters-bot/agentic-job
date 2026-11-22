@@ -2,14 +2,12 @@
 # (#2399). A caller copies it to .forgejo/workflows/dispatch.yml in its own
 # repository; it lives here rather than in this repository's
 # .forgejo/workflows/ so that a Forgejo mirror of this repository keeps
-# running .github/workflows/. This first slice only takes the dispatch and
-# refuses an unsuitable runner: no session, check or apply is wired yet,
-# and the job stops before anything runs.
+# running .github/workflows/. The opt-in scripted trial ends at check and
+# publishes nothing: no runner serving this repository should have a
+# publishing credential.
 # docs/dispatch.md#forgejo-actions-caller says what it needs and what is
 # still open.
 #
-# It holds no token or secret. The instance URL, bounds and runner labels
-# come only from the caller's variables.
 name: dispatch
 # agent-board's in-flight listing matches runs on this name.
 run-name: "${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }} (${{ inputs.pool }})"
@@ -43,6 +41,11 @@ on:
         required: true
 
 permissions: {}
+env:
+  FORGEJO_URL: ${{ vars.TRIAL_FORGEJO_URL }}
+  AGENT_BOUNDS: ${{ vars.AGENT_BOUNDS }}
+  TARGET_REPO: ${{ inputs.repo }}
+  TARGET_BASE: ${{ inputs.base }}
 # One run at a time per kind and item; a second dispatch for the same item
 # waits rather than cancelling the first. No group is shared across items.
 concurrency:
@@ -50,33 +53,70 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  agent:
-    # A JSON label or array of labels, never a default: the agent's
-    # session needs a host runner (below), which only the caller knows.
-    runs-on: ${{ fromJSON(vars.AGENT_RUNNER) }}
+  # One job with no `uses:` step: Forgejo's automatic job token can write to
+  # this repository whatever `permissions` says, so no action code runs here
+  # and the bounds come from the runner, not a checkout.
+  trial:
+    runs-on: ${{ fromJSON(vars.TRIAL_RUNNER) }}
+    timeout-minutes: 5
     steps:
-      # The sandbox is a login session on a hardened host (docs/sandbox.md):
-      # it needs systemd as the init, passwordless sudo to set it up, and
-      # no container around the job. A container runner would run the
-      # agent with no sandbox at all, so it is refused until #1347.
-      # systemd-detect-virt exits 1 outside a container; any other status,
-      # a missing tool included, refuses.
-      - name: Refuse without caller configuration or a sandbox-capable runner
+      - name: Refuse unless this is an opted-in trial from the default branch
+        id: admit
         shell: bash
         env:
-          FORGEJO_URL: ${{ vars.FORGEJO_URL }}
-          AGENT_BOUNDS: ${{ vars.AGENT_BOUNDS }}
+          SCRIPTED: ${{ vars.TRIAL_SCRIPTED }}
+          KIND: ${{ inputs.kind }}
+          DEFAULT_BRANCH: ${{ forgejo.event.repository.default_branch }}
         run: |
-          for name in FORGEJO_URL AGENT_BOUNDS; do
-            [ -n "${!name}" ] || { echo "::error::Set the caller variable $name (docs/dispatch.md#forgejo-actions-caller)"; exit 1; }
-          done
-          virt=0
-          systemd-detect-virt --quiet --container || virt=$?
-          if [ ! -d /run/systemd/system ] || [ "$virt" -ne 1 ] || ! sudo -n true; then
-            echo "::error::The agent job needs a host runner able to provide the sandbox (systemd, passwordless sudo, no container); container runners wait for #1347"
+          if [[ "$SCRIPTED" != true || "$KIND" != implement || -z "$DEFAULT_BRANCH" || "$FORGEJO_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo '::error::Only an opted-in implement trial on the default branch is supported; agent sessions are not wired'
             exit 1
           fi
-      - name: Stop before the unwired session
+      - name: Produce a deterministic hand-back
+        id: produce
+        shell: bash
         run: |
-          echo "::error::The Forgejo caller's session, check and apply are not wired yet (#2399)"
-          exit 1
+          clone_url="${FORGEJO_URL%/}/$TARGET_REPO"
+          agentic-job policy --allow "$AGENT_BOUNDS" --repo "$TARGET_REPO" --base "$TARGET_BASE" \
+            --clone-url "$clone_url" --kind branch --outputs create_pull_request --max-outputs 1 > "$RUNNER_TEMP/policy.json"
+          # Forgejo's automatic job credential can write to the dispatch repository.
+          push_repo=$(jq -er '.push_repo | strings | select(length > 0)' "$RUNNER_TEMP/policy.json")
+          if [[ "${TARGET_REPO,,}" == "${FORGEJO_REPOSITORY,,}" || "${push_repo,,}" == "${FORGEJO_REPOSITORY,,}" ]]; then
+            echo '::error::The target and fork must be separate from the dispatch repository'
+            exit 1
+          fi
+          # A renamed repository redirects; read only the name the bounds allow.
+          # Read anonymously from an empty environment rather than one with
+          # selected variables dropped: no runner Git configuration,
+          # repository, netrc (`HOME` or `NETRC`), askpass or proxy may
+          # authenticate the lookup.
+          ref=$(cd / && env -i PATH="$PATH" HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+            git -c http.followRedirects=false ls-remote --exit-code --refs -- "$clone_url" "refs/heads/$TARGET_BASE")
+          base=${ref%%$'\t'*}
+          [[ "$base" =~ ^[a-f0-9]{40}$ && "${ref#*$'\t'}" == "refs/heads/$TARGET_BASE" && "$FORGEJO_RUN_ID" =~ ^[0-9]+$ ]]
+          branch="agent-run-$FORGEJO_RUN_ID"
+          handback="$RUNNER_TEMP/handback"
+          mkdir -- "$handback"
+          jq -n --arg repo "$TARGET_REPO" --arg ref "$TARGET_BASE" --arg commit "$base" \
+            '{repo: $repo, ref: $ref, commit: $commit}' > "$handback/base.json"
+          printf '{"type":"create_pull_request","branch":"%s","title":"Exercise the Forgejo caller","body":"Deterministic publishing trial.","draft":true}\n' "$branch" > "$handback/outputs.jsonl"
+          # A file per run, so the patch still applies after an earlier trial's lands.
+          file="agentic-job-trial-$FORGEJO_RUN_ID.txt"
+          {
+            printf 'From %s Mon Sep 17 00:00:00 2001\nX-GH-AW-Base-Commit: %s\n' "$base" "$base"
+            printf '%s\n' 'From: Trial <trial@example.invalid>' 'Subject: [PATCH] Exercise the Forgejo caller' '' '---'
+            printf '%s\n' "diff --git a/$file b/$file" 'new file mode 100644' \
+              '--- /dev/null' "+++ b/$file" '@@ -0,0 +1 @@' '+Forgejo caller trial.'
+          } > "$handback/aw-$branch.patch"
+      - name: Check the hand-back against caller bounds
+        id: verify
+        shell: bash
+        run: |
+          handback="$RUNNER_TEMP/handback"
+          checked="$RUNNER_TEMP/checked"
+          mkdir -- "$checked"
+          cp -- "$RUNNER_TEMP/policy.json" "$checked/"
+          agentic-job collect --policy "$checked/policy.json" --outputs "$handback" --collected "$RUNNER_TEMP/collected.json"
+          agentic-job check --policy "$checked/policy.json" --outputs "$handback" --collected "$RUNNER_TEMP/collected.json" \
+            --report "$checked/report.json" --run-id "$FORGEJO_RUN_ID"
+          cp -- "$handback/aw-agent-run-$FORGEJO_RUN_ID.patch" "$checked/"
