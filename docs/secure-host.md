@@ -92,9 +92,12 @@ next image release:
 
 - The Ubuntu `packages` stage shares a 45-second deadline across package
   downloads and, if needed, one index refresh and download retry. A stuck
-  acquisition gets at most five more seconds for forced cleanup. A failure
-  names mirror name resolution/DNS and connectivity as things to check;
-  apt's own output remains in the job log. Installation then uses
+  acquisition gets at most five more seconds for forced cleanup. A failed
+  download names mirror name resolution/DNS and connectivity as things to
+  check; an exceeded deadline names no cause, since apt may have been
+  downloading slowly all along. apt's own output remains in the job log,
+  and `agentic-job sandbox prepare` adds one error annotation naming the
+  failed stage and, for these two, the cause. Installation then uses
   `--no-download`, so no later acquisition can reintroduce the DNS wait,
   and the deadline never kills dpkg. This also refuses downloads that take
   longer than the budget on a slow but working network. Dnf is unchanged.

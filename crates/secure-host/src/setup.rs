@@ -379,6 +379,13 @@ const INSTALL_PAUSE: Duration = Duration::from_secs(20);
 /// Leave five seconds for timeout's forced cleanup, below one minute total.
 const APT_DOWNLOAD_SECONDS: u64 = 45;
 
+/// What apt's bounded acquisition fails with when its deadline passes, in
+/// its error and its failure annotation.
+pub const APT_DEADLINE_EXCEEDED: &str = "apt download deadline exceeded";
+
+/// What it fails with when apt itself fails, likewise.
+pub const APT_DOWNLOAD_FAILED: &str = "apt download failed";
+
 /// Sets the host up. READ reads and checks the program's configuration
 /// as the preflight's first step; EGRESS_IMAGE is the podman image ID,
 /// if any, the egress proxy runs from in root podman.
@@ -1385,10 +1392,7 @@ fn download_apt_packages(download: &Command, refresh: &Command) -> Result<()> {
     let budget = Duration::from_secs(APT_DOWNLOAD_SECONDS);
     for (command, is_download) in [(download, true), (refresh, false), (download, true)] {
         let remaining = budget.saturating_sub(started.elapsed());
-        ensure!(
-            !remaining.is_zero(),
-            "packages: apt download deadline exceeded ({APT_DOWNLOAD_SECONDS}s); check mirror name resolution/DNS and connectivity; not retrying"
-        );
+        ensure!(!remaining.is_zero(), "{}", apt_deadline_exceeded());
         let status = Command::new("timeout")
             .args(["--kill-after=5", &remaining.as_secs_f64().to_string()])
             .arg(command.get_program())
@@ -1402,14 +1406,23 @@ fn download_apt_packages(download: &Command, refresh: &Command) -> Result<()> {
             .context("packages: running bounded apt download/refresh")?;
         ensure!(
             started.elapsed() < budget && !matches!(status.code(), Some(124 | 137)),
-            "packages: apt download deadline exceeded ({APT_DOWNLOAD_SECONDS}s); check mirror name resolution/DNS and connectivity; not retrying"
+            "{}",
+            apt_deadline_exceeded()
         );
         if is_download && status.success() {
             return Ok(());
         }
     }
     bail!(
-        "packages: apt download failed; check mirror name resolution/DNS and connectivity (see apt output above); not retrying"
+        "packages: {APT_DOWNLOAD_FAILED}; check mirror name resolution/DNS and connectivity (see apt output above); not retrying"
+    )
+}
+
+/// The deadline names no cause: apt may have been downloading all along,
+/// slowly, as well as waiting on a name or a connection.
+fn apt_deadline_exceeded() -> String {
+    format!(
+        "packages: {APT_DEADLINE_EXCEEDED} ({APT_DOWNLOAD_SECONDS}s) while downloading or waiting on a mirror (see apt output above); not retrying"
     )
 }
 

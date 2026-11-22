@@ -134,6 +134,39 @@ fn read(args: &Args) -> Result<Plan<Job>> {
 /// (`[host.prepared]`), or secure-host's setup would install itself
 /// over that helper.
 pub fn prepare(args: &PrepareArgs) -> Result<Exit> {
+    // A redacted summary for the check, which otherwise shows only the
+    // exit status; the full error still reaches the log through `main`.
+    prepare_stages(args).inspect_err(|err| {
+        eprintln!(
+            "::error::{}",
+            prepare_failure(::secure_host::timed::failed_stage(), err)
+        );
+    })
+}
+
+/// Failure causes an annotation may name: an error is matched against
+/// these fixed texts, so none of its own, with paths or mirror URLs,
+/// reaches the annotation.
+const PREPARE_CAUSES: &[&str] = &[
+    ::secure_host::setup::APT_DEADLINE_EXCEEDED,
+    ::secure_host::setup::APT_DOWNLOAD_FAILED,
+];
+
+/// The annotation for ERR from `sandbox prepare`, in which STAGE failed.
+fn prepare_failure(stage: Option<&str>, err: &anyhow::Error) -> String {
+    let text = format!("{err:#}");
+    let cause = PREPARE_CAUSES
+        .iter()
+        .find(|cause| text.contains(*cause))
+        .copied()
+        .unwrap_or("see the job log");
+    match stage {
+        Some(stage) => format!("sandbox prepare: stage {stage} failed: {cause}"),
+        None => format!("sandbox prepare failed outside its stages: {cause}"),
+    }
+}
+
+fn prepare_stages(args: &PrepareArgs) -> Result<Exit> {
     ensure!(
         host::is_root(),
         "`sandbox prepare` must run as root, before secure-host takes it away"
@@ -332,6 +365,44 @@ mod tests {
                 let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from(&args);
                 assert!(parsed.is_ok(), "{parsed:?}");
             }
+        }
+    }
+
+    /// A failed stage's annotation names it and a fixed cause, and none of
+    /// the error's own text.
+    #[test]
+    fn prepare_failure_annotation_names_the_stage_and_a_fixed_cause() {
+        let apt = anyhow::anyhow!(
+            "packages: apt download deadline exceeded (45s) while downloading or waiting on a mirror \
+             (see apt output above); not retrying"
+        );
+        let other = anyhow::anyhow!("https://user:token@mirror.example/x failed")
+            .context("writing /home/runner/work/_temp/secure-host/config.toml");
+        for (stage, err, expected) in [
+            (
+                Some("packages"),
+                &apt,
+                "sandbox prepare: stage packages failed: apt download deadline exceeded",
+            ),
+            (
+                Some("packages"),
+                &anyhow::anyhow!(
+                    "packages: apt download failed; check mirror (see apt output above)"
+                ),
+                "sandbox prepare: stage packages failed: apt download failed",
+            ),
+            (
+                Some("agents"),
+                &other,
+                "sandbox prepare: stage agents failed: see the job log",
+            ),
+            (
+                None,
+                &other,
+                "sandbox prepare failed outside its stages: see the job log",
+            ),
+        ] {
+            assert_eq!(prepare_failure(stage, err), expected);
         }
     }
 

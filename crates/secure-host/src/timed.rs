@@ -12,7 +12,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -41,12 +41,26 @@ static STAGE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a valid pattern")
 });
 
+/// The first stage of this process that failed: the innermost, where
+/// stages nest.
+static FAILED: OnceLock<String> = OnceLock::new();
+
+/// The name of the first stage of this process that failed, if any.
+pub fn failed_stage() -> Option<&'static str> {
+    FAILED.get().map(String::as_str)
+}
+
 /// Log monotonic wall time even when a stage fails, without changing its
 /// result: informational, never authorization. [`run`] reads these lines,
 /// with KIND `setup` or `check`, for the job summary ([`STAGE`]).
 pub fn stage<T>(kind: &str, name: &str, run: impl FnOnce() -> Result<T>) -> Result<T> {
     let started = Instant::now();
     let result = run();
+    if result.is_err() {
+        // Only the first is kept: a later one is a consequence or an
+        // enclosing stage.
+        let _ = FAILED.set(name.to_owned());
+    }
     println!(
         "Sandbox {kind} stage {name}: {:.3}s ({})",
         started.elapsed().as_secs_f64(),
