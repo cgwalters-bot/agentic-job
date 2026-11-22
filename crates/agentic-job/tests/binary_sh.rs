@@ -49,6 +49,9 @@ serve() {
 if [ "$1" != api ]; then
   echo "gh $*" >> "$STUB_LOG"
   [ ! -e "$STUB_FILES/gh-fail" ] || { echo "signature refused" >&2; exit 1; }
+  if [[ " $* " == *" --format json "* ]]; then
+    jq -n --arg uri "$STUB_INVOCATION" '[{verificationResult: {signature: {certificate: {runInvocationURI: $uri}}}}]'
+  fi
   exit 0
 fi
 [ "$GH_DEBUG" = api ] || { echo "no API trace asked for" >&2; exit 3; }
@@ -754,11 +757,6 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
     // Latest main is intentionally independent of the pinned workflow source.
     let source = "c".repeat(64);
     let base = format!("https://api.github.com/repos/{REPOSITORY}");
-    let commit = "a".repeat(40);
-    let release = json!({
-        "repository": REPOSITORY, "release": format!("build-{source}"),
-        "target": TARGET, "source": source, "commit": commit, "sha256": checksums(),
-    });
     for bad in [
         None,
         Some("rollback"),
@@ -773,6 +771,8 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
         Some("repository"),
         Some("target"),
         Some("signature"),
+        Some("other-attempt"),
+        Some("missing-artifact"),
         Some("bytes"),
         Some("missing"),
         Some("extra"),
@@ -781,12 +781,21 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
         Some("duplicate"),
         Some("malformed-zip"),
         Some("pin"),
+        Some("short-pin"),
         Some("expired"),
         Some("transport"),
     ] {
         let parent = tempdir("artifact-");
         let out = parent.path().join("bin");
-        let mut release = release.clone();
+        let commit = if bad == Some("rollback") { "d" } else { "a" }.repeat(40);
+        let run_id = if bad == Some("rollback") { 3 } else { 1 };
+        let attempt = if bad == Some("other-attempt") { 2 } else { 1 };
+        let invocation =
+            format!("https://github.com/{REPOSITORY}/actions/runs/{run_id}/attempts/1");
+        let mut release = json!({
+            "repository": REPOSITORY, "release": format!("build-{source}"),
+            "target": TARGET, "source": source, "commit": commit, "sha256": checksums(),
+        });
         for field in ["commit", "repository", "target"] {
             if bad == Some(field) {
                 release[field] = json!("wrong");
@@ -851,7 +860,7 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
         // The fixture endpoint returns real ZIP bytes; only the forge is mocked.
         let download_path = parent.path().join("download");
         fs::copy(&archive, &download_path).unwrap();
-        let mut selected_run = json!({"id": 1, "head_sha": commit, "path": ".github/workflows/pin.yml",
+        let mut selected_run = json!({"id": run_id, "run_attempt": attempt, "head_sha": commit, "path": ".github/workflows/pin.yml",
             "status": "completed", "conclusion": "success", "event": "push", "head_branch": "main"});
         for (case, field, value) in [
             ("run", "event", "pull_request"),
@@ -868,12 +877,27 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
         } else {
             vec![selected_run]
         };
+        let artifacts = if bad == Some("missing-artifact") {
+            vec![]
+        } else {
+            vec![
+                json!({"id": 2, "name": "agentic-job-verified", "expired": bad == Some("expired"),
+                "size_in_bytes": if bad == Some("size") { 268435457 } else { 1024 }}),
+            ]
+        };
         let mut files = vec![
-            (format!("{base}/actions/workflows/pin.yml/runs?branch=main&event=push&status=success&per_page=1"),
-             json!({"workflow_runs": runs}).to_string()),
-            (format!("{base}/actions/runs/1/artifacts?name=agentic-job-verified&per_page=100"),
-             json!({"artifacts": [{"id": 2, "name": "agentic-job-verified", "expired": bad == Some("expired"),
-                "size_in_bytes": if bad == Some("size") { 268435457 } else { 1024 }}]}).to_string()),
+            (
+                format!(
+                    "{base}/actions/workflows/pin.yml/runs?branch=main&event=push&status=success&per_page=1"
+                ),
+                json!({"workflow_runs": runs}).to_string(),
+            ),
+            (
+                format!(
+                    "{base}/actions/runs/{run_id}/artifacts?name=agentic-job-verified&per_page=100"
+                ),
+                json!({"artifacts": artifacts}).to_string(),
+            ),
         ];
         if bad == Some("pin") {
             files[0]
@@ -891,11 +915,14 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
                     let mut pairs = env(&[
                         ("BUILD_ARTIFACTS", "true"),
                         ("STUB_ARCHIVE", s(&download_path)),
+                        ("STUB_INVOCATION", &invocation),
                     ]);
                     if bad == Some("pin") {
                         pairs.push(("BUILD_COMMIT".to_owned(), "b".repeat(40)));
                     } else if bad == Some("rollback") {
                         pairs.push(("BUILD_COMMIT".to_owned(), commit.clone()));
+                    } else if bad == Some("short-pin") {
+                        pairs.push(("BUILD_COMMIT".to_owned(), commit[..7].to_owned()));
                     }
                     pairs
                 },
@@ -944,19 +971,26 @@ fn main_artifacts_verify_selected_commit_and_fail_closed() {
                 .iter()
                 .filter(|line| line.contains("/actions/workflows/pin.yml/runs?"))
                 .count(),
-            1
+            usize::from(bad != Some("short-pin"))
         );
         if matches!(bad, None | Some("rollback")) {
             fetched(&out);
             assert_eq!(result.output, format!("fetched=true\nsource={source}\n"));
+            assert!(result.stdout.contains(&format!(
+                "run_id={run_id} artifact_id=2 head_sha={commit} source={source}"
+            )));
+            assert!(result.log.iter().any(|line| line.ends_with(&format!(
+                "--format json --repo {REPOSITORY} --cert-identity https://github.com/{REPOSITORY}/.github/workflows/pin.yml@refs/heads/main --source-ref refs/heads/main --source-digest {commit} --deny-self-hosted-runners"
+            ))));
+        } else {
             assert!(
-                result
-                    .stdout
-                    .contains(&format!("fetched main artifact at {commit}"))
+                !result.stdout.contains("verified main artifact:"),
+                "{bad:?}"
             );
-            assert!(result.log.iter().any(|line| line.contains("--bundle")
-                && line.contains("pin.yml@refs/heads/main")
-                && line.contains(&format!("--source-digest {commit}"))));
+            assert!(result.output.is_empty(), "{bad:?}");
+            for name in NAMES.iter().chain([&OBJECT]) {
+                assert!(!out.join(name).exists(), "{bad:?}: exposed {name}");
+            }
         }
     }
     for status in ["401", "403", "404", "500"] {

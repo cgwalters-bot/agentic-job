@@ -2551,9 +2551,12 @@ mutable release tag or the caller repository's cache.
 The concrete threat is a substituted Actions artifact replacing the binary
 that evaluates policy and checks outputs. The opt-in main-artifact reader
 therefore verifies the bundled `pin.yml` attestation against the selected run's
-head SHA, main ref and GitHub-hosted identity, then checks repository, commit,
-target, source-digest shape, release name and every payload checksum. It does
-not trust artifact names or API checksums as executable identity.
+head SHA, main ref and GitHub-hosted identity. The verified certificate's run
+invocation URI must match the selected run and attempt, so an artifact replay
+from another attempt at the same SHA is refused. The bootstrap then checks
+repository, commit, target, source-digest shape, release name and every payload
+against the signed manifest's SHA-256 map before installing any executable. No
+second unsigned checksum list is required.
 
 Set the calling repository's Actions variable `SOURCE_BUILD_ARTIFACTS=true`
 to opt in (default off). Policy and dispatch map this to `BUILD_ARTIFACTS=true`;
@@ -2561,7 +2564,8 @@ the publisher repository always comes from the trusted workflow's own identity,
 never event data. This deliberately runs a newer binary than the pinned workflow
 checkout: it selects the latest successful **push** run of `pin.yml` on main,
 resolves it once and downloads `agentic-job-verified` by immutable artifact ID.
-It logs the selected commit and source digest. `SOURCE_BUILD_COMMIT=FULL_SHA`
+It logs the run ID, artifact ID, head SHA and source digest after verification.
+`SOURCE_BUILD_COMMIT=FULL_SHA`
 (bootstrap `BUILD_COMMIT`) restricts selection to a successful main push at
 that commit for hand rollback; unset it to resume latest-main selection.
 The pin must still have a retained artifact. No per-commit pin PR is needed.
@@ -2613,15 +2617,59 @@ contents-read access. The isolated publisher executes no built binaries and
 has contents-read, OIDC and attestations-write, but no contents-write or
 packages-write permission. It verifies its offline bundle before upload.
 
-Rollout: first merge the publisher and let a real main push finish; verify an
-artifact download and offline bundle with the consumer's read-only token,
-including rollback selection, before enabling the repository variable. Update
-external wrapper pins through their normal review gates. Older scripts cannot
-read run artifacts: retain all existing `build-*` releases, with source-build
-fallback for unpublished source digests. `v*` release behavior is unchanged.
-Historical cleanup is separate. Only if artifact retention or API rate limits
-cause problems in practice should a periodic (roughly weekly) real release be
-considered; no weekly publisher or automatic fallback is implemented here.
+### Preflight and staged rollout
+
+In an already authorized hosted job, check out the publisher's reviewed
+bootstrap at an immutable SHA. Use the same trusted workflow repository
+identity as the policy job for `WORKFLOW_REPOSITORY`, not the caller repository
+or an input from the event. Set `GH_TOKEN` from that job's own `${{ github.token }}`
+in the preflight step; do not use a PAT, add permissions or export the token
+from the job. Run this from the bootstrap checkout with `ROLLBACK_SHA` set to a
+**different**, known successful main push's full SHA:
+
+```bash
+set -euo pipefail
+: "${GH_TOKEN:?use the read-only job token}" "${WORKFLOW_REPOSITORY:?use trusted workflow identity}"
+[[ ${ROLLBACK_SHA:-} =~ ^[0-9a-f]{40}$ ]]
+dir=$(mktemp -d)
+trap 'rm -rf -- "$dir"' EXIT
+unset WORKFLOW_IDENTITY BUILD_COMMIT GITHUB_OUTPUT
+export BUILD_ARTIFACTS=true
+bash secure-host/binary.sh get --out "$dir/latest" | tee "$dir/latest.log"
+BUILD_COMMIT="$ROLLBACK_SHA" bash secure-host/binary.sh get --out "$dir/rollback" | tee "$dir/rollback.log"
+grep -q "^verified main artifact: .* head_sha=$ROLLBACK_SHA " "$dir/rollback.log"
+grep -E '^verified main artifact: ' "$dir/latest.log" | grep -Fv " head_sha=$ROLLBACK_SHA " > /dev/null
+```
+
+This exercises the untagged consumer route, downloads and verifies both sets
+of files and executes neither. Keep both `verified main artifact:` lines and
+the caller job URL with the receipt. Run the replay below before the scratch
+directory is removed, or re-download both by their recorded full SHAs and
+require the new receipts to match. A publisher-side or integration-token
+download is useful diagnostics, not cross-repository authorization evidence.
+On failure, send the exact API endpoint/status or bootstrap error and job URL
+to the caller controller; leave the variable off and do not change credentials.
+
+Before opting a caller in, use the two verified binaries with the actual
+immutable policy/check/apply workflow pins. Replay a representative positive
+and refusal hand-back for that caller with no forge writes: verify the policy
+output and forwarded fields, consume them in check, then exercise the pinned
+apply guard and staged or mock publication against that check report. Test the
+exact CLI invocations (not just `--help`) and record which paths and SHAs the
+replay covered. An offline replay does not replace the caller-token receipt or
+prove live publication. Repeat the gate when changing either side of the pin.
+
+Review the immutable external wrapper pin update through the existing caller
+rollout rather than opening a parallel pin change. First land an artifact-aware
+wrapper with no setting change, then preflight and replay for one authorized
+caller, then let its controller opt in that caller alone with the verified
+full SHA in `SOURCE_BUILD_COMMIT`. Observe its first run at that SHA before
+switching to latest or expanding. Leave unverified callers on their existing
+settings.
+Operators can pin the verified retained `SOURCE_BUILD_COMMIT` for immediate
+rollback, or unset `SOURCE_BUILD_ARTIFACTS` and `SOURCE_BUILD_COMMIT` to restore
+the legacy path. If needed, explicitly build the pinned source. Do not change
+or remove any existing `build-*` releases or version tags as part of rollout.
 
 ### Build-release retention dry run
 
@@ -2630,6 +2678,10 @@ prints a deterministic per-build retention ledger. It is a manual, offline
 report, not an org crawler or a cleanup job, and has no deletion operation.
 Collect all pages of the publisher's Releases API into `releases`; for example,
 `gh api --paginate --slurp repos/OWNER/REPO/releases | jq 'add'` gives that array.
+If the inventory contains older `build-*` tags that are not `build-` followed
+by a full source digest, retain them separately. The report refuses to
+interpret them as digests. Record each such tag in `unresolved` rather than
+silently dropping it or shortening it to a digest.
 The other required fields are `pins` and `unresolved`:
 
 ```json
@@ -2646,17 +2698,41 @@ The other required fields are `pins` and `unresolved`:
 }
 ```
 
-Resolve each caller's workflow/action pins transitively, recording the full
-wrapper/action SHA and the source digest at its ultimate tool pin, not just
-searching for literal `build-*` strings. Include supported non-default refs,
-retained tags and queued/in-flight runs. Record any visibility, rate-limit,
-resolution or inventory gap in `unresolved`; missing fields are an error, not
-an empty reference set. The report distinguishes `referenced` from
+With a full inventory assembled as above, the following projects only the
+ledger's input, without changing any release or tag:
+
+```bash
+jq 'def legacy: .tag_name | startswith("build-") and (test("^build-[0-9a-f]{64}$") | not);
+    .unresolved += [.releases[] | select(legacy) | "Keep historical tag \(.tag_name): source digest unresolved"]
+    | .releases |= map(select(legacy | not))' snapshot.json |
+  cargo run --quiet --locked -p agentic-job --bin build-release-report
+```
+
+Start with the controller's admitted caller inventory at a recorded revision
+and timestamp. Ask each controller which refs it supports. Resolve the refs to
+commits and follow reusable workflows, composite actions, local actions at the
+correct checkout, and explicit checkout pins transitively. Record the literal
+ref and resolved SHA at each hop, then run `bash secure-host/binary.sh digest`
+from a clean checkout of the ultimate pinned source, using that revision's own
+script. Note whether each route selects a version release, a legacy source
+release or an explicit source build; a SHA that happens to correspond to a
+version tag is not necessarily a version-release route.
+
+Include supported non-default refs, retained version pins and queued/in-flight
+runs. For a run, capture its ID, attempt, head SHA, workflow path and resolved
+`referenced_workflows` from the Actions API. Inspect referenced actions at their
+actual pins as well; do not use today's branch heads in place of run evidence.
+Record visibility, mutable or dynamic pin resolution, missing run data and all
+other inventory gaps in `unresolved`. Missing fields are an error, not an empty
+reference set. The report distinguishes `referenced` from
 `no-observed-pin-reference`, but **keeps every release**, even with an empty
 unresolved list. A snapshot is evidence supplied by its collector, not proof
 of org-wide completeness. No release is proven safe to delete by this tool.
-Actual cleanup requires separately authorized, freshly rechecked exhaustive
-inventory; do not delete Git tags as a side effect. No such cleanup is in this PR.
+Actual cleanup requires separate authorization and fresh positive per-release
+evidence: controller confirmation that every affected supported path and active
+run has migrated or is retired, no remaining unresolved coverage, and a
+verified replacement or rollback plan. A digest with no observed pin is not
+that evidence. Leave all historical releases and Git tags intact.
 
 ## Versions to pin
 

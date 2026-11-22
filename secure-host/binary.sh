@@ -219,8 +219,8 @@ take() {
       fail "$manifest pins $release with no checksum for $name"
   done
   for name in "${NAMES[@]}" "$OBJECT"; do
-    asset=$name-$TARGET mode=0755
-    [ "$name" != "$OBJECT" ] || asset=$name mode=0644
+    asset=$name-$TARGET
+    [ "$name" != "$OBJECT" ] || asset=$name
     if [[ "$from" == /* ]]; then
       cp -- "$from/$asset" "$out/$name.part"
     else
@@ -229,6 +229,11 @@ take() {
     found=$(sha256 < "$out/$name.part")
     want=$(jq -r --arg name "$name" '.sha256[$name]' "$manifest")
     [ "$found" = "$want" ] || fail "$name of $release has SHA-256 $found, and the pin says $want: refusing it"
+  done
+  # Don't expose any executable until the complete payload set checks out.
+  for name in "${NAMES[@]}" "$OBJECT"; do
+    mode=0755
+    [ "$name" != "$OBJECT" ] || mode=0644
     chmod "$mode" "$out/$name.part"
     mv -f -- "$out/$name.part" "$out/$name"
   done
@@ -299,7 +304,7 @@ verify_build() {
 # attestation to that run's head SHA before accepting its manifest/checksums.
 # Opt-in: latest main deliberately need not match the workflow checkout.
 fetch_artifact() {
-  local out=$1 base="https://api.github.com/repos/$REPOSITORY" query run commit id stage name inventory_bytes
+  local out=$1 base="https://api.github.com/repos/$REPOSITORY" query run commit run_id attempt id stage name inventory_bytes
   local pin=${BUILD_COMMIT-}
   [ -z "$pin" ] || [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || fail "BUILD_COMMIT must be a full commit SHA"
   stage=$(mktemp -d "$(realpath "$out")/artifact.XXXXXXXX")
@@ -310,8 +315,9 @@ fetch_artifact() {
     .event == "push" and .head_branch == "main" and .path == ".github/workflows/pin.yml")' "$stage/runs.json") || fail "no successful main prebuilt run; use --build explicitly"
   commit=$(jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))' <<< "$run")
   [ -z "$pin" ] || [ "$commit" = "$pin" ] || fail "prebuilt run does not match BUILD_COMMIT"
-  id=$(jq -er '.id | select(type == "number" and . > 0 and . == floor)' <<< "$run")
-  fetch "$base/actions/runs/$id/artifacts?name=agentic-job-verified&per_page=100" "$stage/artifacts.json"
+  run_id=$(jq -er '.id | select(type == "number" and . > 0 and . == floor)' <<< "$run")
+  attempt=$(jq -er '.run_attempt | select(type == "number" and . > 0 and . == floor)' <<< "$run")
+  fetch "$base/actions/runs/$run_id/artifacts?name=agentic-job-verified&per_page=100" "$stage/artifacts.json"
   id=$(jq -er '[.artifacts[] | select(.name == "agentic-job-verified")] | select(length == 1) | .[0] |
     select(.expired == false and .size_in_bytes > 0 and .size_in_bytes <= 268435456) |
     .id | select(type == "number" and . > 0 and . == floor)' "$stage/artifacts.json") || fail "verified artifact missing, expired or oversized; use --build explicitly"
@@ -327,19 +333,26 @@ fetch_artifact() {
   sort -o "$stage/names" "$stage/names"
   cmp -s "$stage/expected" "$stage/names" || fail "unexpected or duplicate artifact inventory files"
   for name in release.json provenance.jsonl "${NAMES[@]/%/-$TARGET}" "$OBJECT"; do
-    timeout 120 bash -o pipefail -c 'unzip -p "$1" "$2" | head -c 268435457 > "$3"' _ "$stage/payload.zip" "$name" "$stage/$name" || fail "artifact extraction failed: $name"
+    timeout --kill-after=5 120 bash -o pipefail -c 'unzip -p "$1" "$2" | head -c 268435457 > "$3"' _ "$stage/payload.zip" "$name" "$stage/$name" || fail "artifact extraction failed: $name"
     [ "$(stat -c %s "$stage/$name")" -le 268435456 ] || fail "artifact file too large: $name"
   done
-  gh attestation verify "$stage/release.json" --bundle "$stage/provenance.jsonl" \
+  # A different attempt or run at the same SHA must not supply this run's
+  # payload. Use the verified OIDC certificate, not workflow-authored metadata.
+  gh attestation verify "$stage/release.json" --bundle "$stage/provenance.jsonl" --format json \
     --repo "$REPOSITORY" --cert-identity "https://github.com/$REPOSITORY/.github/workflows/pin.yml@refs/heads/main" \
-    --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners
+    --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners |
+    jq -e --arg uri "https://github.com/$REPOSITORY/actions/runs/$run_id/attempts/$attempt" \
+      'any(.[]; .verificationResult.signature.certificate.runInvocationURI == $uri)' > /dev/null ||
+    fail "attestation does not verify for the selected main run $run_id attempt $attempt at $commit"
   jq -e --arg repository "$REPOSITORY" --arg commit "$commit" --arg target "$TARGET" --arg pattern "$SHA256" \
     '.repository == $repository and .commit == $commit and .target == $target and
     (.source | type == "string" and test($pattern)) and .release == ("build-" + .source)' \
     "$stage/release.json" > /dev/null || fail "artifact manifest does not match selected main build"
   take "$stage/release.json" "$stage" "$out"
+  # Return the artifact's source digest to get, not the checkout's digest.
   source=$(jq -r .source "$stage/release.json")
-  echo "fetched main artifact at $commit (source $source) by its attested checksums"
+  printf 'verified main artifact: repository=%s run_id=%s artifact_id=%s head_sha=%s source=%s\n' \
+    "$REPOSITORY" "$run_id" "$id" "$commit" "$source"
   rm -rf -- "$stage"
   fetched=artifact
 }
