@@ -1677,8 +1677,10 @@ the setting off.
 ### Pull requests come from a fork
 
 Apply never pushes a new pull request's branch to the output
-repository, but for [one its applying account owns](#a-repository-the-applying-account-owns);
-only a fix may go to a branch of it, where the output
+repository, but for [one its applying account owns](#a-repository-the-applying-account-owns)
+or one the caller's bounds opt in with
+[`in-repo-pull-requests`](safe-outputs.md#pushing-to-a-pull-requests-branch);
+only a fix may go to a branch of it otherwise, where the output
 repository accepts that
 ([pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch)).
 Before the handlers run, it forks the output repository

@@ -291,8 +291,8 @@ jobs:
           "$RUNNER_TEMP/apply-binary/agentic-job" check-apply-token --output-repo "$OUTPUT_REPO" \
             --role-policy "$GH_AW_TMP/policy.json" --outputs "$GH_AW_TMP/agent_output.json"
       # A pull request is opened from a fork of the output repository owned
-      # by whoever the token names, never from a branch of the output
-      # repository: its CI then runs the agent's commit as a fork's, with a
+      # by whoever the token names, not from a branch of the output
+      # repository (but for the two cases below): its CI then runs the agent's commit as a fork's, with a
       # read-only token, no secrets and no OIDC token. The forge makes the
       # fork if there is none and answers with the existing one otherwise;
       # it is not synced, as the handler pushes the commit together with the
@@ -318,6 +318,12 @@ jobs:
       # a setting any admin token flips unseen and custom properties are an
       # organization's only.
       #
+      # Another account's new pull request goes to the repository itself
+      # too where the caller's bounds set `in-repo-pull-requests` and their
+      # `own-branch-repos` accept it, from the run's own `dispatch/` branch
+      # (the branch prefix is passed for that) and never the default or a
+      # protected branch, so that later runs can stack on it.
+      #
       # A push goes to the same fork, and only to the branch of a pull
       # request apply opened from it, where the pull request is from that
       # fork. One from anywhere else goes to its head repository, whose CI
@@ -336,11 +342,12 @@ jobs:
         env:
           GH_TOKEN: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUSH_TOKEN }}
           REPLACEMENT: ${{ steps.replacement.outputs.enabled }}
+          BRANCH_PREFIX: ${{ fromJSON(inputs.policy).branch-prefix }}
         run: |
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
           "$RUNNER_TEMP/apply-binary/agentic-job" push target --config "$GH_AW_TMP/config.json" --outputs "$GH_AW_TMP/agent_output.json" \
             --output-repo "$OUTPUT_REPO" --repo "$REPO" --calling-repo "$GITHUB_REPOSITORY" --base "$BASE" \
-            --server "$GITHUB_SERVER_URL" --replacement "$REPLACEMENT" >> "$GITHUB_OUTPUT"
+            --server "$GITHUB_SERVER_URL" --replacement "$REPLACEMENT" --branch-prefix "$BRANCH_PREFIX" >> "$GITHUB_OUTPUT"
       # The target's base branch as this job fetched it, not as anything
       # that was handed back says. Never push the target's commits to an
       # output repository: its push workflows could run with privileges.
@@ -535,7 +542,7 @@ jobs:
             --arg target "$COMMENT_TARGET" --arg item_repo "$ITEM_REPO" --arg action_repo "$REPO" --argjson pr "$PULL_REQUEST" --argjson push "$PUSH" --arg fork "$FORK" \
             --argjson unbounded 9007199254740991 '
             (if $fork == "" then del(.create_pull_request, .push_to_pull_request_branch) else . end)
-            | del(.own_branch_repos, .stack_max_steps)
+            | del(.own_branch_repos, .in_repo_pull_requests, .stack_max_steps)
             | (select(has("create_pull_request")).create_pull_request) |= (.draft = ($ready != "true") | del(.ready_when_complete, .protected_paths))
             | (select(has("push_to_pull_request_branch")).push_to_pull_request_branch) |= del(.ready_when_complete, .protected_paths)
             | (select(has("create_pull_request")).create_pull_request) |=

@@ -1125,7 +1125,8 @@ fn caller_branch_acceptance_is_not_a_handler_operation() {
     let dir = TempDir::new().unwrap();
     let (out, config) = handlers(
         dir.path(),
-        &json!({"own_branch_repos": [["example-org/*"]], "stack_max_steps": 3, "noop": {"max": 1}}),
+        &json!({"own_branch_repos": [["example-org/*"]], "in_repo_pull_requests": true,
+            "stack_max_steps": 3, "noop": {"max": 1}}),
         &[],
     );
     status(&out, 0);
@@ -1166,6 +1167,17 @@ fn fork_routing_is_decided_before_fetching_the_patch_base() {
             .as_str()
             .unwrap()
             .contains("/apply-binary/agentic-job\" push target ")
+    );
+    // An in-repo pull request's branch is checked under the policy's prefix.
+    assert!(
+        fork_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("--branch-prefix \"$BRANCH_PREFIX\"")
+    );
+    assert_eq!(
+        fork_step["env"]["BRANCH_PREFIX"].as_str(),
+        Some("${{ fromJSON(inputs.policy).branch-prefix }}")
     );
     assert!(steps.iter().any(|step| step["with"]["ref"].as_str()
         == Some(

@@ -33,16 +33,24 @@
 //!   an acceptance that the fork's own workflows run an agent's with the
 //!   fork's secrets. The output repository's CI runs a fork's commit as a
 //!   fork's.
+//!
+//! A new pull request's branch goes to the output repository itself, not
+//! the fork, where the caller's bounds set `in-repo-pull-requests` and their
+//! `own-branch-repos` accept that repository, so that a later run can stack
+//! on it: only a run's own [`IN_REPO_BRANCH_PREFIX`] branch, never the
+//! default branch or a protected one, and never with `.github` exempted.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::github::{Github, is_repo, same, segment};
+use super::publish::handler_branch;
 use super::{COMMIT_RE, owner};
+use crate::check::is_run_branch;
 use crate::contract::is_login;
 use crate::{CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH};
 
@@ -54,6 +62,11 @@ use crate::{CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH};
 /// fork does not inherit: one made or synced from a target that accepts
 /// holds the target's file, which names the target.
 pub const OWNER_BRANCHES: &str = ".github/agentic-job/accept-owner-branches";
+
+/// Where a new pull request's branch pushed to the output repository
+/// itself (`in-repo-pull-requests`) starts: the dispatch workflow's
+/// `dispatch/KIND/`, before a run's `agent-run-ID`.
+pub const IN_REPO_BRANCH_PREFIX: &str = "dispatch/";
 
 /// More than a name or two is not an opt-in file.
 const OWNER_BRANCHES_MAX: usize = 4096;
@@ -238,8 +251,8 @@ fn upstream_pull(
     Ok(matches.then(|| (parent.to_owned(), upstream.clone())))
 }
 
-/// Whether checked caller bounds or NAME's default-branch file accept NAME.
-fn accepts_owner_branches(github: &Github, config: &Value, name: &str) -> Result<bool> {
+/// Whether checked caller bounds (`own-branch-repos`) accept NAME.
+fn caller_accepts(config: &Value, name: &str) -> Result<bool> {
     let acceptance = crate::contract::SafeOutputs {
         own_branch_repos: config
             .get("own_branch_repos")
@@ -249,7 +262,12 @@ fn accepts_owner_branches(github: &Github, config: &Value, name: &str) -> Result
             .unwrap_or_default(),
         ..Default::default()
     };
-    if acceptance.accepts_own_branches(name)? {
+    acceptance.accepts_own_branches(name)
+}
+
+/// Whether checked caller bounds or NAME's default-branch file accept NAME.
+fn accepts_owner_branches(github: &Github, config: &Value, name: &str) -> Result<bool> {
+    if caller_accepts(config, name)? {
         return Ok(true);
     }
     // Without a ref this reads the default branch.
@@ -308,6 +326,9 @@ pub struct TargetArgs {
     /// Whether check accepted a replacement series, which is pushed on its base branch's head now
     #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set))]
     pub replacement: bool,
+    /// The policy's `branch-prefix`, which the handler puts before a new pull request's branch
+    #[cfg_attr(feature = "clap", arg(long, default_value = ""))]
+    pub branch_prefix: String,
 }
 
 /// What `push target` decides: the repository the handlers push to, if
@@ -422,6 +443,20 @@ pub fn target(
             current_base: None,
         });
     }
+    // A new pull request from a branch of the output repository, where the
+    // caller opted in and its own bounds accept that repository's CI
+    // running the agent's commit; with `.github` exempted, from the fork.
+    if !push
+        && in_repo_pull_requests(&config)?
+        && caller_accepts(&config, output)?
+        && !exempts_github(&config[CREATE_PULL_REQUEST])
+    {
+        in_repo_branches(github, args, items, &me)?;
+        return Ok(Target {
+            repo: Some(output.clone()),
+            current_base: None,
+        });
+    }
     let name = github.fork(&me, output, &args.repo, &args.server)?;
     ensure!(is_repo(&name), "the forge named the fork {name:?}");
     if let Some(head) = &head {
@@ -438,6 +473,102 @@ pub fn target(
         repo: Some(name),
         current_base: head.and_then(|head| head.current_base),
     })
+}
+
+/// The checked `in-repo-pull-requests`: off unless set.
+fn in_repo_pull_requests(config: &Value) -> Result<bool> {
+    Ok(config
+        .get("in_repo_pull_requests")
+        .map(|value| serde_json::from_value::<bool>(value.clone()))
+        .transpose()
+        .context("invalid in-repo-pull-requests configuration")?
+        .unwrap_or(false))
+}
+
+/// Holds each new pull request's branch pushed to the output repository
+/// itself to a run's own under [`IN_REPO_BRANCH_PREFIX`], which no person's
+/// or release branch is, and never its default branch or one that
+/// protection or a ruleset keeps for reviewed changes.
+fn in_repo_branches(github: &Github, args: &TargetArgs, items: &[Value], me: &str) -> Result<()> {
+    let output = &args.output_repo;
+    let repo = github.send("GET", &format!("/repos/{output}"), None)?;
+    ensure!(
+        repo["permissions"]["push"] == true,
+        "{me} cannot push to {output}: give that account write access to its \
+         {IN_REPO_BRANCH_PREFIX} branches, or leave in-repo-pull-requests off"
+    );
+    // A secondary pull request names its own repository and goes elsewhere.
+    let ours = items.iter().filter(|item| {
+        item["type"] == CREATE_PULL_REQUEST
+            && item["repo"]
+                .as_str()
+                .is_none_or(|repo| repo.trim().is_empty() || repo.eq_ignore_ascii_case(output))
+    });
+    for item in ours {
+        let asked = item["branch"]
+            .as_str()
+            .context("a create_pull_request without a branch")?;
+        let branch = handler_branch(&args.branch_prefix, asked);
+        ensure!(
+            branch.starts_with(IN_REPO_BRANCH_PREFIX)
+                && branch.rsplit('/').next().is_some_and(is_run_branch),
+            "a new pull request's branch {branch:?} is pushed to {output} itself only as a run's \
+             own under {IN_REPO_BRANCH_PREFIX}"
+        );
+        ensure!(
+            repo["default_branch"]
+                .as_str()
+                .is_some_and(|default| default != branch),
+            "{branch} is {output}'s default branch, which a push never goes to"
+        );
+        let existing =
+            github.get_optional(&format!("/repos/{output}/branches/{}", segment(&branch)))?;
+        let protected = existing
+            .as_ref()
+            .is_some_and(|found| found["protected"] != false);
+        // Unlike classic protection, rulesets can be checked by ref name
+        // even before the ref exists.
+        let rules = github.send(
+            "GET",
+            &format!("/repos/{output}/rules/branches/{}", segment(&branch)),
+            None,
+        )?;
+        ensure!(
+            !protected && rules.as_array().is_some_and(Vec::is_empty),
+            "{output}:{branch} is a protected branch or one rules apply to, which a push never \
+             goes to"
+        );
+        if existing.is_none() {
+            require_no_classic_protection(github, output, &branch)?;
+        }
+    }
+    Ok(())
+}
+
+/// A missing ref can still match a classic protection pattern. Require the
+/// repository to use rulesets only for creation rather than trying to duplicate
+/// GitHub's classic pattern matching or treating unreadable rules as absent.
+fn require_no_classic_protection(github: &Github, repo: &str, branch: &str) -> Result<()> {
+    let (owner, name) = repo.split_once('/').context("expected owner/repo")?;
+    let data = github
+        .graphql(
+            "query($owner: String!, $name: String!) {
+                repository(owner: $owner, name: $name) {
+                    branchProtectionRules(first: 1) { totalCount }
+                }
+            }",
+            json!({"owner": owner, "name": name}),
+        )
+        .with_context(|| format!("cannot verify classic branch protection for {repo}:{branch}"))?;
+    let count = data["repository"]["branchProtectionRules"]["totalCount"]
+        .as_u64()
+        .with_context(|| format!("cannot verify classic branch protection for {repo}:{branch}"))?;
+    ensure!(
+        count == 0,
+        "cannot create {repo}:{branch} in a repository with classic branch protection; \
+         use rulesets or leave in-repo-pull-requests off"
+    );
+    Ok(())
 }
 
 /// The pull request the policy's push goes to, read again with apply's
@@ -566,8 +697,6 @@ fn head(github: &Github, config: &Value, args: &TargetArgs, me: &str) -> Result<
 mod tests {
     use std::collections::BTreeMap;
 
-    use serde_json::json;
-
     use super::super::testing::{TOKEN, forge, repository, sh};
     use super::super::tests::read;
     use super::*;
@@ -580,6 +709,9 @@ mod tests {
     const OWN_ACCEPTS: &str = "GET /repos/o/r/contents/.github/agentic-job/accept-owner-branches";
     const FORK: &str = "POST /repos/o/r/forks";
     const ACTIONS: &str = "PUT /repos/bot/r/actions/permissions";
+    const IN_REPO_BRANCH: &str = "GET /repos/o/r/branches/dispatch/implement/agent-run-7";
+    const IN_REPO_RULES: &str = "GET /repos/o/r/rules/branches/dispatch/implement/agent-run-7";
+    const CLASSIC_RULES: &str = "POST /graphql";
 
     fn sha(c: char) -> String {
         c.to_string().repeat(40)
@@ -649,6 +781,8 @@ mod tests {
         repo: &'static str,
         calling_repo: &'static str,
         replacement: bool,
+        branch: &'static str,
+        branch_prefix: &'static str,
     }
 
     impl Case {
@@ -660,6 +794,8 @@ mod tests {
                 repo: "o/r",
                 calling_repo: "caller/r",
                 replacement: false,
+                branch: "agent-run-7",
+                branch_prefix: "",
             }
         }
 
@@ -692,6 +828,22 @@ mod tests {
             self.config = json!({CREATE_PULL_REQUEST: {"max": 1}});
         }
 
+        /// A new pull request of `bot`, which does not own `o/r`, on its
+        /// run's dispatch branch, where the caller's bounds accept `o/r`
+        /// and set `in-repo-pull-requests`.
+        fn in_repo(&mut self) {
+            self.new_pull_request();
+            self.config["own_branch_repos"] = json!([["o/*"]]);
+            self.config["in_repo_pull_requests"] = json!(true);
+            self.branch_prefix = "dispatch/implement/";
+            self.set(IN_REPO_RULES, 200, json!([]));
+            self.set(
+                CLASSIC_RULES,
+                200,
+                json!({"data": {"repository": {"branchProtectionRules": {"totalCount": 0}}}}),
+            );
+        }
+
         fn same_network_fork(&mut self) {
             self.new_pull_request();
             self.edit("GET /repos/o/r", "fork", json!(true));
@@ -717,7 +869,7 @@ mod tests {
             let items: Vec<_> = self
                 .items
                 .iter()
-                .map(|kind| json!({"type": kind}))
+                .map(|kind| json!({"type": kind, "branch": self.branch}))
                 .collect();
             std::fs::write(
                 root.path().join("agent_output.json"),
@@ -734,6 +886,7 @@ mod tests {
                 base: "fix/x".into(),
                 server: format!("file://{}", root.path().display()),
                 replacement: self.replacement,
+                branch_prefix: self.branch_prefix.into(),
             };
             let (github, requests) = forge(self.routes);
             let target = target(&github, &args, &read);
@@ -788,6 +941,198 @@ mod tests {
             case.routes.remove(ACCEPTS);
             case.config["own_branch_repos"] = json!([[pattern]]);
             assert_eq!(case.run().0.is_ok(), accepted);
+        }
+    }
+
+    #[test]
+    fn in_repo_pull_requests() {
+        type Edit = fn(&mut Case);
+        // (what, the forge and request, where the branch goes or the error's words)
+        let cases: Vec<(&str, Edit, Result<&str, &str>)> = vec![
+            ("an admitted repository", Case::in_repo, Ok("o/r")),
+            (
+                "an existing unprotected branch, as on a re-run",
+                |c| {
+                    c.in_repo();
+                    c.set(IN_REPO_BRANCH, 200, json!({"protected": false}));
+                    c.routes.remove(CLASSIC_RULES);
+                },
+                Ok("o/r"),
+            ),
+            (
+                "a request naming the output repository",
+                |c| {
+                    c.in_repo();
+                    c.branch = "dispatch/implement/agent-run-7";
+                },
+                Ok("o/r"),
+            ),
+            (
+                "a repository own-branch-repos does not accept",
+                |c| {
+                    c.in_repo();
+                    c.config["own_branch_repos"] = json!([["other/*"]]);
+                },
+                Ok("bot/r"),
+            ),
+            (
+                "the switch off",
+                |c| {
+                    c.in_repo();
+                    c.config["in_repo_pull_requests"] = json!(false);
+                },
+                Ok("bot/r"),
+            ),
+            // A workflow file the agent wrote would run on its own branch.
+            (
+                ".github exempted",
+                |c| {
+                    c.in_repo();
+                    c.config[CREATE_PULL_REQUEST]["unprotected_dot_folders"] = json!([".github"]);
+                },
+                Ok("bot/r"),
+            ),
+            (
+                "a branch outside dispatch/",
+                |c| {
+                    c.in_repo();
+                    c.branch_prefix = "release/";
+                },
+                Err(
+                    "\"release/agent-run-7\" is pushed to o/r itself only as a run's own under dispatch/",
+                ),
+            ),
+            (
+                "no branch prefix",
+                |c| {
+                    c.in_repo();
+                    c.branch_prefix = "";
+                },
+                Err("only as a run's own under dispatch/"),
+            ),
+            (
+                "a dispatch branch that is not a run's",
+                |c| {
+                    c.in_repo();
+                    c.branch = "topic";
+                },
+                Err("only as a run's own under dispatch/"),
+            ),
+            (
+                "the default branch",
+                |c| {
+                    c.in_repo();
+                    c.edit(
+                        "GET /repos/o/r",
+                        "default_branch",
+                        json!("dispatch/implement/agent-run-7"),
+                    );
+                },
+                Err("is o/r's default branch, which a push never goes to"),
+            ),
+            (
+                "a protected branch",
+                |c| {
+                    c.in_repo();
+                    c.set(IN_REPO_BRANCH, 200, json!({"protected": true}));
+                },
+                Err(
+                    "o/r:dispatch/implement/agent-run-7 is a protected branch or one rules apply to",
+                ),
+            ),
+            (
+                "an absent branch covered by a classic wildcard",
+                |c| {
+                    c.in_repo();
+                    c.set(IN_REPO_BRANCH, 404, Value::Null);
+                    c.set(
+                        CLASSIC_RULES,
+                        200,
+                        json!({"data": {"repository": {"branchProtectionRules": {
+                            "totalCount": 1, "nodes": [{"pattern": "dispatch/**/*"}]
+                        }}}}),
+                    );
+                },
+                Err("in a repository with classic branch protection"),
+            ),
+            (
+                "classic protection hidden from the publishing token",
+                |c| {
+                    c.in_repo();
+                    c.set(
+                        CLASSIC_RULES,
+                        200,
+                        json!({"data": {"repository": null}, "errors": [
+                            {"message": "Resource not accessible by integration"}
+                        ]}),
+                    );
+                },
+                Err("cannot verify classic branch protection"),
+            ),
+            (
+                "an incomplete classic protection response",
+                |c| {
+                    c.in_repo();
+                    c.set(CLASSIC_RULES, 200, json!({"data": {"repository": {}}}));
+                },
+                Err("cannot verify classic branch protection"),
+            ),
+            (
+                "a branch a ruleset applies to",
+                |c| {
+                    c.in_repo();
+                    c.set(IN_REPO_RULES, 200, json!([{"type": "update"}]));
+                },
+                Err("one rules apply to"),
+            ),
+            (
+                "rules the forge could not read",
+                |c| {
+                    c.in_repo();
+                    c.routes.remove(IN_REPO_RULES);
+                },
+                Err("HTTP 404"),
+            ),
+            (
+                "a repository the identity cannot push to",
+                |c| {
+                    c.in_repo();
+                    c.edit("GET /repos/o/r", "permissions", json!({"push": false}));
+                },
+                Err("bot cannot push to o/r"),
+            ),
+        ];
+        for (what, edit, want) in cases {
+            let mut case = Case::new();
+            edit(&mut case);
+            let (got, asked) = case.run();
+            match want {
+                Ok(repo) => {
+                    assert_eq!(
+                        got.unwrap_or_else(|err| panic!("{what}: {err:#}")),
+                        pushed_to(repo, None),
+                        "{what}"
+                    );
+                    // A branch of o/r itself is neither forked for nor turned off.
+                    let forked = repo == "bot/r";
+                    assert_eq!(asked.iter().any(|a| a == FORK), forked, "{what}: {asked:?}");
+                    assert_eq!(
+                        asked.iter().any(|a| a == ACTIONS),
+                        forked,
+                        "{what}: {asked:?}"
+                    );
+                }
+                Err(words) => {
+                    let err = format!("{:#}", got.unwrap_err());
+                    assert!(err.contains(words), "{what}: {err}");
+                    assert!(
+                        asked
+                            .iter()
+                            .all(|a| a.starts_with("GET ") || a == CLASSIC_RULES),
+                        "{what}: {asked:?}"
+                    );
+                }
+            }
         }
     }
 

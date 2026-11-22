@@ -1710,6 +1710,37 @@ the applying account [owns](workflow.md#a-repository-the-applying-account-owns).
 Neither grants write access or bypasses branch protection, default-branch
 refusals, patch limits or `.github` protection.
 
+A new pull request of an account that does not own the repository still comes
+from its fork, unless the caller also sets, in the same bounds:
+
+```toml
+[github.outputs]
+own-branch-repos = ["example-org/*"]
+in-repo-pull-requests = true
+```
+
+Then, where those caller patterns (not the repository file) accept the output
+repository, apply pushes the branch to that repository and opens the pull
+request from it, so that a later run can use the branch as its base: a
+stacked pull request, whose `bases` admit `dispatch/**`, is opened against
+that branch. The branch must be the run's own under `dispatch/` (the
+caller's `branch-prefix`, such as `dispatch/implement/`, then
+`agent-run-RUNID`); apply refuses any other name, the repository's default
+branch, an existing protected branch, and a branch any ruleset covers, before
+pushing anything. GitHub's branch lookup cannot tell if a classic protection
+pattern covers a branch that does not exist yet. To create a branch, apply
+requires the publishing token to be able to read the repository's classic
+branch protection rules through GraphQL and confirm that there are none. Use
+rulesets instead of classic protection for this route. With `.github` exempted
+the pull request comes from the fork as before, as a workflow file the agent
+wrote would run on its branch.
+It is off by default, GitHub only, requires `own-branch-repos` and, where
+organization bounds apply, both files must set it. The threat it opens is
+the one `own-branch-repos` already accepts (the repository's CI running the
+agent's commit with its secrets) plus the token's write access there: scope
+that, for example with a ruleset letting the account push only to
+`dispatch/**`.
+
 GitLab bounds take the same key, with the same limits and intersection, in
 `[gitlab.outputs]`; Forgejo's refuse it. Where the bounds name no `push_repo`
 and the patterns match the target project, the caller may pass the target

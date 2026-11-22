@@ -823,6 +823,18 @@ pub fn normalize_branch(name: &str) -> String {
     normalized.trim_end_matches('-').to_owned()
 }
 
+/// The branch the create_pull_request handler pushes for a request's
+/// BRANCH: its name normalized, behind PREFIX unless it starts with it.
+pub(crate) fn handler_branch(prefix: &str, branch: &str) -> String {
+    let prefix = normalize_branch(prefix);
+    let branch = normalize_branch(js_trim(branch));
+    if !prefix.is_empty() && !branch.starts_with(&prefix) {
+        format!("{prefix}{branch}")
+    } else {
+        branch
+    }
+}
+
 /// A handler's setting KEY of CONFIG as text.
 fn setting<'a>(config: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
     config
@@ -1553,12 +1565,11 @@ fn pull_request(
 
     // The branch the handler pushes: its name normalized, behind the
     // prefix, which apply.yml's guard has the run's own.
-    let prefix = normalize_branch(setting(config, "branch_prefix").unwrap_or_default());
-    let mut branch = normalize_branch(js_trim(branch));
-    ensure!(!branch.is_empty(), "a create_pull_request without a branch");
-    if !prefix.is_empty() && !branch.starts_with(&prefix) {
-        branch = format!("{prefix}{branch}");
-    }
+    ensure!(
+        !normalize_branch(js_trim(branch)).is_empty(),
+        "a create_pull_request without a branch"
+    );
+    let branch = handler_branch(setting(config, "branch_prefix").unwrap_or_default(), branch);
 
     let patch = report
         .patch
@@ -5838,6 +5849,17 @@ mod tests {
     }
 
     fn pull_request_case_with_files(extra_files: usize) -> (tempfile::TempDir, PathBuf, Value) {
+        pull_request_case_with(|git| {
+            for n in 0..extra_files {
+                git["patch"]["files"][format!("file-{n:03}.txt")] = json!("x\n");
+            }
+        })
+    }
+
+    /// [`pull_request_case`], its repositories' history changed by EDIT.
+    fn pull_request_case_with(
+        edit: impl FnOnce(&mut Value),
+    ) -> (tempfile::TempDir, PathBuf, Value) {
         let cases: Vec<Value> =
             serde_json::from_value(read_json(&corpus().join("cases.json"))).unwrap();
         let case = cases
@@ -5848,9 +5870,7 @@ mod tests {
         let checked = root.path().join("checked");
         std::fs::create_dir_all(&checked).unwrap();
         let mut git_case = case["git"].clone();
-        for n in 0..extra_files {
-            git_case["patch"]["files"][format!("file-{n:03}.txt")] = json!("x\n");
-        }
+        edit(&mut git_case);
         repositories(&git_case, root.path(), &checked);
         let golden = read_json(&corpus().join("create-pull-request.json"));
         let mut handlers = golden["attempts"][0]["handler_config"].clone();
@@ -5947,6 +5967,84 @@ mod tests {
                 assert_eq!(commits[0]["files"].as_array().unwrap().len(), 102);
             }
         }
+    }
+
+    /// A stacked pull request: on a lower run's dispatch branch, from a
+    /// branch of the output repository itself (`in-repo-pull-requests`),
+    /// opened against that branch and not as a cross-repository head.
+    #[test]
+    fn a_stacked_pull_request_from_the_repository_itself() {
+        const LOWER: &str = "dispatch/implement/agent-run-1";
+        const BRANCH: &str = "dispatch/implement/agent-run-4242";
+        let (root, dir, mut handlers) = pull_request_case_with(|git| {
+            git["branches"] = json!({LOWER: {"message": "Lower", "files": {"lower.txt": "x\n"}}});
+            git["patch"]["base"] = json!(LOWER);
+        });
+        handlers[CREATE_PULL_REQUEST]["base_branch"] = json!(LOWER);
+        handlers[CREATE_PULL_REQUEST]["branch_prefix"] = json!("dispatch/implement/");
+        handlers[CREATE_PULL_REQUEST]["head-repo"] = json!(REPO);
+        handlers[CREATE_PULL_REQUEST]["allowed_repos"] = json!([REPO]);
+        let (github, sent) = forge(&json!({}), &[]);
+        let run = run(1, github.api_url());
+        let publisher = GithubPublisher {
+            github,
+            git: root.path().display().to_string(),
+            item_repo: REPO.into(),
+            repo: REPO.into(),
+        };
+        let records = tempfile::tempdir().unwrap();
+        let path = |file: &str| records.path().join(file);
+        let ok = apply(
+            &Checked {
+                items: &[pull_request_item()],
+                handlers: handlers.as_object().unwrap(),
+                upload: upload(&dir),
+                policy: &policy(),
+            },
+            &run,
+            &publisher,
+            &Records {
+                remainder: &path("remainder.json"),
+                made: &path("made.jsonl"),
+                errors: &path("errors.json"),
+                output: None,
+                summary: None,
+                workflow: "agentic-job",
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(ok, "{}", read_json(&path("errors.json")));
+        let sent = sent.lock().unwrap();
+        let opened = sent
+            .iter()
+            .find(|request| {
+                request
+                    .line
+                    .starts_with(&format!("POST /repos/{REPO}/pulls "))
+            })
+            .unwrap();
+        assert_eq!(opened.body["head"], BRANCH);
+        assert_eq!(opened.body["base"], LOWER);
+        assert!(opened.body.get("head_repo").is_none(), "{}", opened.body);
+        // On the lower branch, in the repository itself; nothing in the fork.
+        let bare = |repo: &str| root.path().join(format!("{repo}.git"));
+        let log = sh(&bare(REPO), &["log", "--format=%s", BRANCH]);
+        assert_eq!(
+            log.lines().take(2).collect::<Vec<_>>(),
+            ["lib: Check for overflow", "Lower"]
+        );
+        assert_eq!(
+            sh(
+                &bare(FORK),
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/dispatch/implement/agent-run-4242"
+                ]
+            ),
+            ""
+        );
     }
 
     /// What gh-aw's handlers would publish otherwise refuses the run

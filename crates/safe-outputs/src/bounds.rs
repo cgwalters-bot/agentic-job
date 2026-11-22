@@ -189,6 +189,11 @@ pub struct GithubOutputs {
     pub upstream_pull_request_base: bool,
     #[serde(default, rename = "own-branch-repos")]
     pub own_branch_repos: Vec<String>,
+    /// Open a new pull request from a run's `dispatch/` branch of the
+    /// output repository itself, not from the fork, where
+    /// [`Self::own_branch_repos`] accepts that repository.
+    #[serde(default, rename = "in-repo-pull-requests")]
+    pub in_repo_pull_requests: bool,
     /// Experimental stack ceiling; zero disables stacks. No workflow publishes
     /// a series yet.
     #[serde(default, rename = "stack-steps")]
@@ -404,13 +409,17 @@ impl<Trigger> Bounds<Trigger> {
         }
         let forge = self.forge();
         let outputs = self.outputs();
+        let own_branch_repos = self.own_branch_repos();
         if let Some(github) = &self.github {
             crate::contract::validate_stack_steps(
                 github.outputs.stack_steps,
                 outputs.contains_key(CREATE_PULL_REQUEST),
             )?;
+            crate::contract::validate_in_repo_pull_requests(
+                github.outputs.in_repo_pull_requests,
+                own_branch_repos,
+            )?;
         }
-        let own_branch_repos = self.own_branch_repos();
         crate::contract::validate_own_branch_repos(own_branch_repos)?;
         ensure!(
             forge != Forge::Forgejo || own_branch_repos.is_empty(),
@@ -734,6 +743,7 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
         .stack_max_steps
         .min(other.safe_outputs.stack_max_steps);
     policy.safe_outputs.upstream_pull_request_base &= other.safe_outputs.upstream_pull_request_base;
+    policy.safe_outputs.in_repo_pull_requests &= other.safe_outputs.in_repo_pull_requests;
     // Keep each caller's patterns separate: a repository must match both,
     // not their union. No glob-pattern intersection is needed.
     if policy.safe_outputs.own_branch_repos.is_empty()

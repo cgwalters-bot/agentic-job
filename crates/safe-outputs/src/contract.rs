@@ -1139,6 +1139,11 @@ pub struct SafeOutputs {
     /// remains an independent source).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub own_branch_repos: Vec<Vec<String>>,
+    /// Caller opt-in, intersected across bounds files: a new pull request's
+    /// branch goes to the output repository itself where
+    /// [`Self::own_branch_repos`] accepts it (apply's `push target`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub in_repo_pull_requests: bool,
     /// Experimental caller ceiling, intersected across bounds files. Zero
     /// disables policy-based stack checking; not a gh-aw handler operation.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -1488,6 +1493,14 @@ impl Policy {
             self.forge != Forge::Forgejo || self.safe_outputs.own_branch_repos.is_empty(),
             "own-branch-repos is supported only on GitHub and GitLab"
         );
+        ensure!(
+            self.forge == Forge::Github || !self.safe_outputs.in_repo_pull_requests,
+            "in-repo-pull-requests is supported only on GitHub"
+        );
+        validate_in_repo_pull_requests(
+            self.safe_outputs.in_repo_pull_requests,
+            &self.safe_outputs.own_branch_repos.concat(),
+        )?;
         for output in self.safe_outputs.others.keys() {
             ensure!(
                 OUTPUT_TYPES.contains(&output.as_str())
@@ -1612,6 +1625,19 @@ pub(crate) fn validate_own_branch_repos(patterns: &[String]) -> Result<()> {
         );
         glob(pattern).context("own-branch-repos: invalid pattern")?;
     }
+    Ok(())
+}
+
+/// `in-repo-pull-requests` names no repository itself: without
+/// `own-branch-repos` accepting one it would do nothing.
+pub(crate) fn validate_in_repo_pull_requests(
+    enabled: bool,
+    own_branch_repos: &[String],
+) -> Result<()> {
+    ensure!(
+        !enabled || !own_branch_repos.is_empty(),
+        "in-repo-pull-requests requires own-branch-repos naming the repositories it applies to"
+    );
     Ok(())
 }
 

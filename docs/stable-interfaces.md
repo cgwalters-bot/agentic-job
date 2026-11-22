@@ -247,6 +247,9 @@ the next in the same major version.
   `[github.outputs] own-branch-repos` optionally lists repository patterns
   accepting new PR branches and fix pushes without a per-repository file;
   it defaults to empty ([acceptance policy](safe-outputs.md#pushing-to-a-pull-requests-branch)).
+  `[github.outputs] in-repo-pull-requests = true` (off by default, requires
+  `own-branch-repos`) opens a new PR from the run's `dispatch/` branch of an
+  accepted output repository instead of the fork.
   `[github.outputs] stack-steps` is experimental, not a stable interface;
   it defaults to zero and enables no workflow publication
   ([stack groundwork](safe-outputs.md#stacked-proposals-library-groundwork-only)).

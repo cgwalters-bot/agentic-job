@@ -673,6 +673,10 @@ impl Compile for Bounds {
                 .filter(|patterns| !patterns.is_empty())
                 .map(|patterns| vec![patterns.to_vec()])
                 .unwrap_or_default(),
+            in_repo_pull_requests: self
+                .github
+                .as_ref()
+                .is_some_and(|github| github.outputs.in_repo_pull_requests),
             stack_max_steps: self
                 .github
                 .as_ref()
@@ -4481,6 +4485,54 @@ max_patch_files = 10
                 );
             }
         }
+    }
+
+    #[test]
+    fn in_repo_pull_requests_are_opt_in_and_intersect() {
+        let compile = |enabled: bool, base: &'static str| {
+            let parsed: Bounds = toml::from_str(&format!(
+                "{BOUNDS}\nown-branch-repos = [\"example-org/*\"]\nin-repo-pull-requests = {enabled}\n"
+            )
+            .replace(r#"bases = ["main", "#, r#"bases = ["main", "dispatch/**", "#))
+            .unwrap();
+            let policy = parsed.compile(&Request { base, ..request() }).unwrap();
+            let policy: Policy =
+                serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+            policy.validate().unwrap();
+            policy
+        };
+        assert!(
+            !bounds()
+                .compile(&request())
+                .unwrap()
+                .safe_outputs
+                .in_repo_pull_requests
+        );
+        for first in [false, true] {
+            for second in [false, true] {
+                let both = intersect(compile(first, "main"), compile(second, "main")).unwrap();
+                assert_eq!(both.safe_outputs.in_repo_pull_requests, first && second);
+            }
+        }
+        // A stacked run's base is a lower run's dispatch branch.
+        let stacked = compile(true, "dispatch/implement/agent-run-1");
+        assert_eq!(stacked.base, "dispatch/implement/agent-run-1");
+        assert!(stacked.safe_outputs.in_repo_pull_requests);
+        // It names no repository: own-branch-repos does, and GitHub alone.
+        let mut alone = bounds();
+        alone.github.as_mut().unwrap().outputs.in_repo_pull_requests = true;
+        let err = alone.validate().unwrap_err().to_string();
+        assert!(err.contains("requires own-branch-repos"), "{err}");
+        let mut invalid = stacked.clone();
+        invalid.safe_outputs.own_branch_repos.clear();
+        assert!(invalid.validate().is_err());
+        let mut invalid = stacked;
+        invalid.forge = Forge::Gitlab;
+        let err = invalid.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("in-repo-pull-requests is supported only on GitHub"),
+            "{err}"
+        );
     }
 
     #[test]
