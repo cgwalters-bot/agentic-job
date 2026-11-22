@@ -713,6 +713,9 @@ impl Admit for Bounds {
                 ready_when_complete: ready(CREATE_PULL_REQUEST),
                 max_patch_size: self.max_patch_bytes.map(|bytes| bytes / KB),
                 max_patch_files: self.max_patch_files,
+                allowed: limits
+                    .get(CREATE_PULL_REQUEST)
+                    .and_then(|bound| bound.allowed.clone()),
             }),
             push_to_pull_request_branch: pull_request.filter(|_| push).map(|(number, head)| Push {
                 max: limit(PUSH_TO_PULL_REQUEST_BRANCH).max,
@@ -2593,6 +2596,60 @@ max_patch_files = 10
             };
             assert!(limit.validate("create_issue").is_err(), "{label:?}");
         }
+    }
+
+    /// A pull request's labels are bounded by an `allowed` list alone,
+    /// which a second bounds file narrows; without one none is written.
+    #[test]
+    fn pull_request_label_limits_compile_and_narrow() {
+        let compiled = |text: &str| {
+            let mut bounds = bounds();
+            bounds.outputs_mut().unwrap().insert(
+                CREATE_PULL_REQUEST.to_owned(),
+                toml::from_str(text).unwrap(),
+            );
+            bounds.validate()?;
+            Ok::<_, anyhow::Error>(
+                bounds
+                    .compile(&Request {
+                        outputs: CREATE_PULL_REQUEST,
+                        ..request()
+                    })
+                    .unwrap(),
+            )
+        };
+        let labels = |names: &[&str]| Some(names.iter().map(|n| (*n).to_owned()).collect());
+        let own = compiled("max = 1\nallowed = ['agent-implement', 'docs']").unwrap();
+        own.validate().unwrap();
+        let allowed = |policy: &Policy| {
+            policy
+                .safe_outputs
+                .create_pull_request
+                .clone()
+                .unwrap()
+                .allowed
+        };
+        assert_eq!(allowed(&own), labels(&["agent-implement", "docs"]));
+        let json = serde_json::to_value(&own.safe_outputs).unwrap();
+        assert_eq!(
+            json[CREATE_PULL_REQUEST]["allowed"],
+            serde_json::json!(["agent-implement", "docs"])
+        );
+        let none = compiled("max = 1").unwrap();
+        assert_eq!(allowed(&none), None);
+        let json = serde_json::to_value(&none.safe_outputs).unwrap();
+        assert!(json[CREATE_PULL_REQUEST].get("allowed").is_none(), "{json}");
+        assert!(compiled("max = 1\nallowed = ['docs']\nblocked = ['x']").is_err());
+        assert!(compiled("max = 1\nallowed = [' docs']").is_err());
+        let org = compiled("max = 1\nallowed = ['DOCS']").unwrap();
+        assert_eq!(
+            allowed(&intersect(own.clone(), org).unwrap()),
+            labels(&["docs"])
+        );
+        assert_eq!(
+            allowed(&intersect(none, own).unwrap()),
+            labels(&["agent-implement", "docs"])
+        );
     }
 
     #[test]

@@ -2755,7 +2755,11 @@ Labels are filtered by the handler's `allowed` and
 `blocked` patterns, at most 10 added in one request, or removed one at
 a time, at most the handler's `max`: a label the item lacks is skipped,
 and one the forge will not remove reported without failing the
-request. A closing
+request. A new pull request's labels are added once it is open, as
+gh-aw's handler adds them: tried again while GitHub cannot yet resolve
+the new pull request (a 422 naming its node), and a failure is a warning; each
+must be one its bounds' `allowed` lists, which gh-aw's handler has no
+setting for. A closing
 comment is posted first, even on an item someone closed already, which
 is not closed again; a pull request is closed even where its comment
 fails, an issue is not. It writes the same
@@ -2775,12 +2779,14 @@ the run's order. Where gh-aw's handlers would do something it does not,
 it refuses the whole run before the first write, and gh-aw's step is
 given no request: a request after another type, a field or handler
 setting it does not read (a comment's `comment_id` or `reply_to_id`, a
-pull request's labels, stack fields or another base, a closed issue's
+pull request's label its bounds' `allowed` does not list, more than 10,
+stack fields or another base, a closed issue's
 `duplicate_of`, labels' intent metadata or `create_if_missing`), a
 temporary ID (`#aw_`), an item named other than by a positive integer
 number, a label other than a plain one of at most 64 letters, digits,
 spaces and `-_./:`, a label pattern that is not ASCII, a dispatch whose
-inputs gh-aw would read the event from, a mention gh-aw would look up,
+inputs gh-aw would read the event from, a mention gh-aw would look up
+(but for a bot actor's `NAME[bot]`, whose `@NAME` is neutralized),
 a file gh-aw's footer would read in `/tmp/gh-aw`, a push without the
 policy's pull request, head and branch or with a replacement series
 (which the guard pushes), an issue linked to another one, an issue in a

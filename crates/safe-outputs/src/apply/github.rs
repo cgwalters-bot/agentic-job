@@ -40,6 +40,20 @@ const RETRY_WAIT: Duration = Duration::from_secs(30);
 
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(240);
 
+/// How gh-aw's handler retries adding labels to the pull request it just
+/// opened (its `LABEL_MAX_RETRIES` and `LABEL_*_DELAY_MS`): up to five
+/// more times, the wait doubling from [`LABEL_RETRY_WAIT`] up to
+/// [`MAX_LABEL_RETRY_WAIT`].
+const LABEL_RETRIES: u32 = 5;
+
+const LABEL_RETRY_WAIT: Duration = Duration::from_secs(3);
+
+const MAX_LABEL_RETRY_WAIT: Duration = Duration::from_secs(30);
+
+/// What GitHub answers (422) for a node it has not made visible yet, as a
+/// pull request just opened, which gh-aw's `isLabelTransientError` retries.
+const UNRESOLVED_NODE: &str = "Could not resolve to a node with the global id";
+
 /// The most pages of a list read: 10,000 entries.
 const MAX_PAGES: u32 = 100;
 
@@ -212,13 +226,37 @@ pub fn is_transient(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether gh-aw's `isLabelTransientError` retries ERR: what
+/// [`is_transient`] does, or a node GitHub cannot resolve yet.
+fn is_label_transient(err: &anyhow::Error) -> bool {
+    is_transient(err)
+        || err
+            .downcast_ref::<Refused>()
+            .is_some_and(|refused| refused.message.contains(UNRESOLVED_NODE))
+}
+
+/// How [`Github::retrying`] tries a request again: at most `max` times,
+/// after a failure `transient` accepts, the wait doubling from `wait` up
+/// to `max_wait`.
+struct Retry {
+    max: u32,
+    wait: Duration,
+    max_wait: Duration,
+    transient: fn(&anyhow::Error) -> bool,
+}
+
 /// The error gh-aw's `withRetry` throws (its `enhanceError`) when OPERATION
 /// failed with ERR after RETRIES retries: what its handler reports, and
 /// what its manager quotes in the comments after a pull request that
-/// failed. A 403 its `x-ratelimit-remaining` header alone calls a rate
-/// limit is not told apart here, nor one of fewer than three retries at
-/// most (MAX).
-fn retry_failure(err: &anyhow::Error, operation: &str, retries: u32, max: u32) -> String {
+/// failed. ERR is retryable as TRANSIENT says. A 403 its
+/// `x-ratelimit-remaining` header alone calls a rate limit is not told
+/// apart here, nor one of fewer than three retries at most (MAX).
+fn retry_failure(
+    err: &anyhow::Error,
+    operation: &str,
+    (retries, max): (u32, u32),
+    transient: fn(&anyhow::Error) -> bool,
+) -> String {
     let original = format!("{err:#}");
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let rate_limit = max >= 3
@@ -228,7 +266,7 @@ fn retry_failure(err: &anyhow::Error, operation: &str, retries: u32, max: u32) -
             || RATE_LIMIT_MESSAGES
                 .iter()
                 .any(|pattern| original.to_lowercase().contains(pattern)));
-    let (code, failed, retryable, suggestion) = if !is_transient(err) {
+    let (code, failed, retryable, suggestion) = if !transient(err) {
         (
             "ERR_API",
             format!("(attempt {})", retries + 1),
@@ -568,21 +606,54 @@ impl Github {
         operation: &str,
         max: u32,
     ) -> Result<Value> {
-        let mut wait = self.retry_wait;
+        let retry = Retry {
+            max,
+            wait: self.retry_wait,
+            max_wait: MAX_RETRY_WAIT,
+            transient: is_transient,
+        };
+        self.retrying(method, path, body, operation, &retry)
+    }
+
+    /// [`Self::request_retrying`] for adding labels to the pull request
+    /// OPERATION just opened, as gh-aw's handler adds them: sooner, and
+    /// again while GitHub cannot resolve its node yet.
+    pub fn labels_retrying(&self, path: &str, body: &Value, operation: &str) -> Result<Value> {
+        let retry = Retry {
+            max: LABEL_RETRIES,
+            wait: self.retry_wait.min(LABEL_RETRY_WAIT),
+            max_wait: MAX_LABEL_RETRY_WAIT,
+            transient: is_label_transient,
+        };
+        self.retrying("POST", path, Some(body), operation, &retry)
+    }
+
+    /// [`Self::request`], tried again as RETRY says; a failure is
+    /// [`Retried`].
+    fn retrying(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        operation: &str,
+        retry: &Retry,
+    ) -> Result<Value> {
+        let max = retry.max;
+        let mut wait = retry.wait;
         let mut retries = 0;
         loop {
             match self.request(method, path, body) {
-                Err(err) if retries < max && is_transient(&err) => {
+                Err(err) if retries < max && (retry.transient)(&err) => {
                     retries += 1;
                     (self.warn)(&format!(
                         "{method} {path} failed ({err:#}); retry {retries}/{max} in {}s",
                         wait.as_secs()
                     ));
                     std::thread::sleep(wait);
-                    wait = (wait * 2).min(MAX_RETRY_WAIT);
+                    wait = (wait * 2).min(retry.max_wait);
                 }
                 Err(err) => {
-                    let message = retry_failure(&err, operation, retries, max);
+                    let message = retry_failure(&err, operation, (retries, max), retry.transient);
                     return Err(Retried {
                         message,
                         refused: err.downcast::<Refused>().ok(),
@@ -1144,5 +1215,33 @@ mod tests {
         }
         let github = Github::new("http://127.0.0.1:1", TOKEN.to_owned(), PROVENANCE).unwrap();
         assert!(is_transient(&github.call("GET", "/", None).unwrap_err()));
+    }
+
+    /// Adding labels is also tried again, at most [`LABEL_RETRIES`] times,
+    /// while GitHub cannot resolve the new pull request's node; opening
+    /// one is not.
+    #[test]
+    fn label_retries() {
+        let message = format!("{UNRESOLVED_NODE} of 'PR_1'");
+        let routes = [("POST /x".to_owned(), (422, json!({"message": message})))];
+        let (github, requests) = forge(routes.into_iter().collect());
+        let err = github
+            .labels_retrying("/x", &json!({"labels": ["a"]}), "add labels to PR #1")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!(
+                "] add labels to PR #1 failed after {LABEL_RETRIES} retry attempts\n\n\
+                 Original error: {message}\nRetryable: true\n"
+            )),
+            "{err}"
+        );
+        assert_eq!(requests.try_iter().count(), 1 + LABEL_RETRIES as usize);
+        let err = github
+            .request_retrying("POST", "/x", None, "create pull request in o/r")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("failed (attempt 1)"), "{err}");
+        assert_eq!(requests.try_iter().count(), 1);
     }
 }

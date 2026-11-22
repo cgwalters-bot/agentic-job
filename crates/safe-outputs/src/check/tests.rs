@@ -669,6 +669,42 @@ fn the_caller_decides_what_it_publishes_and_its_lifecycle() {
     assert_eq!(errors, ["no neutral inline comment here"]);
 }
 
+/// A pull request's labels are held to the bounds' `allowed` list where
+/// there is one, as plain labels; without one check leaves them to gh-aw.
+#[test]
+fn pull_request_labels_are_held_to_the_allowed_list() {
+    let errors = |allowed: Option<&[&str]>, labels: Value| {
+        let mut policy = policy();
+        policy
+            .safe_outputs
+            .create_pull_request
+            .as_mut()
+            .unwrap()
+            .allowed = allowed.map(|names| names.iter().map(|name| (*name).to_owned()).collect());
+        let mut item = pull_request();
+        item["labels"] = labels;
+        redirections_to(item.as_object().unwrap(), &policy, None, &Fake::default())
+    };
+    let allowed: &[&str] = &["agent-implement", "documentation"];
+    assert!(errors(Some(allowed), json!(["Agent-Implement", "documentation"])).is_empty());
+    assert!(errors(Some(allowed), json!([])).is_empty());
+    assert!(errors(None, json!(["anything"])).is_empty());
+    for (allowed, labels) in [
+        (Some(allowed), json!(["automerge"])),
+        (Some(allowed), json!(["agent-implement", "automerge"])),
+        (Some(allowed), json!([" agent-implement"])),
+        (Some(&[][..]), json!(["agent-implement"])),
+    ] {
+        let errors = errors(allowed, labels.clone());
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("outside the policy's label limits")),
+            "{labels}: {errors:?}"
+        );
+    }
+}
+
 #[test]
 fn comments_go_to_the_trusted_target_only() {
     let policy = policy();

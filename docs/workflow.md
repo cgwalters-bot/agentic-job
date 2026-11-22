@@ -2866,6 +2866,11 @@ or appears in `blocked`; blocked wins if a label appears in both lists.
 Label matching ignores ASCII case. An empty `allowed` permits no labels;
 omitting it preserves the existing unrestricted behavior except for
 `blocked`. `add_labels` also uses these limits, but requires `allowed` explicitly.
+`create_pull_request` takes an `allowed` list alone, so that an agent
+cannot name a label that starts other automation (a merge or CI label):
+`check` refuses a pull request naming another, and agentic-job's own
+publisher adds a pull request's labels only from that list, refusing the
+run before any write without it.
 Assignees remain the agent's, sanitized by gh-aw's collector, as gh-aw
 allows by default; a bounds rule for them is not written yet
 ([#113](https://github.com/cgwalters-forge/agentic-job/issues/113)). A

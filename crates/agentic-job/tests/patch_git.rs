@@ -632,6 +632,7 @@ fn rules() -> PullRequest {
         ready_when_complete: false,
         max_patch_size: Some(1024),
         max_patch_files: Some(MAX_PATCH_FILES),
+        allowed: None,
     }
 }
 

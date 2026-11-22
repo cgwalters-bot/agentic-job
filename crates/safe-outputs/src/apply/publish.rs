@@ -32,7 +32,9 @@
 //! after one of gh-aw's types, a field or setting this does not read, a
 //! temporary ID, a workflow input gh-aw reads from a file this ignores,
 //! a mention it would look up, or a label this cannot tell gh-aw would
-//! keep as written. A pull request or push that fails is not
+//! keep as written. A bot actor's name, which gh-aw would look up as
+//! another account, is neutralized instead: a mention gh-aw might keep,
+//! never one it would not. A pull request or push that fails is not
 //! followed by the routed comments after it, which gh-aw would post with
 //! a note of its own; a push goes only onto the head the run was asked
 //! for, where gh-aw's handler would apply the patch on a branch rewritten
@@ -81,7 +83,7 @@ pub struct Handler {
 /// The types `agentic-job publish` publishes, each where the bounds'
 /// `native_handlers` name it. A comment's numbers are those its fixed
 /// target ignores; a pull request's `base` is only the handler's own and
-/// its `labels` only empty.
+/// its `labels` only those its `allowed` lists.
 pub const HANDLERS: &[Handler] = &[
     Handler {
         output: "document",
@@ -119,6 +121,7 @@ pub const HANDLERS: &[Handler] = &[
             "title_prefix",
             "head-repo",
             "allowed_repos",
+            "allowed",
         ],
         fixed: &[
             ("signed_commits", "false"),
@@ -701,7 +704,10 @@ impl Run {
     /// The mentions a handler keeps by default
     /// (`resolveAllowedMentionsFromPayload`): those of the event's people
     /// its own reading finds. One it would look up, as it does for a name
-    /// it reads otherwise, is refused.
+    /// it reads otherwise, is refused, but for an App's `NAME[bot]` (a
+    /// dispatch's bot actor): gh-aw reads it as `NAME`, another account,
+    /// and asks the forge whether that one is a collaborator. That is left
+    /// out here, so `@NAME` is neutralized like any mention not kept.
     fn default_mentions(&self) -> Result<Vec<String>> {
         let known = dedupe(self.known_authors());
         let text = known
@@ -719,11 +725,15 @@ impl Run {
             {
                 continue;
             }
+            let key = name.to_lowercase();
+            if lower.contains(&key) {
+                allowed.push(name);
+                continue;
+            }
             ensure!(
-                lower.contains(&name.to_lowercase()),
+                lower.contains(&format!("{key}[bot]")),
                 "the event names {name:?} in a way gh-aw's handlers would look up"
             );
-            allowed.push(name);
         }
         Ok(allowed)
     }
@@ -974,9 +984,20 @@ fn shape(output: &str, item: &Map<String, Value>) -> Vec<String> {
                 .map(|key| format!("a {output} whose {key} is not text")),
         );
     }
-    if matches!(output, ADD_LABELS | REMOVE_LABELS | CREATE_ISSUE) {
+    if matches!(
+        output,
+        ADD_LABELS | REMOVE_LABELS | CREATE_ISSUE | CREATE_PULL_REQUEST
+    ) {
         match item.get("labels") {
             None => {}
+            Some(Value::Array(labels))
+                if output == CREATE_PULL_REQUEST && labels.len() > MAX_LABELS =>
+            {
+                errors.push(format!(
+                    "a {output} with more than {MAX_LABELS} labels, which agentic-job publish \
+                     does not add"
+                ));
+            }
             Some(Value::Array(labels)) => errors.extend(
                 labels
                     .iter()
@@ -1099,6 +1120,8 @@ enum Op {
         /// Why it fails before anything is pushed, as gh-aw's handler fails it.
         failure: Option<String>,
         pr: Box<PullRequest>,
+        /// Added once it is open, as [`pull_request_labels`] decided them.
+        labels: Vec<String>,
     },
     Labels {
         index: usize,
@@ -1485,12 +1508,14 @@ fn plan(
                     push: Box::new(branch_push(&item, config, checked, report, policy)?),
                 });
             }
+            let labels = pull_request_labels(&item, config)?;
             let (pr, failure) = pull_request(&item, config, checked, report, policy, run)?;
             Ok(Op::PullRequest {
                 index,
                 max,
                 failure,
                 pr: Box::new(pr),
+                labels,
             })
         });
         match decided {
@@ -1551,11 +1576,6 @@ fn pull_request(
             "a create_pull_request for another base than {base}"
         );
     }
-    ensure!(
-        item.get("labels")
-            .is_none_or(|labels| labels.as_array().is_some_and(Vec::is_empty)),
-        "a create_pull_request with labels, which agentic-job publish does not add"
-    );
     let text = |key: &str| {
         item.get(key)
             .and_then(Value::as_str)
@@ -1665,6 +1685,46 @@ fn pull_request(
         },
         failure,
     ))
+}
+
+/// The labels ITEM asks for, which gh-aw's handler adds to the pull
+/// request once it is open, held to the handler's CONFIG: each one its
+/// `allowed` lists, case ignored as check compares them. gh-aw's handler
+/// has no such list; the bounds' keeps an agent from naming a label that
+/// starts other automation (a merge or a privileged CI label). Without
+/// one no label is added, and a request naming any is refused before
+/// anything is written.
+fn pull_request_labels(
+    item: &Map<String, Value>,
+    config: &Map<String, Value>,
+) -> Result<Vec<String>> {
+    let labels: Vec<String> = item
+        .get("labels")
+        .map(|labels| serde_json::from_value(labels.clone()))
+        .transpose()
+        .context("the request's labels")?
+        .unwrap_or_default();
+    if labels.is_empty() {
+        return Ok(labels);
+    }
+    let allowed: Vec<String> = config
+        .get("allowed")
+        .map(|allowed| serde_json::from_value(allowed.clone()))
+        .transpose()
+        .context("the create_pull_request handler's allowed is not a list of labels")?
+        .unwrap_or_default();
+    let mut kept: Vec<String> = Vec::new();
+    for label in labels {
+        ensure!(
+            allowed.iter().any(|name| name.eq_ignore_ascii_case(&label)),
+            "a create_pull_request with the label {label:?}, which the bounds' allowed labels \
+             for it do not list"
+        );
+        if !kept.contains(&label) {
+            kept.push(label);
+        }
+    }
+    Ok(kept)
 }
 
 /// Why gh-aw's handler fails the patch FILES of BYTES under CONFIG before
@@ -2979,7 +3039,9 @@ fn publish_one(
             failure: Some(failure),
             ..
         } => Outcome::failed(op, failure.clone()),
-        Op::PullRequest { pr, .. } => pull_request_outcome(op, pr, defaults, publisher, run),
+        Op::PullRequest { pr, labels, .. } => {
+            pull_request_outcome(op, (pr, labels), defaults, publisher, run, log)
+        }
         Op::Labels { request, .. } if request.add => add_labels(op, request, &publisher.github),
         Op::Labels { request, .. } => remove_labels(op, request, &publisher.github),
         Op::Close {
@@ -3527,13 +3589,15 @@ fn comment(
     }
 }
 
-/// Opens the pull request PR, as gh-aw's handler does.
+/// Opens the pull request PR and adds its LABELS, as gh-aw's handler
+/// does: labels the forge will not add are a warning, not a failure.
 fn pull_request_outcome(
     op: &Op,
-    pr: &PullRequest,
+    (pr, labels): (&PullRequest, &[String]),
     defaults: &[String],
     publisher: &GithubPublisher,
     run: &Run,
+    log: &mut dyn FnMut(&Annotation),
 ) -> Outcome {
     let body = match pull_request_body(&pr.body, defaults, publisher, run) {
         Ok(body) => body,
@@ -3553,6 +3617,24 @@ fn pull_request_outcome(
     };
     match publisher.open_pull_request(&pr) {
         Ok(made) => {
+            if !labels.is_empty() {
+                let added = made
+                    .number
+                    .context("the forge named no number")
+                    .and_then(|number| {
+                        publisher.github.labels_retrying(
+                            &format!("/repos/{}/issues/{number}/labels", publisher.repo),
+                            &json!({"labels": labels}),
+                            &format!("add labels to PR #{number}"),
+                        )
+                    });
+                if let Err(err) = added {
+                    log(&command(
+                        "warning",
+                        &format!("Failed to add labels to {}: {err:#}", made.url),
+                    ));
+                }
+            }
             let temporary_id = temporary_id();
             Outcome {
                 output: CREATE_PULL_REQUEST,
@@ -5832,6 +5914,14 @@ mod tests {
                 vec![with(&pr, "dependencies", json!(["x"]))],
                 "the field \"dependencies\"",
             ),
+            (
+                vec![with(&pr, "labels", json!(vec!["a"; MAX_LABELS + 1]))],
+                "more than 10 labels",
+            ),
+            (
+                vec![with(&pr, "labels", json!(["@owner"]))],
+                "with the label \"@owner\"",
+            ),
             (vec![json!("x")], "not an object"),
         ] {
             let errors = split(&items, &routed).unwrap_err();
@@ -5969,6 +6059,202 @@ mod tests {
         }
     }
 
+    /// A pull request's labels are added once it is open, ordinary or
+    /// endpoint-replayed, and only those the handler's `allowed` lists: one
+    /// it does not refuses the run before anything is pushed. Adding them
+    /// is tried again while GitHub cannot resolve the new pull request's
+    /// node, and a refusal is only a warning. A dispatch's bot actor
+    /// publishes too, its `NAME` neutralized, where a person's mention is
+    /// kept.
+    #[test]
+    fn labels_and_dispatch_actors_on_a_native_pull_request() {
+        const ENDPOINT: &str = "https://inference.example.invalid/v1";
+        const UNRESOLVED: &str = "Could not resolve to a node with the global id of 'PR_1'";
+        const REFUSED: &str = "Label names must be unique";
+        let allowed = json!(["agent-implement", "documentation"]);
+        for (labels, replay, actor, fault, ok) in [
+            (json!([]), false, "owner", None, true),
+            (
+                json!(["agent-implement", "Documentation"]),
+                false,
+                "owner",
+                None,
+                true,
+            ),
+            (json!(["agent-implement"]), true, "owner", None, true),
+            (json!([]), false, "renovate[bot]", None, true),
+            (
+                json!(["agent-implement"]),
+                false,
+                "owner",
+                Some(UNRESOLVED),
+                true,
+            ),
+            (
+                json!(["agent-implement"]),
+                false,
+                "owner",
+                Some(REFUSED),
+                true,
+            ),
+            (
+                json!(["agent-implement", "automerge"]),
+                false,
+                "owner",
+                None,
+                false,
+            ),
+        ] {
+            let case = format!("{labels} replay={replay} {actor} {fault:?}");
+            let (root, dir, mut handlers) = pull_request_case_with(|git| {
+                if replay {
+                    git["files"]["endpoint.conf"] = json!(format!("url={ENDPOINT}\n"));
+                    git["patch"]["files"]["endpoint.conf"] =
+                        json!(format!("url={ENDPOINT}\nretries=2\n"));
+                }
+            });
+            handlers[CREATE_PULL_REQUEST]["allowed"] = allowed.clone();
+            if replay {
+                // What check hands over for an endpoint-redacted patch: the
+                // endpoint replaced in its old side, and the receipt binding
+                // the redacted bytes to the base and the trial's tree.
+                let report_path = dir.join(REPORT_FILE);
+                let mut report = read_json(&report_path);
+                let name = dir.join(report["patch"]["file"].as_str().unwrap());
+                let patch = std::fs::read_to_string(&name)
+                    .unwrap()
+                    .replace(&format!(" url={ENDPOINT}\n"), " url=<inference-address>\n");
+                assert!(patch.contains("<inference-address>"), "{case}");
+                std::fs::write(&name, &patch).unwrap();
+                report["patch"]["bytes"] = json!(patch.len());
+                report["patch"]["replay"] = json!({
+                    "patch_sha256": crate::replay::digest(patch.as_bytes()),
+                    "base_commit": report["patch"]["base_commit"],
+                    "literals": [crate::replay::Literal::new(ENDPOINT).unwrap()],
+                    "tree": git(&root.path().join("seed"), &["rev-parse", "agent^{tree}"]),
+                });
+                std::fs::write(&report_path, report.to_string()).unwrap();
+            }
+            let mut item = pull_request_item();
+            item["labels"] = labels.clone();
+            item["body"] = json!("Thanks @owner and @renovate.");
+            let mut seed = json!({});
+            seed[format!("/repos/{REPO}/issues/1")] = json!({"labels": []});
+            let faults: Vec<Value> = fault
+                .iter()
+                .map(|message| {
+                    json!({"method": "POST", "path": format!("/repos/{REPO}/issues/1/labels"),
+                        "status": 422, "answer": {"message": message}})
+                })
+                .collect();
+            let (github, sent) = forge(&seed, &faults);
+            let mut run = run(1, github.api_url());
+            run.actor = actor.into();
+            let publisher = GithubPublisher {
+                github,
+                git: root.path().display().to_string(),
+                item_repo: REPO.into(),
+                repo: REPO.into(),
+            };
+            let records = tempfile::tempdir().unwrap();
+            let path = |file: &str| records.path().join(file);
+            let mut warnings = Vec::new();
+            let result = apply(
+                &Checked {
+                    items: &[item],
+                    handlers: handlers.as_object().unwrap(),
+                    upload: upload(&dir),
+                    policy: &policy(),
+                },
+                &run,
+                &publisher,
+                &Records {
+                    remainder: &path("remainder.json"),
+                    made: &path("made.jsonl"),
+                    errors: &path("errors.json"),
+                    output: None,
+                    summary: None,
+                    workflow: "agentic-job",
+                },
+                &mut |annotation| warnings.push(format!("{annotation:?}")),
+            );
+            let sent = sent.lock().unwrap();
+            let fork = root.path().join(format!("{FORK}.git"));
+            if !ok {
+                let err = format!("{:#}", result.unwrap_err());
+                assert!(err.contains("\"automerge\""), "{case}: {err}");
+                assert!(sent.is_empty(), "{case}");
+                assert_eq!(
+                    sh(&fork, &["for-each-ref", "--format=%(refname)"]),
+                    "refs/heads/main",
+                    "{case}"
+                );
+                continue;
+            }
+            assert!(result.unwrap(), "{case}: {warnings:?}");
+            let posts: Vec<&str> = sent
+                .iter()
+                .filter(|request| request.line.starts_with("POST "))
+                .map(|request| request.line.trim_end_matches(" HTTP/1.1"))
+                .collect();
+            let opened = format!("POST /repos/{REPO}/pulls");
+            let labeled = format!("POST /repos/{REPO}/issues/1/labels");
+            let tries = match fault {
+                _ if labels == json!([]) => 0,
+                Some(UNRESOLVED) => 2,
+                _ => 1,
+            };
+            let expected: Vec<&str> = std::iter::once(opened.as_str())
+                .chain(std::iter::repeat_n(labeled.as_str(), tries))
+                .collect();
+            assert_eq!(posts, expected, "{case}");
+            for added in sent.iter().filter(|r| r.line.starts_with(&labeled)) {
+                assert_eq!(added.body, json!({"labels": labels}), "{case}");
+            }
+            let failed: Vec<&String> = warnings
+                .iter()
+                .filter(|warning| warning.contains("Failed to add labels"))
+                .collect();
+            if fault == Some(REFUSED) {
+                assert_eq!(failed.len(), 1, "{case}: {warnings:?}");
+                assert!(failed[0].contains(REFUSED), "{case}: {failed:?}");
+                assert!(failed[0].contains("Retryable: false"), "{case}: {failed:?}");
+            } else {
+                assert!(failed.is_empty(), "{case}: {warnings:?}");
+            }
+            let body = sent[sent
+                .iter()
+                .position(|r| r.line.starts_with(&opened))
+                .unwrap()]
+            .body["body"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(body.contains("`@renovate`"), "{case}: {body}");
+            assert_eq!(
+                body.contains("Thanks @owner "),
+                actor == "owner",
+                "{case}: {body}"
+            );
+            let branch = handlers[CREATE_PULL_REQUEST]["branch_prefix"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+                + "agent-run-4242";
+            let commits = pushed(root.path(), &branch, "main");
+            let files = commits[0]["files"].as_array().unwrap();
+            assert_eq!(files.contains(&json!("endpoint.conf")), replay, "{case}");
+            if replay {
+                // The trial's tree: the endpoint kept, never the placeholder.
+                assert_eq!(
+                    sh(&fork, &["show", &format!("{branch}:endpoint.conf")]).trim_end(),
+                    format!("url={ENDPOINT}\nretries=2"),
+                    "{case}"
+                );
+            }
+        }
+    }
+
     /// A stacked pull request: on a lower run's dispatch branch, from a
     /// branch of the output repository itself (`in-repo-pull-requests`),
     /// opened against that branch and not as a cross-repository head.
@@ -6100,7 +6386,15 @@ mod tests {
             (
                 pull_request_item(),
                 |_, item, _| item["labels"] = json!(["x"]),
-                "with labels",
+                "the label \"x\", which the bounds' allowed labels for it do not list",
+            ),
+            (
+                pull_request_item(),
+                |handlers, item, _| {
+                    handlers[CREATE_PULL_REQUEST]["allowed"] = json!(["y"]);
+                    item["labels"] = json!(["y", "x"]);
+                },
+                "the label \"x\"",
             ),
             (
                 pull_request_item(),
@@ -6460,7 +6754,7 @@ mod tests {
         let mut heading = pull_request_item();
         heading["title"] = json!("Réparer");
         heading["body"] = json!("# Réparer\n\nA local reproduction.");
-        for (items, bot, want) in [
+        for (items, unread, want) in [
             (vec![comment_item(), issue.clone()], true, "look up"),
             (vec![comment_item(), heading, issue], false, "not ASCII"),
         ] {
@@ -6476,8 +6770,9 @@ mod tests {
             let path = |file: &str| records.path().join(file);
             let policy = policy();
             let mut run = run(1, "http://127.0.0.1:1");
-            if bot {
-                run.actor = "renovate[bot]".into();
+            if unread {
+                // A login gh-aw would read short, and look up.
+                run.actor = "owner_".into();
             }
             let err = apply(
                 &Checked {
@@ -6550,12 +6845,15 @@ mod tests {
             assert!(err.contains(want), "{err}");
         }
         // The mentions it keeps are the event's people, as gh-aw reads
-        // them; a name it would look up refuses the run.
+        // them, not a bot actor's name; another name it would look up
+        // refuses the run.
         for (event_name, actor, want) in [
             ("workflow_dispatch", "Owner", Ok(vec!["Owner".to_owned()])),
             ("workflow_dispatch", "", Ok(vec![])),
             ("push", "owner", Ok(vec![])),
-            ("workflow_dispatch", "renovate[bot]", Err("look up")),
+            ("workflow_dispatch", "renovate[bot]", Ok(vec![])),
+            ("workflow_dispatch", "Renovate[BOT]", Ok(vec![])),
+            ("workflow_dispatch", "owner_", Err("look up")),
         ] {
             let mut run = read(&[]).unwrap();
             run.event_name = event_name.into();

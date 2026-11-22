@@ -614,16 +614,30 @@ pub fn redirections_to(
             .and_then(|limit| limit.category.as_deref());
         problems.extend(differs("category", &|category| Some(category) == pinned));
     }
-    if matches!(output, CREATE_ISSUE | "add_labels" | "remove_labels")
-        && let Some(limit) = policy.safe_outputs.others.get(output)
-        && (limit.allowed.is_some() || !limit.blocked.is_empty())
+    // A pull request's labels are bounded by `allowed` alone.
+    let label_limits = match output {
+        CREATE_ISSUE | "add_labels" | "remove_labels" => {
+            policy.safe_outputs.others.get(output).map(|limit| {
+                let per_request = (output != CREATE_ISSUE).then_some(limit.max);
+                (&limit.allowed, &limit.blocked[..], per_request)
+            })
+        }
+        CREATE_PULL_REQUEST => policy
+            .safe_outputs
+            .create_pull_request
+            .as_ref()
+            .map(|pr| (&pr.allowed, &[][..], None)),
+        _ => None,
+    };
+    if let Some((allowed, blocked, per_request)) = label_limits
+        && (allowed.is_some() || !blocked.is_empty())
         && let Some(labels) = item.get("labels")
     {
         match labels.as_array() {
             Some(labels) => {
                 // The pinned label handlers use max for both requests and
                 // labels per request. Refuse rather than silently drop labels.
-                if output != CREATE_ISSUE && labels.len() > limit.max as usize {
+                if per_request.is_some_and(|max| labels.len() > max as usize) {
                     problems.push(format!("a {output} exceeding the per-request label limit"));
                 }
                 for label in labels {
@@ -639,11 +653,10 @@ pub fn redirections_to(
                                     && label.bytes().all(|b| {
                                         b.is_ascii_alphanumeric() || b" -_./:".contains(&b)
                                     })))
-                            && !limit
-                                .blocked
+                            && !blocked
                                 .iter()
                                 .any(|blocked| blocked.eq_ignore_ascii_case(label))
-                            && limit.allowed.as_ref().is_none_or(|allowed| {
+                            && allowed.as_ref().is_none_or(|allowed| {
                                 allowed
                                     .iter()
                                     .any(|allowed| allowed.eq_ignore_ascii_case(label))

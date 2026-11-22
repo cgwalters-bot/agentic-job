@@ -694,6 +694,20 @@ fn tighter_limit<T: Ord>(own: Option<T>, other: Option<T>) -> Option<T> {
     own.into_iter().chain(other).min()
 }
 
+/// The names both of two `allowed` lists admit, case ignored; an absent
+/// list admits any.
+fn intersect_allowed(own: Option<Vec<String>>, other: &Option<Vec<String>>) -> Option<Vec<String>> {
+    match (own, other) {
+        (Some(own), Some(other)) => Some(
+            own.into_iter()
+                .filter(|label| other.iter().any(|other| other.eq_ignore_ascii_case(label)))
+                .collect(),
+        ),
+        (None, Some(other)) => Some(other.clone()),
+        (own, None) => own,
+    }
+}
+
 /// Intersect compiled policies rather than trying to intersect glob patterns.
 /// Each file independently checks the target and any explicitly requested type.
 pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String>> {
@@ -779,16 +793,7 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
     policy.safe_outputs.others.retain(|name, limit| {
         if let Some(bound) = other.safe_outputs.others.get(name) {
             limit.max = limit.max.min(bound.max);
-            limit.allowed = match (&limit.allowed, &bound.allowed) {
-                (Some(own), Some(other)) => Some(
-                    own.iter()
-                        .filter(|label| other.iter().any(|other| other.eq_ignore_ascii_case(label)))
-                        .cloned()
-                        .collect(),
-                ),
-                (None, Some(other)) => Some(other.clone()),
-                (own, None) => own.clone(),
-            };
+            limit.allowed = intersect_allowed(limit.allowed.take(), &bound.allowed);
             limit.blocked.extend(bound.blocked.iter().cloned());
             limit
                 .projects
@@ -891,6 +896,7 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
             pr.max_patch_size = tighter_limit(pr.max_patch_size, bound.max_patch_size);
             pr.max_patch_files = tighter_limit(pr.max_patch_files, bound.max_patch_files);
             pr.ready_when_complete &= bound.ready_when_complete;
+            pr.allowed = intersect_allowed(pr.allowed, &bound.allowed);
             for name in bound.protected_files {
                 if !pr.protected_files.contains(&name) {
                     pr.protected_files.push(name);

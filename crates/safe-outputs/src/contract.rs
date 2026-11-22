@@ -561,7 +561,9 @@ pub struct OutputLimit {
     pub document: Option<crate::document::Settings>,
     /// Labels an issue may name. Absent preserves the existing unrestricted
     /// behavior; an empty list permits no labels. Enforced by `check`, not
-    /// by the handler's silent filtering. For [`PERSON_OUTPUTS`], the
+    /// by the handler's silent filtering. For `create_pull_request` the
+    /// labels a new pull request may name, which agentic-job's own handler
+    /// adds only from this list. For [`PERSON_OUTPUTS`], the
     /// logins a request may name instead, required and nonempty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed: Option<Vec<String>>,
@@ -757,8 +759,10 @@ impl OutputLimit {
         } else {
             ensure!(
                 matches!(output, "create_issue" | "add_labels" | "remove_labels")
-                    || (self.allowed.is_none() && self.blocked.is_empty()),
-                "outputs.{output}: label limits are supported only for create_issue, add_labels and remove_labels"
+                    || (self.allowed.is_none() && self.blocked.is_empty())
+                    || (output == CREATE_PULL_REQUEST && self.blocked.is_empty()),
+                "outputs.{output}: label limits are supported only for create_issue, add_labels \
+                 and remove_labels, and an allowed list for create_pull_request"
             );
             ensure!(
                 !matches!(output, "add_labels" | "remove_labels") || self.allowed.is_some(),
@@ -1218,6 +1222,11 @@ pub struct PullRequest {
     pub max_patch_size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_patch_files: Option<u32>,
+    /// The bounds' [`OutputLimit::allowed`] labels: check refuses a pull
+    /// request naming another. agentic-job's own handler reads them, and
+    /// adds no label without them; gh-aw's handler ignores the setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed: Option<Vec<String>>,
 }
 
 /// Preserve the legacy handler default for an explicit zero in JSON.
