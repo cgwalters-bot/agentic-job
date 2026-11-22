@@ -171,10 +171,17 @@ verdict. Inspect the apply log and PR before retrying. No live label publication
 is proven by the offline tests.
 
 Each finding is tagged blocker, important or nit, and only a blocker earns
-CHANGES: a finding that makes the change wrong for its main purpose, loses
-data, or opens a security hole with a concrete path the reviewer can state,
-such as what a weakened permission, gate, bound, pin, token placement or
-trigger now lets someone do. Both prompts ask for every finding in one pass
+CHANGES. The standing task requires a concrete failure of the change's main
+purpose or a material defect the change introduces or makes reachable. It
+groups findings by cause and asks for the root fix. A re-review treats an
+otherwise blocking finding as a follow-up only when the same failure was
+already introduced or made reachable by the last reviewed revision relative
+to its own base, and the prior findings show no unresolved blocker for it.
+A failure of the main purpose, a security hole, data loss or a
+confirmed dependency-integrity failure introduced or made reachable by the
+pull request still blocks in any round. Carried blockers must satisfy the
+same concrete-defect rules.
+Both prompts ask for every finding in one pass
 and, in an approving review, for important findings and nits under
 "Follow-ups" with file and line, for later pull requests; a fix for a blocker
 may take them along. Blocking on each new narrow finding cost a fix, CI and
@@ -190,12 +197,11 @@ extended, configured or deleted, whether it sits in the repository and
 language the base's AGENTS.md or conventions call for, and whether it is
 the smallest change that works, lines added against lines removed: checking
 only against the issue approved well-scoped additions in the wrong place
-([#1816](https://github.com/cgwalters-forge/agentic-job/issues/1816)). A
-failure is a blocker, "should not exist as written: X instead". The project's
-own conventions, not the prompts, name the right place and language. This adds
-one blocking reason to every caller's merge gate, so expect more CHANGES and
-fix rounds; it changes no permission, token or bound and can only withhold an
-approval. Tests that only restate the implementation (unit tests of private
+([#1816](https://github.com/cgwalters-forge/agentic-job/issues/1816)). In the
+standing task, name the architectural fix but block only if the design causes
+a concrete failure that meets the blocker rules above. The project's own
+conventions, not the prompts, name the right place and language. Tests that
+only restate the implementation (unit tests of private
 helpers, mocks asserting call sequences) are important, not blockers, with a
 request for an integration test where feasible, so taste starts no fix rounds.
 
@@ -483,10 +489,18 @@ asks the reviewer to say first, per earlier finding, whether the new head
 resolves it, confirmed in its code and citing the commit, and to record
 each resolved one on a `Resolved:` line, so the next round's file carries
 it; a `resolved_by`, reply or comment is a claim to check, and a finding
-that still holds is raised again. Then it reviews the whole diff as before,
-looking first at code changed since the last review, and raises new
-findings wherever they are, saying why a blocker in code unchanged since
-the last review was missed. Check holds the verdict to its usual bounds;
+that still holds is raised again. Then it reviews the whole diff, looking
+first at code changed since the last review when it can identify those changes.
+History is a hint, not a basis for demoting a finding. The reviewer must
+independently identify the latest verdict across reviews and comments, verify
+that a review actually ran at its exact head, compare that revision with its
+own base, and check the prior verdicts and findings, including inline ones.
+A carried approval or a comment-only verdict without an independent
+head binding does not establish a reviewed baseline. A guessed SHA, an
+unavailable tree, or an earlier severity label does not prove the failure
+was already present. When the comparison is inconclusive, the reviewer
+applies the ordinary rules to the whole diff.
+Check holds the verdict to its usual bounds;
 the `Resolved:` lines are text in it, which only the next history reads.
 
 ## Dispatched reviews
