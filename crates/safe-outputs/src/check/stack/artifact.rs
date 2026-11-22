@@ -10,13 +10,13 @@ use std::collections::BTreeSet;
 use anyhow::{Result, ensure};
 use serde::Serialize;
 
-use super::{CheckedStack, MAX_ISSUE, Step};
+use super::{CheckedStack, MAX_ISSUE, Refusal, Step};
 use crate::{contract::Policy, replay::digest};
 
 const VERSION: u32 = 1;
 
-// Compact JSON: three SHA-256 hex digests, version and fixed field names.
-const MAX_RECEIPT_BYTES: usize = 512;
+/// Compact JSON: three SHA-256 hex digests, version and fixed field names.
+pub const MAX_RECEIPT_BYTES: usize = 512;
 
 /// Caller-owned inputs, obtained independently at check and replay. The plan
 /// and the existing policy stack ceiling must both admit the proposal.
@@ -63,7 +63,7 @@ pub fn check(
     );
 
     let mut position = 0;
-    let checked = super::check_policy_up_to(
+    let mut checked = super::check_policy_up_to(
         content,
         admission.policy,
         admission.base_commit,
@@ -77,6 +77,14 @@ pub fn check(
             inspect(step).map_err(|_| anyhow::anyhow!("stack step inspection refused"))
         },
     )?;
+    // Otherwise a producer could drop an admitted issue and the receipt would
+    // still describe a complete, unrefused stack.
+    if checked.refused.is_none() && checked.accepted.len() < admission.issues.len() {
+        checked.refused = Some(Refusal {
+            position: checked.accepted.len() + 1,
+            reason: "stack proposal does not cover the admitted issue plan".to_owned(),
+        });
+    }
     // Exact proposal bytes bind the accepted steps' patches and metadata. Bind
     // their corresponding checked paths and the refusal position separately;
     // diagnostics can contain producer text and must not travel in the receipt.
@@ -237,5 +245,35 @@ mod tests {
         assert_eq!(inspected, [1]);
         assert_eq!(checked.accepted.len(), 1);
         assert_eq!(checked.refused.unwrap().position, 2);
+
+        // The plan's fourth issue is missing: refused there unless an earlier
+        // step already was.
+        policy.max_outputs = 4;
+        policy.safe_outputs.stack_max_steps = 4;
+        let admission = Admission {
+            policy: &policy,
+            base_commit,
+            issues: &[1, 2, 3, 4],
+        };
+        for (refused_issue, position, reason) in [
+            (
+                0,
+                4,
+                "stack proposal does not cover the admitted issue plan",
+            ),
+            (2, 2, "stack step inspection refused"),
+        ] {
+            let (checked, _) = check(content.as_bytes(), &admission, |step| {
+                ensure!(step.issue != refused_issue, "refused");
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(checked.accepted.len(), position - 1);
+            let refusal = checked.refused.unwrap();
+            assert_eq!(
+                (refusal.position, refusal.reason.as_str()),
+                (position, reason)
+            );
+        }
     }
 }

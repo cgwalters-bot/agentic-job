@@ -469,6 +469,8 @@ into a bounded receipt. The library caller supplies admission independently
 and must transfer the receipt through a trusted channel: the digest is not a
 signature and authorizes no publication. The plan cannot widen `stack-steps`
 or the total output ceiling; a step outside the admitted order stops the stack.
+A proposal that ends before the plan does is refused at the first missing
+position, so a dropped issue cannot pass as a complete stack.
 `build_verified` reruns the same checks, including content inspection, and
 compares the receipt before allocating a Git worktree. A different accepted
 prefix needs a new receipt. Refusal diagnostics do not travel in the receipt.
@@ -486,6 +488,12 @@ above is rechecked by being built again on the fix. Nothing is replayed from a
 branch check did not read. A step that does not apply,
 or changes other paths, stops the stack at its position with a fixed reason, so
 a conflict never drops a step silently. Neither function pushes or publishes.
+
+An offline agentic-job test carries a producer's per-step mails through a
+`policy`-compiled `stack-steps` bound, a per-step credential-shape check, a
+receipt written outside the producer's directory and `build_verified` replay.
+It stands in for trusted ingress, which depends on a reviewed source for the
+admitted issue plan.
 
 Remaining work must wire the producer, per-step secret scan and these library
 receipts into trusted check/apply artifact transport, then push each step's branch
