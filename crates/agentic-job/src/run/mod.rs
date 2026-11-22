@@ -950,12 +950,17 @@ impl Plan {
                 found.push(*name);
             }
         }
-        let hand_back = brief::hand_back(
+        let mut hand_back = brief::hand_back(
             &self.policy,
             &self.sandbox.home,
             &checkout.dir,
             checkout.secondary.as_deref().map(|tree| tree.dir.as_path()),
         );
+        if let Some(bases) =
+            handback::ReplacementBases::new(&self.sandbox, &checkout.dir, &self.policy)
+        {
+            hand_back.push_str(&bases.guidance());
+        }
         Ok(if found.is_empty() {
             format!("{hand_back}{}", self.task)
         } else {

@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use safe_outputs::apply::COMMIT_RE;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -978,6 +979,106 @@ impl Git<'_> {
         // A command whose output was cut was stopped by that.
         let succeeded = String::from_utf8_lossy(&out.stderr).lines().last() == Some("0");
         (out.success() && (succeeded || out.stdout.len() >= limit)).then_some(out.stdout)
+    }
+}
+
+/// Inspect only the history already fetched, using the policy's exact tips.
+/// This is early feedback from the producer checkout, never proof for apply.
+pub(crate) struct ReplacementBases<'a> {
+    runner: &'a dyn Runner,
+    dir: &'a str,
+    pinned: &'a str,
+    head: &'a str,
+}
+
+impl<'a> ReplacementBases<'a> {
+    pub(crate) fn new(runner: &'a dyn Runner, dir: &'a Path, policy: &'a Policy) -> Option<Self> {
+        let push = policy.safe_outputs.push_to_pull_request_branch.as_ref()?;
+        let pinned = push.replacement_base.as_deref()?;
+        let head = &push.head;
+        (push.replacement_max_commits > 0 && COMMIT_RE.is_match(pinned) && COMMIT_RE.is_match(head))
+            .then_some(Self {
+                runner,
+                dir: dir.to_str()?,
+                pinned,
+                head,
+            })
+    }
+
+    fn git(&self, args: &[&str]) -> Option<String> {
+        let keys = std::env::vars_os()
+            .filter_map(|(key, _)| key.into_string().ok())
+            .filter(|key| key.starts_with("GIT_"))
+            .collect::<Vec<_>>();
+        let mut argv = vec!["timeout", "5s", "env"];
+        argv.extend(keys.iter().flat_map(|key| ["-u", key.as_str()]));
+        argv.extend([
+            "GIT_NO_LAZY_FETCH=1",
+            "git",
+            "--no-replace-objects",
+            "-C",
+            self.dir,
+        ]);
+        argv.extend(args);
+        let result = self.runner.run(&argv, b"", MAX_GIT_OUTPUT).ok()?;
+        result.success().then(|| result.text())
+    }
+
+    fn merge_base(&self) -> Option<String> {
+        let base = self.git(&["merge-base", "--all", self.pinned, self.head])?;
+        if !COMMIT_RE.is_match(&base) {
+            return None;
+        }
+        if self
+            .git(&["rev-parse", "--is-shallow-repository"])?
+            .as_str()
+            == "false"
+        {
+            return Some(base);
+        }
+        // A shallow boundary appears as a root. If any root is visible
+        // outside the base's ancestors, incomplete history could hide
+        // another merge base. Do not give a definitive answer then.
+        let roots = self.git(&[
+            "rev-list",
+            "--max-count=1",
+            "--max-parents=0",
+            self.pinned,
+            self.head,
+            &format!("^{base}"),
+            "--",
+        ])?;
+        roots.is_empty().then_some(base)
+    }
+
+    pub(crate) fn guidance(&self) -> String {
+        let choice = self.merge_base().map_or_else(
+            || format!("No unique merge base was proved in the checkout. To keep the PR's base, verify that `git merge-base --all {} {}` returns exactly one commit with complete history; do not rely on one result from a shallow clone.", self.head, self.pinned),
+            |base| format!("To keep the PR's base, rebuild the full series on its unique merge base `{base}`."),
+        );
+        format!(
+            "Replacement series bases: {choice} To rebase, rebuild the full series on the policy's target snapshot `{}`. A newer target snapshot still needs apply to verify it. Do not pick an older target tip or a fork's main in place of the PR's merge base. Pass the base you actually built on to `agentic-job handback replace --base`.\n\n",
+            self.pinned,
+        )
+    }
+
+    /// Apply can admit even an older target commit if the forge has rewound
+    /// the branch to it. The checkout cannot attest to that, so warn here.
+    pub(crate) fn warning(&self, base: &str) -> Option<String> {
+        if base != self.pinned
+            && COMMIT_RE.is_match(base)
+            && self
+                .git(&["merge-base", "--is-ancestor", base, self.pinned])
+                .is_some()
+            && let Some(merge_base) = self.merge_base()
+            && base != merge_base
+        {
+            return Some(format!(
+                "replacement base {base} precedes the policy target snapshot {} and is not the PR's merge base. Apply will refuse it unless it is now the exact target tip. Rebuild the full series on {merge_base} to keep the PR's base, or rebase onto {}.",
+                self.pinned, self.pinned,
+            ));
+        }
+        None
     }
 }
 

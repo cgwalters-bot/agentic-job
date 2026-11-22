@@ -131,34 +131,49 @@ pub fn trial(
                 .context("a replacement commit's checked paths are not a list of text")
         })
         .collect::<Result<Vec<_>>>()?;
-    git(repo, &["fetch", "--no-tags", &args.remote, base])?;
-    if base != pinned
-        && base != args.current_base
-        && !is_pr_merge_base(repo, &args.remote, base, pinned, config)?
-    {
+    let refusal = |reason: &str, merge_base: Option<&str>| {
+        let same_base = merge_base.map_or_else(
+            || "For a same-base rewrite, first verify a unique merge base of the admitted PR head and policy snapshot.".into(),
+            |sha| format!("To keep the PR's base, rebuild the full series on its unique merge base {sha}."),
+        );
+        format!(
+            "Unchecked replacement series: {reason} (submitted base {base}, policy snapshot {pinned}). \
+             Rebase the full series onto {pinned}. {same_base} \
+             Run `agentic-job handback replace --base` with the base actually used."
+        )
+    };
+    git(repo, &["fetch", "--no-tags", &args.remote, base])
+        .with_context(|| refusal("could not fetch the submitted base", None))?;
+    if base != pinned && base != args.current_base {
+        let merge_base = pr_merge_base(repo, &args.remote, pinned, config)
+            .with_context(|| refusal("could not verify the PR's merge base", None))?;
+        if merge_base.as_deref() == Some(base) {
+            return materialize(base, &mails, &paths, &args.temp, repo);
+        }
+        let refusal = |reason| refusal(reason, merge_base.as_deref());
         // The base branch can advance while the producer works. Accept
         // its earlier snapshot only after proving it belongs to the
         // history of the head trusted apply resolved, never an arbitrary
         // producer commit or a commit of the PR's own branch.
         ensure!(
             COMMIT_RE.is_match(&args.current_base),
-            "Unchecked replacement series: no trusted current base for ancestry validation"
+            "{}",
+            refusal("no trusted current base for ancestry validation")
         );
         git(
             repo,
             &["fetch", "--no-tags", &args.remote, &args.current_base],
-        )?;
-        git(repo, &["fetch", "--no-tags", &args.remote, pinned])?;
-        git(repo, &["merge-base", "--is-ancestor", pinned, base]).context(
-            "Unchecked replacement series: base does not descend from the policy snapshot",
-        )?;
+        )
+        .with_context(|| refusal("could not fetch the trusted current base"))?;
+        git(repo, &["fetch", "--no-tags", &args.remote, pinned])
+            .with_context(|| refusal("could not fetch the policy snapshot"))?;
+        git(repo, &["merge-base", "--is-ancestor", pinned, base])
+            .with_context(|| refusal("base does not descend from the policy snapshot"))?;
         git(
             repo,
             &["merge-base", "--is-ancestor", base, &args.current_base],
         )
-        .context(
-            "Unchecked replacement series: base is not an ancestor of the trusted current base",
-        )?;
+        .with_context(|| refusal("base is not an ancestor of the trusted current base"))?;
     }
     materialize(base, &mails, &paths, &args.temp, repo)
 }
@@ -166,21 +181,21 @@ pub fn trial(
 /// Only the PR's actual divergence point may precede the policy snapshot.
 /// An arbitrary ancestor would let a producer omit target changes from the
 /// checked series. Both tips come from trusted configuration, not the series.
-fn is_pr_merge_base(
+fn pr_merge_base(
     repo: &Path,
     remote: &str,
-    base: &str,
     pinned: &str,
     config: &Value,
-) -> Result<bool> {
+) -> Result<Option<String>> {
     let head = config["head"].as_str().unwrap_or("");
     if !COMMIT_RE.is_match(head) {
-        return Ok(false);
+        return Ok(None);
     }
     git(repo, &["fetch", "--no-tags", remote, pinned])?;
     git(repo, &["fetch", "--no-tags", remote, head])?;
     // Multiple merge bases are ambiguous: do not admit any one of them.
-    Ok(git(repo, &["merge-base", "--all", pinned, head])? == base)
+    let base = git(repo, &["merge-base", "--all", pinned, head])?;
+    Ok(COMMIT_RE.is_match(&base).then_some(base))
 }
 
 /// Applies each mail of a series on `base` in a worktree of its own and

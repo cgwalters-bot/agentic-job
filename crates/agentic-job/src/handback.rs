@@ -55,8 +55,17 @@ impl Command {
         match self {
             Self::Replace { base, range } => {
                 let home = std::env::var_os("HOME").context("HOME is not set")?;
-                let output = Path::new(&home).join("out/replacement.json");
-                replace(Path::new("."), base, range.as_deref(), &output)?;
+                let home = Path::new(&home);
+                let output = home.join(REPLACEMENT_PATH);
+                let repo = Path::new(".");
+                let run = RunFile::read(home).ok();
+                let bases = run.as_ref().and_then(|run| {
+                    let root = git(repo, &["rev-parse", "--show-toplevel"]).ok()?;
+                    let root = Path::new(std::str::from_utf8(&root).ok()?.trim_end_matches('\n'));
+                    (root == run.checkout).then_some(())?;
+                    capture::ReplacementBases::new(&Unconfined, &run.checkout, &run.policy)
+                });
+                replace(repo, base, range.as_deref(), &output, bases.as_ref())?;
                 eprintln!("Validated replacement written to {}", output.display());
             }
             Self::Scan { base } => {
@@ -118,6 +127,11 @@ impl Command {
                         &run.base
                     )
                 );
+                if let Some(bases) =
+                    capture::ReplacementBases::new(&Unconfined, &run.checkout, &run.policy)
+                {
+                    print!("{}", bases.guidance());
+                }
             }
         }
         Ok(Exit::Success)
@@ -503,6 +517,14 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
                 &run.public_base,
             )?;
             base_shapes_checked = verdict.ok && verdict.patch.is_some();
+            if let Some(patch) = &verdict.patch
+                && patch.commit_files.is_some()
+                && let Some(bases) =
+                    capture::ReplacementBases::new(&Unconfined, &checkout.dir, policy)
+                && let Some(warning) = bases.warning(&patch.base_commit)
+            {
+                report.notes.push(format!("warning: {warning}"));
+            }
             report.notes.extend(
                 verdict
                     .warnings
@@ -1103,7 +1125,13 @@ fn git_command(repo: &Path) -> Process {
     command
 }
 
-fn replace(repo: &Path, base: &str, range: Option<&str>, output: &Path) -> Result<()> {
+fn replace(
+    repo: &Path,
+    base: &str,
+    range: Option<&str>,
+    output: &Path,
+    bases: Option<&capture::ReplacementBases<'_>>,
+) -> Result<()> {
     let base = String::from_utf8(git(
         repo,
         &[
@@ -1114,6 +1142,9 @@ fn replace(repo: &Path, base: &str, range: Option<&str>, output: &Path) -> Resul
         ],
     )?)?;
     let base = base.trim();
+    if let Some(warning) = bases.and_then(|bases| bases.warning(base)) {
+        eprintln!("warning: {warning}");
+    }
     let default_range = format!("{base}..HEAD");
     let range = range.unwrap_or(&default_range);
     ensure!(!range.starts_with('-'), "range must not be an option");
@@ -1295,6 +1326,70 @@ mod tests {
 
     /// A fix run admitted by `own_author` hears from `handback check` what
     /// the trusted check, given its pull request, says of its comment.
+    #[test]
+    fn replacement_handback_warns_about_an_old_target_tip_without_changing_it() {
+        let (dir, mut run) = home(pull_requests());
+        let repo = &run.checkout;
+        let divergence = run.base.clone();
+        let commit = |name: &str| {
+            sh(
+                repo,
+                &format!(
+                    "touch {name} && git add {name} && git -c user.name=Test -c user.email=test@example.com commit -qm {name}"
+                ),
+            );
+            sh(repo, "git rev-parse HEAD").trim().to_owned()
+        };
+        let intermediate = commit("old-target");
+        let pinned = commit("new-target");
+        sh(repo, &format!("git checkout -q --detach {divergence}"));
+        let head = commit("pr-change");
+        run.base.clone_from(&head);
+        run.policy.safe_outputs = serde_json::from_value(json!({
+            "push_to_pull_request_branch": {
+                "max": 1, "target": "7", "head": head, "author": "example-bot",
+                "replacement_base": pinned, "replacement_max_commits": 2,
+                "protected_files": [], "protect_top_level_dot_folders": true,
+                "protected_files_policy": "blocked", "max_patch_size": 65536,
+            },
+        }))
+        .unwrap();
+        run.policy.validate().unwrap();
+        let output = dir.path().join(REPLACEMENT_PATH);
+        let guidance = capture::ReplacementBases::new(&Unconfined, repo, &run.policy);
+        replace(repo, &divergence, None, &output, guidance.as_ref()).unwrap();
+        let valid = std::fs::read(&output).unwrap();
+        // The wrong replay cannot match HEAD, and never replaces a valid artifact.
+        assert!(replace(repo, &intermediate, None, &output, guidance.as_ref()).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), valid);
+        std::fs::write(dir.path().join(AGENT_OUTCOME), r#"{"summary":"Done."}"#).unwrap();
+        std::fs::write(
+            dir.path().join(AGENT_OUTPUTS),
+            r#"{"type":"push_to_pull_request_branch","message":"Rewrite the PR"}"#,
+        )
+        .unwrap();
+        let mut series: Replacement = serde_json::from_slice(&valid).unwrap();
+        series.base_commit.clone_from(&intermediate);
+        std::fs::write(&output, serde_json::to_vec(&series).unwrap()).unwrap();
+        let report = validate(dir.path(), &run).unwrap();
+        assert!(report.problems.is_empty());
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("warning: replacement base")
+                    && note.contains(&intermediate)
+                    && note.contains(&divergence)
+                    && note.contains(&pinned)),
+            "{:?}",
+            report.notes
+        );
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            serde_json::to_vec(&series).unwrap()
+        );
+    }
+
     #[test]
     fn own_author_handback_accepts_its_comment_with_the_push() {
         let (dir, mut run) = home(json!({"add_comment": {"max": 1}, "noop": {"max": 1}}));
@@ -1907,7 +2002,7 @@ mod tests {
         std::fs::write(p.join("file"), "changed\n").unwrap();
         git(p, &["commit", "-qam", "Change"]).unwrap();
         let output = p.join("out/replacement.json");
-        replace(p, base.trim(), None, &output).unwrap();
+        replace(p, base.trim(), None, &output, None).unwrap();
         let bytes = std::fs::read(&output).unwrap();
         let series: Replacement = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
@@ -1926,25 +2021,25 @@ mod tests {
             .unwrap()
         );
         assert!(series.commits[0].ends_with('\n'));
-        assert!(replace(p, "HEAD", Some("HEAD~1..HEAD"), &output).is_err());
+        assert!(replace(p, "HEAD", Some("HEAD~1..HEAD"), &output, None).is_err());
         assert_eq!(std::fs::read(&output).unwrap(), bytes);
-        assert!(replace(p, "HEAD", None, &output).is_err());
+        assert!(replace(p, "HEAD", None, &output, None).is_err());
         // A range can replay cleanly yet omit part of the intended tree.
         std::fs::write(p.join("second"), "retained\n").unwrap();
         git(p, &["add", "second"]).unwrap();
         git(p, &["commit", "-qm", "Second change"]).unwrap();
-        let error = replace(p, base.trim(), Some("HEAD~2..HEAD~1"), &output).unwrap_err();
+        let error = replace(p, base.trim(), Some("HEAD~2..HEAD~1"), &output, None).unwrap_err();
         assert!(
             error.to_string().contains("intended HEAD tree"),
             "{error:#}"
         );
         assert_eq!(std::fs::read(&output).unwrap(), bytes);
-        replace(p, base.trim(), None, &output).unwrap();
+        replace(p, base.trim(), None, &output, None).unwrap();
         // CRLF lines replay as they were committed.
         std::fs::write(p.join("crlf"), "one\r\ntwo\r\n").unwrap();
         git(p, &["add", "crlf"]).unwrap();
         git(p, &["commit", "-qm", "CRLF change"]).unwrap();
-        replace(p, base.trim(), None, &output).unwrap();
+        replace(p, base.trim(), None, &output, None).unwrap();
     }
 
     /// A replacement series is scanned mail by mail as a change is, its

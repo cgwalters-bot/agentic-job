@@ -1637,13 +1637,22 @@ Apply pushes it with `--force-with-lease=refs/heads/BRANCH:ORIGINAL_HEAD`.
 An exact already-applied head is a no-op; a different head, even with the
 same tree, refuses the replacement. The final remote head is verified.
 
+The fix-round brief names the policy target snapshot for a rebase and, if the
+local history proves it, the unique merge base of that snapshot and the
+admitted PR head for a same-base rewrite. `handback replace` and
+`handback check` warn when an older target commit is not that merge base:
+only apply can tell whether the live target has since moved back to it.
+The base checks do not fetch history or change the submitted base. If shallow history
+does not prove the merge base, use the policy snapshot for a rebase or fetch
+enough history to prove it before rewriting on the same base.
+
 The policy base remains an admitted snapshot if the branch advances. A fix
-run may also fetch a newer head and rebase onto it; apply independently reads
+run may also fetch a newer target head and rebase onto it; apply independently reads
 the PR's base branch and its current head. A base other than those exact
 heads must be between them, or be the unique merge base of the policy-pinned
 PR head and target snapshot, proved by ancestry before materializing or pushing.
-Check validates the claimed full commit ID, not its
-forge membership. A head that advances again before apply resolves it does
+The artifact check validates the claimed full commit ID, not its
+forge membership or the producer's local history. A head that advances again before apply resolves it does
 not invalidate the earlier snapshot; a rewritten history that no longer
 contains it requires a new proposal or the policy snapshot. This prevents an arbitrary producer
 commit from becoming the root of the replacement series. An arbitrary older

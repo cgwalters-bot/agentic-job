@@ -2019,6 +2019,191 @@ mod tests {
         }
 
         #[test]
+        fn replacement_feedback_distinguishes_divergence_from_an_old_target_tip() {
+            use crate::run::{enter::Unconfined, handback::ReplacementBases};
+            use safe_outputs::apply::replacement::{TrialArgs, git, trial};
+
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("producer");
+            let consumer = temp.path().join("apply");
+            for dir in [&repo, &consumer] {
+                std::fs::create_dir(dir).unwrap();
+                git(dir, &["init", "-q", "--initial-branch=main"]).unwrap();
+            }
+            let run = |args: &[&str]| git(&repo, args).unwrap();
+            run(&["config", "user.name", "Test"]);
+            run(&["config", "user.email", "test@example.com"]);
+            let commit = |file: &str, message: &str| {
+                std::fs::write(repo.join(file), format!("{file}\n")).unwrap();
+                run(&["add", file]);
+                run(&["commit", "-qm", message]);
+                run(&["rev-parse", "HEAD"])
+            };
+            let mail = || {
+                run(&[
+                    "format-patch",
+                    "--stdout",
+                    "--no-signature",
+                    "--no-renames",
+                    "-1",
+                ]) + "\n"
+            };
+
+            // The PR diverged before the old target tip, and policy pinned
+            // a still newer tip. The old target tip is not the PR's base.
+            let divergence = commit("common.txt", "Common history");
+            let intermediate = commit("old-target.txt", "Old target tip");
+            let pinned = commit("new-target.txt", "Policy target tip");
+            run(&["checkout", "-qb", "proposal", &divergence]);
+            let head = commit("pr.txt", "Original PR commit");
+            run(&["checkout", "-q", "--detach", &head]);
+            run(&[
+                "commit",
+                "--amend",
+                "-qm",
+                "Rewrite PR commit\n\nReviewed-by: Reviewer <reviewer@example.com>",
+            ]);
+            let rewritten = run(&["rev-parse", "HEAD"]);
+            let same_base_tree = run(&["rev-parse", "HEAD^{tree}"]);
+            let same_base_mail = mail();
+            run(&["checkout", "-q", "--detach", &pinned]);
+            run(&["cherry-pick", &rewritten]);
+            let rebased_tree = run(&["rev-parse", "HEAD^{tree}"]);
+            let rebased_mail = mail();
+            run(&["checkout", "-q", "--orphan", "unrelated"]);
+            run(&["rm", "-qrf", "."]);
+            let unrelated = commit("unrelated.txt", "Unrelated history");
+
+            let mut policy = push_policy();
+            let config = policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap();
+            config.replacement_max_commits = 2;
+            config.replacement_base = Some(pinned.clone());
+            config.head.clone_from(&head);
+            let shallow = |depth: &str, name: &str| {
+                run(&[
+                    "clone",
+                    "-q",
+                    "--depth",
+                    depth,
+                    "--no-single-branch",
+                    "-b",
+                    "main",
+                    &format!("file://{}", repo.display()),
+                    temp.path().join(name).to_str().unwrap(),
+                ]);
+                temp.path().join(name)
+            };
+            let limited = shallow("2", "limited");
+            let limited_bases = ReplacementBases::new(&Unconfined, &limited, &policy).unwrap();
+            assert!(
+                limited_bases
+                    .guidance()
+                    .contains("No unique merge base was proved")
+            );
+            assert!(limited_bases.warning(&intermediate).is_none()); // Leave unknown ancestry to apply.
+            let checkout = shallow("3", "checkout");
+            let bases = ReplacementBases::new(&Unconfined, &checkout, &policy).unwrap();
+            let guidance = bases.guidance();
+            assert!(guidance.contains(&divergence) && guidance.contains(&pinned));
+            assert!(!guidance.contains(&intermediate));
+            let warning = bases.warning(&intermediate).unwrap();
+            assert!(
+                warning.contains(&intermediate)
+                    && warning.contains(&divergence)
+                    && warning.contains(&pinned)
+            );
+
+            let args = TrialArgs {
+                report: temp.path().join("report.json"),
+                series: temp.path().join("replacement.json"),
+                config: temp.path().join("config.json"),
+                current_base: pinned.clone(),
+                remote: repo.to_str().unwrap().into(),
+                temp: temp.path().into(),
+            };
+            std::fs::write(
+                &args.config,
+                serde_json::to_vec(&policy.safe_outputs).unwrap(),
+            )
+            .unwrap();
+            let submit = |args: &TrialArgs, base: &str, mail: &str| {
+                let series = json!({"base_commit": base, "commits": [mail]}).to_string();
+                let verdict = Handback {
+                    items: vec![push()],
+                    files: vec![(replacement::REPLACEMENT_FILE, series.clone())],
+                    ..Handback::default()
+                }
+                .check_against(&policy);
+                // The offline artifact check has no repository; bypassing
+                // producer feedback must not bypass apply's ancestry proof.
+                assert!(verdict.ok, "{:?}", verdict.errors);
+                std::fs::write(&args.report, serde_json::to_vec(&verdict).unwrap()).unwrap();
+                std::fs::write(&args.series, series).unwrap();
+                trial(args, &consumer, &crate::apply::read_checked)
+            };
+            for invalid in [&intermediate, &head, &unrelated] {
+                let error = submit(&args, invalid, &same_base_mail)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("does not descend from the policy snapshot"),
+                    "{error}"
+                );
+                for expected in [
+                    invalid.as_str(),
+                    &pinned,
+                    &divergence,
+                    "handback replace --base",
+                ] {
+                    assert!(error.contains(expected), "{error}");
+                }
+            }
+            for (base, mail, tree) in [
+                (&divergence, &same_base_mail, same_base_tree),
+                (&pinned, &rebased_mail, rebased_tree),
+            ] {
+                assert!(bases.warning(base).is_none());
+                let built = submit(&args, base, mail).unwrap();
+                assert_eq!(built.tree, tree);
+                assert_eq!(
+                    git(&consumer, &["show", "-s", "--format=%P", &built.head]).unwrap(),
+                    *base
+                );
+                assert!(
+                    git(&consumer, &["show", "-s", "--format=%B", &built.head])
+                        .unwrap()
+                        .contains("Reviewed-by: Reviewer <reviewer@example.com>")
+                );
+                run(&["update-ref", "refs/heads/proposal", &rewritten]);
+                let error = safe_outputs::apply::replacement::push(
+                    &consumer,
+                    &args.remote,
+                    "proposal",
+                    &head,
+                    &built.head,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("branch moved"), "{error:#}");
+                assert_eq!(run(&["rev-parse", "proposal"]), rewritten);
+            }
+            // Only apply can tell if the target was rewound after policy pinned it.
+            run(&["update-ref", "refs/heads/main", &intermediate]);
+            let rewound = TrialArgs {
+                current_base: run(&["rev-parse", "main"]),
+                ..args
+            };
+            let built = submit(&rewound, &intermediate, &same_base_mail).unwrap();
+            assert_eq!(
+                git(&consumer, &["show", "-s", "--format=%P", &built.head]).unwrap(),
+                intermediate
+            );
+        }
+
+        #[test]
         fn replacement_series_are_individually_bounded() {
             let mut policy = push_policy();
             let config = policy
