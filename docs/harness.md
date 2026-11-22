@@ -569,6 +569,15 @@ start is in the brief or not seen. Off by default; without
 the token or an item it watches nothing, and says so. The polls are
 conditional (`If-None-Match`), so an unchanged item costs no rate limit,
 and a poll GitHub refuses for a limit waits as long as GitHub asks.
+An answer whose `X-RateLimit-Remaining` is 100 or less, with an
+`X-RateLimit-Reset` still to come, holds off the watch's next request,
+the same poll's comments included, until that reset, but no less than
+the poll interval and at most an hour, so that the watch leaves the last
+of the token's quota to its other users. Any updates that poll read are
+delivered. Skipped comments keep their last ETag and are fetched only
+when a later issue response lets the poll proceed. If the quota stays
+low, comments can remain unread for the rest of the run. Without both
+headers as numbers, the watch polls as usual.
 
 A GitLab item is watched too, where `--watch-item` names its web
 address instead: `SERVER/GROUP/…/PROJECT/-/issues/NUMBER` (nested

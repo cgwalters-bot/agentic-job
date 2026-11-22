@@ -4,7 +4,11 @@
 //!
 //! The polls are conditional (`If-None-Match`), so an item that did not
 //! change costs nothing of the token's rate limit, and a poll GitHub
-//! refuses for a limit waits for as long as GitHub says.
+//! refuses for a limit waits for as long as GitHub says. An answer that
+//! says the token has almost no requests left in its window
+//! (`LOW_QUOTA`) holds off the next request until the window resets,
+//! so that the watch does not spend the last of a quota it shares with
+//! the token's other users.
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -14,13 +18,17 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, SubsecRound, Utc};
 use serde_json::Value;
 
-use super::{Kind, MAX_RESPONSE, PER_PAGE, Seen, State, Update, polled};
+use super::{Kind, MAX_RESPONSE, MAX_WAIT, PER_PAGE, Seen, State, Update, polled};
 
 /// What GitHub's API is reached at unless the CI system says
 /// (`GITHUB_API_URL`).
 pub const DEFAULT_API: &str = "https://api.github.com";
 const API_VERSION: &str = "2022-11-28";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The requests left in the token's window (`X-RateLimit-Remaining`) at
+/// or below which the watch makes no more until it resets: what is left
+/// is the token's other users'.
+const LOW_QUOTA: u64 = 100;
 
 /// An issue or pull request, as `OWNER/NAME#NUMBER`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,15 +73,11 @@ pub struct Watch {
     pub interval: Duration,
 }
 
-/// A response to a conditional request.
-enum Got {
-    Changed {
-        value: Value,
-        etag: Option<String>,
-    },
-    Same,
-    /// GitHub refused for a rate limit, and says for how long.
-    Wait(Duration),
+/// A changed payload and its validator; the poll only takes the validator
+/// after using the payload.
+struct Changed {
+    value: Value,
+    etag: Option<String>,
 }
 
 /// The GitHub watch's state between polls.
@@ -117,7 +121,8 @@ impl Poller {
     /// poll, and how long to wait for the next.
     pub fn poll(&mut self) -> (Vec<Seen>, Duration) {
         let mut seen = Vec::new();
-        let read = self.read(&mut seen);
+        let mut delay = None;
+        let read = self.read(&mut seen, &mut delay).map(|()| delay);
         let wait = polled(
             &mut self.state,
             self.watch.interval,
@@ -125,7 +130,9 @@ impl Poller {
             read,
             &mut seen,
         );
-        (seen, wait)
+        // On error, polled logs the read failure and returns the ordinary
+        // interval. The quota delay still applies, within the same bounds.
+        (seen, wait.max(delay.unwrap_or_default().min(MAX_WAIT)))
     }
 
     /// Whether the run's updates are used up.
@@ -133,7 +140,14 @@ impl Poller {
         self.state.done()
     }
 
-    fn get(&self, url: &str, etag: Option<&str>) -> Result<Got> {
+    /// A conditional request. Record any delay from the headers before
+    /// reading the payload, so errors can't clear the delay.
+    fn get(
+        &self,
+        url: &str,
+        etag: Option<&str>,
+        delay: &mut Option<Duration>,
+    ) -> Result<Option<Changed>> {
         let mut request = self
             .http
             .get(url)
@@ -153,8 +167,15 @@ impl Poller {
                 .map(str::to_owned)
         };
         let status = response.status().as_u16();
+        if matches!(status, 200 | 304) {
+            *delay = low_quota(
+                header("x-ratelimit-remaining").as_deref(),
+                header("x-ratelimit-reset").as_deref(),
+                Utc::now().timestamp(),
+            );
+        }
         match status {
-            304 => Ok(Got::Same),
+            304 => Ok(None),
             200 => {
                 let etag = header("etag");
                 let text = response
@@ -163,7 +184,7 @@ impl Poller {
                     .limit(MAX_RESPONSE)
                     .read_to_string()?;
                 let value = serde_json::from_str(&text).context("parsing GitHub's answer")?;
-                Ok(Got::Changed { value, etag })
+                Ok(Some(Changed { value, etag }))
             }
             403 | 429 => {
                 let secs = |v: Option<String>| v.and_then(|v| v.trim().parse::<i64>().ok());
@@ -176,7 +197,10 @@ impl Poller {
                     None => None,
                 };
                 match wait {
-                    Some(s) => Ok(Got::Wait(Duration::from_secs(s.max(1).unsigned_abs()))),
+                    Some(s) => {
+                        *delay = Some(Duration::from_secs(s.max(1).unsigned_abs()));
+                        Ok(None)
+                    }
                     None => bail!("GitHub refused the request ({status})"),
                 }
             }
@@ -184,40 +208,42 @@ impl Poller {
         }
     }
 
-    /// One poll; `Some` for how long a rate limit asks it to wait.
-    fn read(&mut self, seen: &mut Vec<Seen>) -> Result<Option<Duration>> {
+    /// One poll. A delay on the issue's answer leaves the comments unread
+    /// until an issue response permits the comments request again.
+    fn read(&mut self, seen: &mut Vec<Seen>, delay: &mut Option<Duration>) -> Result<()> {
         let Item { repo, number } = &self.watch.item;
         let issue = format!("{}/repos/{repo}/issues/{number}", self.watch.api);
-        match self.get(&issue, self.issue_etag.as_deref())? {
-            Got::Wait(d) => return Ok(Some(d)),
-            Got::Same => {}
-            Got::Changed { value, etag } => {
-                let url = value["html_url"]
-                    .as_str()
-                    .context("the item has no html_url")?;
-                self.item_url = Some(url.to_owned());
-                let body = value["body"].as_str().unwrap_or_default().to_owned();
-                // The first read is what the brief was written from.
-                if let Some(last) = self.body.replace(body.clone())
-                    && last != body
-                {
-                    let update = Update {
-                        kind: Kind::Body,
-                        item_url: url.to_owned(),
-                        url: url.to_owned(),
-                        author: login(&value),
-                        at: value["updated_at"].as_str().unwrap_or("?").to_owned(),
-                        text: body,
-                    };
-                    self.state.take(seen, update);
-                }
-                self.issue_etag = etag;
+        if let Some(Changed { value, etag }) =
+            self.get(&issue, self.issue_etag.as_deref(), delay)?
+        {
+            let url = value["html_url"]
+                .as_str()
+                .context("the item has no html_url")?;
+            self.item_url = Some(url.to_owned());
+            let body = value["body"].as_str().unwrap_or_default().to_owned();
+            // The first read is what the brief was written from.
+            if let Some(last) = self.body.replace(body.clone())
+                && last != body
+            {
+                let update = Update {
+                    kind: Kind::Body,
+                    item_url: url.to_owned(),
+                    url: url.to_owned(),
+                    author: login(&value),
+                    at: value["updated_at"].as_str().unwrap_or("?").to_owned(),
+                    text: body,
+                };
+                self.state.take(seen, update);
             }
+            self.issue_etag = etag;
+        }
+        if delay.is_some() {
+            return Ok(());
         }
         // The item's URL is the issue's answer's: until there is one, no
         // comment can say where it is.
         let Some(item_url) = self.item_url.clone() else {
-            return Ok(None);
+            return Ok(());
         };
         // Comments updated since the start, in the order they were made:
         // an older one edited since is not new. A run with more than a page
@@ -226,36 +252,45 @@ impl Poller {
             .start
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let comments = format!("{issue}/comments?since={since}&per_page={PER_PAGE}");
-        match self.get(&comments, self.comments_etag.as_deref())? {
-            Got::Wait(d) => return Ok(Some(d)),
-            Got::Same => {}
-            Got::Changed { value, etag } => {
-                let list = value.as_array().context("the comments are not a list")?;
-                for comment in list {
-                    let Some(id) = comment["id"].as_u64() else {
-                        continue;
-                    };
-                    let created = comment["created_at"]
-                        .as_str()
-                        .and_then(|t| DateTime::parse_from_rfc3339(t).ok());
-                    if created.is_none_or(|t| t < self.start) || !self.seen.insert(id) {
-                        continue;
-                    }
-                    let update = Update {
-                        kind: Kind::Comment,
-                        item_url: item_url.clone(),
-                        url: comment["html_url"].as_str().unwrap_or(&item_url).to_owned(),
-                        author: login(comment),
-                        at: comment["created_at"].as_str().unwrap_or("?").to_owned(),
-                        text: comment["body"].as_str().unwrap_or_default().to_owned(),
-                    };
-                    self.state.take(seen, update);
+        if let Some(Changed { value, etag }) =
+            self.get(&comments, self.comments_etag.as_deref(), delay)?
+        {
+            let list = value.as_array().context("the comments are not a list")?;
+            for comment in list {
+                let Some(id) = comment["id"].as_u64() else {
+                    continue;
+                };
+                let created = comment["created_at"]
+                    .as_str()
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok());
+                if created.is_none_or(|t| t < self.start) || !self.seen.insert(id) {
+                    continue;
                 }
-                self.comments_etag = etag;
+                let update = Update {
+                    kind: Kind::Comment,
+                    item_url: item_url.clone(),
+                    url: comment["html_url"].as_str().unwrap_or(&item_url).to_owned(),
+                    author: login(comment),
+                    at: comment["created_at"].as_str().unwrap_or("?").to_owned(),
+                    text: comment["body"].as_str().unwrap_or_default().to_owned(),
+                };
+                self.state.take(seen, update);
             }
+            self.comments_etag = etag;
         }
-        Ok(None)
+        Ok(())
     }
+}
+
+/// How long an answer's rate-limit headers ask the watch to hold off,
+/// at NOW (Unix seconds): until the window resets, where at most
+/// LOW_QUOTA requests are left of it. A header missing or not a number,
+/// or a reset not after NOW, is no hint, and the watch polls as usual;
+/// how long a hint may hold it off is bounded where it is waited out.
+fn low_quota(remaining: Option<&str>, reset: Option<&str>, now: i64) -> Option<Duration> {
+    let remaining: u64 = remaining?.trim().parse().ok()?;
+    let reset: i64 = reset?.trim().parse().ok()?;
+    (remaining <= LOW_QUOTA && reset > now).then(|| Duration::from_secs(reset.abs_diff(now)))
 }
 
 fn login(value: &Value) -> String {
@@ -517,6 +552,168 @@ mod tests {
             "{}",
             all[5]
         );
+    }
+
+    /// Only a quota at or below LOW_QUOTA with a reset still to come is a
+    /// hint; anything else leaves the watch as it was.
+    #[test]
+    fn low_quota_hints() {
+        let now = 1_000_000;
+        for (remaining, reset, want) in [
+            (Some("4999"), Some("1000600"), None),
+            (Some("101"), Some("1000600"), None),
+            (Some("100"), Some("1000600"), Some(600)),
+            (Some("0"), Some(" 1000001 "), Some(1)),
+            (Some("5"), Some("1000000"), None),
+            (Some("5"), Some("999000"), None),
+            // Bounded where it is waited out, not here.
+            (Some("5"), Some("1099999"), Some(99999)),
+            (None, Some("1000600"), None),
+            (Some("5"), None, None),
+            (Some(""), Some("1000600"), None),
+            (Some("-1"), Some("1000600"), None),
+            (Some("lots"), Some("1000600"), None),
+            (Some("5"), Some("soon"), None),
+            (Some("5"), Some("1000600.5"), None),
+        ] {
+            assert_eq!(
+                low_quota(remaining, reset, now),
+                want.map(Duration::from_secs),
+                "{remaining:?} {reset:?}"
+            );
+        }
+    }
+
+    /// A low quota on a 200 or a 304 holds off the next request, the
+    /// comments of the same poll included, within the watch's bounds;
+    /// what was read is delivered, and what was not is read later
+    /// against the last answer's ETag. Missing, malformed or past hints
+    /// and a healthy quota leave the interval alone.
+    #[test]
+    fn low_quota_defers_requests() {
+        let now = Utc::now().timestamp();
+        let low = |answer: Answer, secs: i64| {
+            let (status, mut headers, body) = answer;
+            headers.push(("X-RateLimit-Remaining", "5".into()));
+            headers.push(("X-RateLimit-Reset", (now + secs).to_string()));
+            (status, headers, body)
+        };
+        let remaining = |answer: Answer, left: &str| {
+            let (status, mut headers, body) = answer;
+            headers.push(("X-RateLimit-Remaining", left.to_owned()));
+            headers.push(("X-RateLimit-Reset", (now + 600).to_string()));
+            (status, headers, body)
+        };
+        let first = (2, "2026-10-16T10:01:00Z", "first");
+        let second = (3, "2026-10-16T10:02:00Z", "second");
+        let s = stub(
+            vec![
+                issue("brief", "\"i1\""),
+                low(issue("brief, edited", "\"i2\""), 120),
+                remaining(not_modified(), "plenty"),
+                low(not_modified(), -10),
+            ],
+            vec![
+                low(comments(&[first], "\"c1\""), 600),
+                remaining(comments(&[first, second], "\"c2\""), "4000"),
+                low(not_modified(), 99999),
+            ],
+        );
+        let mut p = poller(&s.api);
+        let comment = |id: &str, text: &str| (Kind::Comment, format!("user{id}"), text.to_owned());
+        // Each poll's updates and the bounds of its wait: a reset is
+        // counted from a clock that moves on.
+        let polls = [
+            (vec![comment("2", "first")], 590, 600),
+            (
+                vec![(Kind::Body, "opener".into(), "brief, edited".into())],
+                110,
+                120,
+            ),
+            (vec![comment("3", "second")], 60, 60),
+            (vec![], 3600, 3600),
+        ];
+        for (i, (want, least, most)) in polls.into_iter().enumerate() {
+            let (seen, wait) = p.poll();
+            assert_eq!(updates(&seen), want, "poll {i}");
+            assert!(
+                (least..=most).contains(&wait.as_secs()),
+                "poll {i}: {wait:?}"
+            );
+        }
+        let heads = s.heads.lock().unwrap();
+        let paths: Vec<bool> = heads.iter().map(|h| h.contains("/comments")).collect();
+        // The second poll stops after the issue.
+        assert_eq!(paths, [false, true, false, false, true, false, true]);
+        let has = |i: usize, line: &str| heads[i].to_ascii_lowercase().contains(line);
+        assert!(has(2, "if-none-match: \"i1\"\r\n"), "{}", heads[2]);
+        assert!(has(4, "if-none-match: \"c1\"\r\n"), "{}", heads[4]);
+        assert!(has(5, "if-none-match: \"i2\"\r\n"), "{}", heads[5]);
+        assert!(has(6, "if-none-match: \"c2\"\r\n"), "{}", heads[6]);
+    }
+
+    #[test]
+    fn low_quota_survives_bad_payloads() {
+        let reset = (Utc::now().timestamp() + 7200).to_string();
+        for (on_issue, body) in [
+            (false, " ".repeat(MAX_RESPONSE as usize) + "[]"),
+            (false, "[".into()),
+            (false, "{}".into()),
+            (true, "{}".into()),
+        ] {
+            let bad = (
+                200,
+                vec![
+                    ("ETag", "\"bad\"".into()),
+                    ("X-RateLimit-Remaining", "5".into()),
+                    ("X-RateLimit-Reset", reset.clone()),
+                ],
+                body,
+            );
+            let mut issue_answers = vec![issue("brief", "\"i1\"")];
+            let mut comment_answers = vec![comments(&[], "\"c1\"")];
+            if on_issue {
+                issue_answers.push(bad);
+            } else {
+                issue_answers.push(not_modified());
+                comment_answers.push(bad);
+            }
+            issue_answers.push(not_modified());
+            comment_answers.push(comments(
+                &[(2, "2026-10-16T10:01:00Z", "after the pause")],
+                "\"c2\"",
+            ));
+            let s = stub(issue_answers, comment_answers);
+            let mut p = poller(&s.api);
+            p.poll();
+            let (seen, wait) = p.poll();
+            assert_eq!(wait, Duration::from_secs(3600), "{seen:?}");
+            assert!(
+                seen.iter()
+                    .any(|s| matches!(s, Seen::Note(n) if n.contains("could not be read"))),
+                "{seen:?}"
+            );
+            assert_eq!(s.heads.lock().unwrap().len(), if on_issue { 3 } else { 4 });
+
+            let (seen, wait) = p.poll();
+            assert_eq!(wait, Duration::from_secs(60));
+            assert_eq!(
+                updates(&seen),
+                [(Kind::Comment, "user2".into(), "after the pause".into())]
+            );
+            let heads = s.heads.lock().unwrap();
+            let retry = &heads[heads.len() - 2..];
+            assert!(
+                retry[0]
+                    .to_ascii_lowercase()
+                    .contains("if-none-match: \"i1\"\r\n")
+            );
+            assert!(
+                retry[1]
+                    .to_ascii_lowercase()
+                    .contains("if-none-match: \"c1\"\r\n")
+            );
+        }
     }
 
     /// A run takes at most MAX_UPDATES, and then says so and stops.
