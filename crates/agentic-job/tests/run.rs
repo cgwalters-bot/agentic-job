@@ -17,6 +17,7 @@
 
 mod support;
 
+use std::ffi::OsStr;
 use std::io::Read;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -3893,4 +3894,456 @@ fn a_signal_ends_the_run_and_the_agent() {
             got.all()
         );
     }
+}
+
+/// Where a deployed session server finds its files, inside its container.
+const DEPLOYED_CONFIG: &str = "/etc/agentic-job";
+const DEPLOYED_STATE: &str = "/var/lib/agentic-job";
+const DEPLOYED_BIN: &str = "/opt/agentic-job/bin/agentic-job";
+const DEPLOYED_REPO: &str = "/srv/target";
+/// The caller's installation: its adapter on the agent's `PATH`, here a
+/// wrapper that plays the fake agent under the Claude adapter's name.
+const DEPLOYED_AGENT_BIN: &str = "/opt/agent/bin";
+const DEPLOYED_FAKE_AGENT: &str = "/opt/agent/libexec/fake-agent";
+const ADAPTER: &str = "claude-agent-acp";
+/// The deployment's synthetic attach secret: same-UID processes,
+/// the agent's among them, can read it (docs/interactive.md).
+const DEPLOYED_ATTACH_SECRET: &str = "deployed-fixture-attach-secret-32b";
+/// A broker that is restarting, which a start tries again.
+const RESTARTING: Fault = Fault::Status(503, "restarting\n");
+
+/// The server's user and group in its container: not root, nor the
+/// rootless user that owns, and so is root over, its image.
+const DEPLOYED_USER: &str = "1000:1000";
+/// What a session run executes of its image (docs/sandbox.md lists what
+/// `run` needs), found on this host's `PATH`, and git's helpers.
+const DEPLOYED_PROGRAMS: [&str; 14] = [
+    "sh", "env", "timeout", "git", "getent", "rm", "chmod", "test", "mkdir", "cat", "head", "tail",
+    "find", "dirname",
+];
+/// Under `git --exec-path`.
+const GIT_HELPERS: [&str; 2] = ["git", "git-upload-pack"];
+
+/// `agentic-job run` deployed as a session server in a restricted
+/// rootless Podman container: a non-root user, a read-only image of no
+/// more than `run` executes, no capabilities, no new privileges, its
+/// configuration and Claude Code's managed settings mounted read-only,
+/// and writable only its state directory and `/tmp`. The host network
+/// is shared so that it reaches the mock broker and the test reaches
+/// its attach port, both on loopback.
+///
+/// The image is copied from this host, as this user: inside, files the
+/// rootless user owns are root's, which `run` requires of the programs
+/// it trusts, where the host's own root-owned `/usr` would be nobody's.
+/// The server's files are another user's here, reached through
+/// `podman unshare`.
+struct Deployment {
+    job: Job,
+    rootfs: PathBuf,
+    settings: PathBuf,
+    attach: std::net::SocketAddr,
+}
+
+/// Runs ARGS as the rootless user's root, which owns the server's files.
+fn unshare(args: &[&OsStr]) -> Output {
+    let out = Command::new("podman")
+        .arg("unshare")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "podman unshare {args:?}: {out:?}");
+    out
+}
+
+/// Copies the programs at PATHS from this host into ROOTFS, at the same
+/// places, with the libraries `ldd` says each loads; the libraries alone
+/// for each of LOADERS, which are mounted.
+fn copy_image(rootfs: &Path, paths: &[PathBuf], loaders: &[&Path]) {
+    let copy = |from: &Path| {
+        let to = rootfs.join(from.strip_prefix("/").unwrap());
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        // Following links: the copy is the rootless user's, and so root's.
+        std::fs::copy(from, &to).unwrap_or_else(|e| panic!("{}: {e}", from.display()));
+    };
+    paths.iter().for_each(|path| copy(path));
+    for path in paths
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(loaders.iter().copied())
+    {
+        let ldd = sh(&format!("ldd {}", path.display()));
+        ldd.split_whitespace()
+            .filter(|word| word.starts_with('/'))
+            .for_each(|lib| copy(Path::new(lib)));
+    }
+}
+
+impl Deployment {
+    fn new(proxy: &Proxy) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let job = Job::new("deployed");
+        job.own_repository();
+        let rootfs = job.path("rootfs");
+        for dir in [
+            "usr/bin",
+            "usr/lib",
+            "usr/lib64",
+            "etc",
+            "proc",
+            "dev",
+            "sys",
+            "tmp",
+        ] {
+            std::fs::create_dir_all(rootfs.join(dir)).unwrap();
+        }
+        // As a merged /usr has them, so that libraries are where ldd says.
+        for link in ["bin", "lib", "lib64"] {
+            std::os::unix::fs::symlink(format!("usr/{link}"), rootfs.join(link)).unwrap();
+        }
+        let exec_path = PathBuf::from(sh("git --exec-path"));
+        let programs: Vec<PathBuf> = DEPLOYED_PROGRAMS
+            .iter()
+            .map(|program| {
+                ["/usr/bin", "/bin"]
+                    .iter()
+                    .map(|dir| Path::new(dir).join(program))
+                    .find(|path| path.is_file())
+                    .unwrap_or_else(|| panic!("no {program} in /usr/bin or /bin"))
+            })
+            .chain(GIT_HELPERS.iter().map(|helper| exec_path.join(helper)))
+            .collect();
+        copy_image(
+            &rootfs,
+            &programs,
+            &[Path::new(BIN), Path::new(env!("CARGO_BIN_EXE_fake-agent"))],
+        );
+        let agent = job.path("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(
+            agent.join(ADAPTER),
+            format!("#!/bin/sh\nexec {DEPLOYED_FAKE_AGENT} demo\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(agent.join(ADAPTER), PermissionsExt::from_mode(0o755)).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let attach = listener.local_addr().unwrap();
+        drop(listener);
+        let config_dir = job.path("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config = format!(
+            "[agent]\nname = \"claude\"\n[host]\nenv = {{ PATH = \"{DEPLOYED_AGENT_BIN}:/usr/bin:/bin\" }}\n\
+             {LIMITS}{NO_PROXY}{}[session]\nlisten = true\nbind = \"{attach}\"\nidle-minutes = 1\n",
+            plain(proxy)
+        );
+        std::fs::write(config_dir.join("config.toml"), &config).unwrap();
+        let mut policy = job.json("policy.json");
+        policy["clone_url"] = json!(format!("file://{DEPLOYED_REPO}"));
+        std::fs::write(config_dir.join("policy.json"), policy.to_string()).unwrap();
+        // What `sandbox setup` would write for this configuration, as a
+        // trusted image builder must supply it.
+        let parsed = agentic_job::config::Config::parse(&config).unwrap();
+        let endpoint = agentic_job::run::inference::Endpoint::from_config(&parsed.inference)
+            .unwrap()
+            .unwrap();
+        let (_, settings) = agentic_job::run::agent::managed_settings(
+            agentic_job::run::agent::Kind::Claude,
+            Some(&endpoint),
+        )
+        .unwrap();
+        let deployment = Self {
+            settings: job.path("managed-settings.json"),
+            job,
+            rootfs,
+            attach,
+        };
+        std::fs::write(&deployment.settings, settings).unwrap();
+        // git serves only its user's repositories.
+        unshare(&[
+            "chown".as_ref(),
+            "-R".as_ref(),
+            DEPLOYED_USER.as_ref(),
+            deployment.job.path("repo").as_os_str(),
+        ]);
+        deployment
+    }
+
+    /// The container of one start of the server, as attempt ATTEMPT of
+    /// the CI run, with SETTINGS as its managed settings; its state
+    /// directory is new, holding the fake agent's SCRIPT.
+    fn start(&self, name: &str, attempt: u32, settings: &Path, script: &Value) -> Command {
+        let config = self.job.path("config");
+        std::fs::write(
+            config.join(format!("meta-{attempt}.json")),
+            json!({"run_id": RUN_ID, "run_attempt": attempt}).to_string(),
+        )
+        .unwrap();
+        let state = self.state(name);
+        let script_path = state.join(HOME_DIR).join(SCRIPT_PATH);
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(script_path, script.to_string()).unwrap();
+        unshare(&[
+            "chown".as_ref(),
+            "-R".as_ref(),
+            DEPLOYED_USER.as_ref(),
+            state.as_os_str(),
+        ]);
+        let ro = |from: &Path, to: &str| format!("{}:{to}:ro", from.display());
+        let mut command = Command::new("podman");
+        command
+            // No systemd user session is needed for this.
+            .arg("--cgroup-manager=cgroupfs")
+            .args(["run", "--rm", "--name"])
+            .arg(self.container(name))
+            .args([
+                "--rootfs",
+                "--read-only",
+                "--read-only-tmpfs=false",
+                "--tmpfs=/tmp",
+            ])
+            .args(["--user", DEPLOYED_USER, "--cap-drop=all"])
+            .args(["--security-opt=no-new-privileges", "--network=host"])
+            .args(["--http-proxy=false", "--pull=never"])
+            .args(["-v", &ro(Path::new(BIN), DEPLOYED_BIN)])
+            .args(["-v", &ro(&self.job.path("agent"), DEPLOYED_AGENT_BIN)])
+            .args([
+                "-v",
+                &ro(
+                    Path::new(env!("CARGO_BIN_EXE_fake-agent")),
+                    DEPLOYED_FAKE_AGENT,
+                ),
+            ])
+            .args(["-v", &ro(&config, DEPLOYED_CONFIG)])
+            .args([
+                "-v",
+                &ro(settings, agentic_job::run::agent::MANAGED_SETTINGS_FILE),
+            ])
+            .args(["-v", &ro(&self.job.path("repo"), DEPLOYED_REPO)])
+            .arg("-v")
+            .arg(format!("{}:{DEPLOYED_STATE}", state.display()))
+            // From this process's environment, never on a command line.
+            .args(["-e", bridge::ATTACH_TOKEN_VAR])
+            .env(bridge::ATTACH_TOKEN_VAR, DEPLOYED_ATTACH_SECRET)
+            .args(["--workdir", DEPLOYED_CONFIG])
+            // In the image's place: with --rootfs, the root's directory.
+            .arg(&self.rootfs)
+            .args([DEPLOYED_BIN, "run"])
+            .args(["--policy", "policy.json", "--config", "config.toml"])
+            .arg("--meta")
+            .arg(format!("meta-{attempt}.json"))
+            .arg("--out")
+            .arg(format!("{DEPLOYED_STATE}/out"))
+            .arg("--runner-home")
+            .arg(format!("{DEPLOYED_STATE}/{HOME_DIR}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    fn state(&self, name: &str) -> PathBuf {
+        self.job.path("state").join(name)
+    }
+
+    /// The server NAME's file at PATH under its state directory, or
+    /// nothing while there is none.
+    fn text(&self, name: &str, path: &str) -> String {
+        let out = Command::new("podman")
+            .args(["unshare", "cat"])
+            .arg(self.state(name).join(path))
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Starts the server NAME and attaches to it once it listens. No
+    /// other podman command runs meanwhile: on some hosts none can join
+    /// the user namespace of a running container.
+    fn spawn(
+        &self,
+        name: &str,
+        attempt: u32,
+        script: &Value,
+    ) -> (std::process::Child, WebSocket<TcpStream>) {
+        let mut server = self
+            .start(name, attempt, &self.settings, script)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(socket) = self.attach() {
+                return (server, socket);
+            }
+            if server.try_wait().unwrap().is_some() || Instant::now() > deadline {
+                stop(&server);
+                panic!(
+                    "{name}: {}",
+                    Finished::of(server.wait_with_output().unwrap()).all()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    fn container(&self, name: &str) -> String {
+        format!("agentic-job-{}-{name}", std::process::id())
+    }
+
+    /// A client attached with the attach secret, if the server admits one.
+    fn attach(&self) -> Option<WebSocket<TcpStream>> {
+        let mut request = tungstenite::client::IntoClientRequest::into_client_request(format!(
+            "ws://{}/",
+            self.attach
+        ))
+        .unwrap();
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {DEPLOYED_ATTACH_SECRET}").parse().unwrap(),
+        );
+        let stream = TcpStream::connect(self.attach).ok()?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        Some(tungstenite::client(request, stream).ok()?.0)
+    }
+}
+
+/// SIGTERM to the foreground `podman run` of SERVER, which passes it on
+/// to the server (`--sig-proxy`, on by default), as a supervisor
+/// stopping it would.
+fn stop(server: &std::process::Child) {
+    let pid = rustix::process::Pid::from_child(server);
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+}
+
+impl Drop for Deployment {
+    /// Before the job's own removal, which cannot remove the server's.
+    fn drop(&mut self) {
+        let _ = Command::new("podman")
+            .args(["unshare", "rm", "-rf", "--"])
+            .arg(&self.job.dir)
+            .status();
+    }
+}
+
+/// The session server as a deployment runs it (`Deployment`), with a
+/// caller-installed adapter and synthetic settings against the mock
+/// broker. In turn: managed settings other than the configuration's are
+/// refused before the agent starts; a start the broker answers 503
+/// twice registers on its third try, and a client attaches, prompts and
+/// leaves; a restart with the same run identifier is refused, not
+/// registered twice; a broker that keeps failing is given up on after
+/// the bounded tries; and SIGTERM to a waiting server ends it and its
+/// registration (the container's end would take its agent with it
+/// regardless; `a_signal_ends_the_run_and_the_agent` shows `run` ending
+/// it). Each start reads the same mounted
+/// settings, which none changes. What this cannot show of same-UID
+/// isolation is in docs/interactive.md.
+#[test]
+#[ignore = "needs rootless Podman; see `just test-deployed-session`"]
+fn a_deployed_session_server_attaches_restarts_and_stops() {
+    assert_ne!(
+        rustix::process::geteuid().as_raw(),
+        0,
+        "the image's ownership needs rootless Podman"
+    );
+    let proxy = Proxy::start();
+    proxy.admit_unproven();
+    let deployment = Deployment::new(&proxy);
+    let settings = std::fs::read(&deployment.settings).unwrap();
+    let said = json!([{"say": "Hello from the deployed agent."}]);
+    let run = |name: &str, attempt: u32, settings: &Path| {
+        let mut command = deployment.start(name, attempt, settings, &said);
+        Finished::of(command.output().unwrap())
+    };
+
+    let other = deployment.job.path("other-settings.json");
+    std::fs::write(&other, "{}\n").unwrap();
+    let got = run("mismatch", 1, &other);
+    assert_ne!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    assert!(
+        got.stderr
+            .contains("is not what this run's configuration calls for"),
+        "{}",
+        got.all()
+    );
+
+    proxy.fail_registrations(std::iter::repeat_n(RESTARTING, 2));
+    let registrations = proxy.seen().len();
+    let (server, mut socket) = deployment.spawn("attach", 2, &said);
+    let mut got = Vec::new();
+    let new = bridge_request(&mut socket, &mut got, 1, "session/new", json!({}));
+    let sid = new["result"]["sessionId"].clone();
+    assert!(sid.is_string(), "{new}");
+    let answer = bridge_request(
+        &mut socket,
+        &mut got,
+        2,
+        "session/prompt",
+        json!({"sessionId": sid, "prompt": [{"type": "text", "text": "Hello, agent."}]}),
+    );
+    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+    assert!(
+        got.iter()
+            .any(|msg| msg.to_string().contains("Hello from the deployed agent.")),
+        "{got:?}"
+    );
+    let _ = socket.close(Some(tungstenite::protocol::CloseFrame {
+        code: tungstenite::protocol::frame::coding::CloseCode::Normal,
+        reason: "done".into(),
+    }));
+    while socket.read().is_ok() {}
+    let got = Finished::of(server.wait_with_output().unwrap());
+    assert_eq!(got.code, Some(EXIT_SUCCESS), "{}", got.all());
+    let posts = proxy.seen()[registrations..]
+        .iter()
+        .filter(|r| *r == "POST /v1/runs")
+        .count();
+    assert_eq!(posts, 3, "{:?}", proxy.seen());
+    // Written as the server's user, in the one place it may write.
+    let owner = unshare(&[
+        "stat".as_ref(),
+        "-c%u:%g".as_ref(),
+        deployment.state("attach").join("out").as_os_str(),
+    ]);
+    assert_eq!(String::from_utf8_lossy(&owner.stdout).trim(), DEPLOYED_USER);
+
+    let got = run("repeat", 2, &deployment.settings);
+    assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
+    assert!(
+        got.stderr
+            .contains("refused to register this run again (HTTP 409"),
+        "{}",
+        got.all()
+    );
+
+    // As many as `run` tries (inference::Retry::default()).
+    proxy.fail_registrations(std::iter::repeat_n(RESTARTING, 4));
+    let started = Instant::now();
+    let got = run("unreachable", 3, &deployment.settings);
+    assert_eq!(got.code, Some(EXIT_NOT_STARTED), "{}", got.all());
+    assert!(got.stderr.contains("after 4 tries"), "{}", got.all());
+    assert!(started.elapsed() < Duration::from_secs(60));
+
+    // Stopped while it waits for a prompt, with the client still attached.
+    let (server, mut socket) = deployment.spawn("stopped", 4, &said);
+    let new = bridge_request(&mut socket, &mut Vec::new(), 1, "session/new", json!({}));
+    assert!(new["result"]["sessionId"].is_string(), "{new}");
+    let stopped = Instant::now();
+    stop(&server);
+    let got = Finished::of(server.wait_with_output().unwrap());
+    assert_eq!(got.code, Some(EXIT_FAILURE), "{}", got.all());
+    assert!(got.stderr.contains("stopped by SIGTERM"), "{}", got.all());
+    assert!(stopped.elapsed() < Duration::from_secs(30));
+    let ended: Value =
+        serde_json::from_str(&deployment.text("stopped", "out/work/inference.json")).unwrap();
+    assert_eq!(ended["ended"], true);
+
+    assert_eq!(
+        proxy.run_states(),
+        ["finished"; 3],
+        "the mismatched, attached and stopped starts"
+    );
+    assert_eq!(std::fs::read(&deployment.settings).unwrap(), settings);
 }

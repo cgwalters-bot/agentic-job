@@ -184,6 +184,36 @@ bridge, keeps the secret from being read on the way; keep the gateway's
 path to the pod on a network that only it and the job share, or
 encrypted by the cluster.
 
+### In a restricted container
+
+`just test-deployed-session` runs `run` as such a server in a rootless
+Podman container: a non-root user, a read-only image of only the
+programs a session executes, no capabilities, no new privileges, its
+configuration, policy and Claude Code's managed settings mounted
+read-only, and only its state directory and `/tmp` writable. The agent
+is a caller's install, a `claude-agent-acp` on the configured `PATH`
+that plays the fake agent, against the mock broker, with synthetic
+settings and a fixture secret. It shows that managed settings other
+than the configuration's are refused before the agent starts, and the
+same mounted file serves every start unchanged; that a registration the
+broker answers with 503 is tried again, at most four tries in all,
+before a client attaches, prompts and leaves; that a restart with the
+same run identifier and attempt in `--meta` is refused with 409, so
+each start needs its own; and that SIGTERM, passed on by `podman run`,
+ends a waiting server and its registration with exit state 1. The
+container's end takes the agent with it, so this does not show `run`
+stopping its agent; `a_signal_ends_the_run_and_the_agent` does, outside
+a container.
+
+It cannot show isolation between the server and its agent: they are one
+user in one container, so the agent can still read the attach secret,
+the run token and the transcript, and signal `run`, as described above
+and in [the ACP session](harness.md#what-it-does). Read-only mounts stop
+the agent changing its configuration and managed settings, not reading
+them. The image is copied from the host, so the test says nothing of a
+published image, and it shares the host's network to reach the broker
+on loopback, so a deployment's network policy is untested.
+
 ## Still to design
 
 [The session spec](../specs/session.md) settles the way from a client

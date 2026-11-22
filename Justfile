@@ -120,6 +120,12 @@ world-write-evidence out:
     cargo build --locked -p agentic-job --bin agentic-job --bin world-write-evidence
     target/debug/world-write-evidence "$1" target/debug/agentic-job
 
+# The session server in a restricted rootless Podman container with a
+# fake caller-installed agent and the mock broker (docs/interactive.md);
+# no network or image pull. 25 seconds after the build. No CI job runs it yet.
+test-deployed-session:
+    cargo test --locked -p agentic-job --test run -- --ignored --exact a_deployed_session_server_attaches_restarts_and_stops
+
 world-write-test:
     cargo test --locked -p agentic-job --bin world-write-evidence --test world_write_worker
 
