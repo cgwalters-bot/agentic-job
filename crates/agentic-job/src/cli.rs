@@ -90,6 +90,10 @@ pub enum Command {
     ExternalFetch(crate::external::Args),
     /// Refuse external apply unless this caller's trusted check and detection succeeded
     ExternalRelease(crate::external::ReleaseArgs),
+    /// Run one Testing Farm request and fetch its bounded hand-back, the token kept out of the request
+    TestingFarmLaunch(crate::testing_farm::Args),
+    /// Cancel the request a stopped testing-farm-launch left live, from its ID file
+    TestingFarmCancel(crate::testing_farm::CancelArgs),
     /// Resolve trusted workflow review routing without running reviewed code
     #[command(subcommand)]
     Review(crate::review::Command),
@@ -143,6 +147,8 @@ impl Command {
             Self::Dispatch(args) => crate::dispatch::run(args),
             Self::ExternalFetch(args) => crate::external::run(args),
             Self::ExternalRelease(args) => crate::external::release(args),
+            Self::TestingFarmLaunch(args) => crate::testing_farm::run(args),
+            Self::TestingFarmCancel(args) => crate::testing_farm::cancel(args),
             Self::Review(command) => command.run(),
             Self::Config(args) => compose::run(args),
             Self::Workflows(command) => command.run(),

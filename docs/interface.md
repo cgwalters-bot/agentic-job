@@ -36,6 +36,8 @@ The keys it removed and what runner mode refuses are
 | `event --allow FILE --event-name NAME --event FILE --actor LOGIN --repository OWNER/NAME --out DIR` | trusted policy job | Decides event admission. Optional files: `--actor-permission`, `--pull-request`, `--task`. See [events.md](events.md). |
 | `external-fetch --record FILE --archive FILE --outputs DIR --receipt FILE` | trusted read-only waiting job | Correlates an external dispatch, verifies API identities and the raw ZIP's digest, and extracts bounded raw files. All output paths must be new; see [external correlation](dispatch.md#binary-correlation-interface). |
 | `external-release --policy FILE --report FILE --detection-result success` | trusted apply job | Refuses external output without this caller's successful trusted check and detection. Hosted policy is unchanged. |
+| `testing-farm-launch --request FILE --output DIR --id FILE` | a producer's agent job | Submits one Testing Farm request, keeps its ID in job-private state while live, cancels it at its timeout, and writes flat hand-back files into an empty directory only after the request and archive checks pass ([Testing Farm launcher](#testing-farm-launcher)). Not verified against a live Testing Farm. |
+| `testing-farm-cancel --request FILE --id FILE` | the same job's `after_script` | Cancels the request a stopped launcher left live, from its ID file, and sends nothing without one ([Testing Farm launcher](#testing-farm-launcher)). A successful cancel is not observed guest destruction. |
 | `workflows check [--root DIR] [--exemptions FILE]` | anyone | Refuses workflow files whose jobs neither run secure-host nor call the reusable workflow, and the other shapes in [workflows-check.md](workflows-check.md). Exit 1 names each file, job and step. |
 | `acp-drive start\|prompt\|events\|cancel\|status\|stop` | a run's agent | Starts the run's child agent and drives it over ACP ([harness.md](harness.md#a-second-agent)). |
 | `session connect ENDPOINT [--json] [--since CURSOR]` | an operator or their agent | Joins a session run's conversation, late or again, with a replay of what the agent said after the cursor (all that is kept by default): each line of standard input is a prompt, and it prints what the agent says and a line per finished tool call, or with `--json` each message from the bridge as one line. It connects again with its cursor when the connection drops; the end of its input ends the session, and Ctrl-C only detaches ([attaching](interactive.md#attaching-to-a-session), [wire](../specs/session.md#wire)). |
@@ -90,6 +92,191 @@ The `secure-host` binary, from the same workspace and release, is the
 host's side alone: `supported`, `apt`, `world-write`, `setup`, `check`,
 `config` and the image's entrypoint `image`, with no command that runs
 an agent ([secure-host.md](secure-host.md#the-secure-host-binary)).
+
+## Testing Farm launcher
+
+`testing-farm-launch` is the launcher of the GitLab caller's
+[Testing Farm layer](../specs/gitlab-caller.md#testing-farm-as-a-later-layer).
+Nothing runs it unless a caller's job does. It has not run against a live
+Testing Farm; the API fields below are from Testing Farm's
+[request page](https://docs.testing-farm.io/Testing%20Farm/0.1/test-request.html)
+and the fixtures in `testing_farm/tests.rs`.
+
+`--request` is the caller's JSON. The request body sent to Testing Farm
+holds only these of its fields: `url`, the plan repository over HTTPS;
+`ref`, its full commit; `plan`, as `/plans/NAME`; `compose`; `arch`;
+`timeout`, 1 to 330 minutes; and, optionally, `variables`, at most 64 plain
+variables. The launcher alone reads `api`, the HTTPS root of Testing Farm's
+API; `artifacts`, the HTTPS root of its artifact storage; and `handback`,
+the ZIP's relative path under the request's artifacts. URLs have no
+trailing slash. The body has no `secrets`, tmt arguments or webhook, and
+the guest can read every variable. tmt matches `test.fmf.name` as a
+regular expression, so the launcher sends `plan` escaped and anchored
+(`^/plans/NAME$`): it selects that plan alone, not one whose name it
+prefixes.
+
+The `api` and `artifacts` roots below are the Public Ranch's; a passed
+request's `run.artifacts` must be exactly the `artifacts` root followed by
+`/ID`, so another ranch
+needs its own
+[artifact root](https://docs.testing-farm.io/Testing%20Farm/0.1/services.html#artifacts).
+
+```json
+{
+  "api": "https://api.testing-farm.io",
+  "url": "https://gitlab.example.com/example-org/plans",
+  "ref": "0123456789abcdef0123456789abcdef01234567",
+  "plan": "/plans/agent",
+  "compose": "Fedora-Rawhide",
+  "arch": "x86_64",
+  "timeout": 120,
+  "variables": {"AGENT_ITEM": "7"},
+  "artifacts": "https://artifacts.dev.testing-farm.io",
+  "handback": "handback/handback.zip"
+}
+```
+
+The file must come from the caller's trusted revision, not from the
+pipeline's checkout of the code under test or from generated input: its
+`api` decides where the write-capable token goes. The launcher sends
+`TESTING_FARM_API_TOKEN` only in the `Authorization` header of its calls to
+`api`, never from an environment variable a pipeline could override. It
+refuses a request body that contains the token, so a variable cannot carry
+it to the guest, where a wrapper command line has exposed secrets before
+([inference.md](inference.md#on-a-multi-user-guest)). It refuses variables
+named `TF_RESERVATION*`, which Testing Farm's reserve test reads: a reserved
+guest keeps the agent's workspace reachable over SSH after the job.
+The pinned plan itself must not reserve the guest or add SSH keys; the
+launcher cannot see what the plan runs.
+
+Here `/etc/agentic-job/testing-farm.json` stands for a file the trusted
+caller provides, such as one in the job's image, never one in the checkout;
+the `agentic-job` binary comes from that image too. Keep the token in a
+masked, protected CI/CD variable whose environment scope is only
+`testing-farm`, protect that environment, and define the job in the
+caller's trusted pipeline configuration, so only this job on a protected
+ref gets the token.
+
+Before enabling this job, restrict the producer project's
+[minimum role for pipeline variables](https://docs.gitlab.com/ci/variables/#restrict-pipeline-variables)
+to a role held only by trusted dispatch actors or administrators (for example,
+`maintainer` with a trusted Maintainer dispatch identity). Restrict who can
+start this token-bearing pipeline on the protected ref to those same trusted
+actors. The dispatch identity must be allowed to send the caller's exact
+recorded variables, including `AGENTIC_JOB_RELEASE` and `AGENTIC_JOB_SHA256`;
+the fetcher checks that set after the run. Do not forward upstream YAML or
+pipeline variables to the producer, or allow untrusted triggers, schedules,
+or manual job variables to add to that set. Only trusted administrators may
+configure higher-precedence project, group, instance or policy variables;
+do not override the job's checkout, artifact or timeout settings. A protected
+environment alone does not enforce these restrictions. On a deployment
+that cannot enforce them, do not give the job the token.
+
+Enable this job only on GitLab 17.3 or later and assign its
+`testing-farm-private` tag only to protected GitLab Runners 17.3 or later.
+The server minimum is for generally available
+[`after_script` on cancellation](https://docs.gitlab.com/ci/yaml/script/#skip-after_script-commands-if-a-job-is-canceled);
+the runner minimum also covers the `empty` Git strategy used below.
+If the deployment cannot enforce these prerequisites, leave the job disabled.
+Those runners must run `script` and `after_script` in the same fresh,
+per-job container, with a private `/tmp` (no shared or restored mount there).
+The ID file stays there, outside the checkout, cache and artifacts;
+`after_script` cancels whatever request it names. Do not use this example
+on a shell executor or a reused container.
+`GIT_STRATEGY: empty` starts an empty build directory for the artifact files
+([Git strategy](https://docs.gitlab.com/ci/runners/configure_runners/#git-strategy)).
+`dependencies: []` restores no artifacts, and `inherit: default: false`
+keeps a pipeline default from adding a cache or `before_script`.
+
+```yaml
+agent_job:
+  timeout: 2h 20m
+  image: registry.example.com/caller/agentic-job@sha256:DIGEST
+  tags: [testing-farm-private]
+  environment:
+    name: testing-farm
+  inherit:
+    default: false
+  dependencies: []
+  variables:
+    GIT_STRATEGY: empty
+    RUNNER_SCRIPT_TIMEOUT: 2h12m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 5m
+  script:
+    - mkdir -m 700 /tmp/agentic-job-testing-farm
+    - agentic-job testing-farm-launch --request /etc/agentic-job/testing-farm.json --id /tmp/agentic-job-testing-farm/request-id --output .
+  after_script:
+    - agentic-job testing-farm-cancel --request /etc/agentic-job/testing-farm.json --id /tmp/agentic-job-testing-farm/request-id
+  artifacts:
+    when: on_success
+    paths: ['*']
+```
+
+`timeout` is the request's `settings.pipeline.timeout` and the launcher's
+own deadline, measured on a monotonic clock from its start. Testing Farm
+starts the pipeline timeout only when the request is `running`, so queue
+time counts against the launcher's deadline but not the request's. The
+launcher decides the deadline on a status read that starts at or after it.
+If a live read spans the deadline, the launcher immediately reads again. If
+that read still shows it live, after an unknown state, or after any other
+failure while the request may be live, the launcher sends
+`DELETE /v0.1/requests/ID`. Each status read and the DELETE have 30 seconds
+each, so a live request can take up to 90 seconds after the deadline to
+cancel. A passed request's download has ten minutes after its status read:
+give the job's script, through
+`RUNNER_SCRIPT_TIMEOUT`, at least eleven minutes more than the request's
+`timeout`, and the job's own `timeout` room for `after_script` after it.
+
+While the request may be live, its ID is in `--id`, a new file written
+once the POST returns a valid ID. The launcher removes it when Testing Farm
+reports the request ended or accepts the launcher's DELETE, and keeps it
+when that DELETE fails. `testing-farm-cancel` sends
+`DELETE /v0.1/requests/ID` for the ID in that file and removes it; without
+the file it sends nothing. Run it in the job's `after_script`, as above,
+with the same trusted request file and token. On the deployment described
+above, `after_script` runs when a job is cancelled. On a timeout it runs
+only when the script stops at `RUNNER_SCRIPT_TIMEOUT` with
+`RUNNER_AFTER_SCRIPT_TIMEOUT` still inside the job's `timeout`
+([`after_script`](https://docs.gitlab.com/ci/yaml/#after_script)).
+It is the only cleanup for a request that is still
+`queued` when the job stops, since the pipeline timeout has not started.
+
+A successful DELETE means Testing Farm accepted the cancellation, not that
+a guest was destroyed. Testing Farm does not document destroying the guest
+on cancellation, so that remains an unverified prerequisite. If the job
+stops after the POST and before the ID file is written, if the POST's
+response is lost, or if the runner dies before `after_script` runs, no
+step can cancel the request: it can still start after the job is gone and
+runs until its pipeline timeout.
+
+The launcher prints the request ID, which is evidence for the draft, not
+authority. Only a request that is `complete` with the overall result
+`passed` is downloaded. The status response's `run.artifacts` must be
+`ARTIFACTS/ID`, the request's own directory in the caller's storage, and
+the launcher fetches `HANDBACK` under it, with no token and no redirects,
+within ten minutes even past the deadline. Whether a plan can put its ZIP
+at a fixed path there is unverified: tmt's work directories may have
+generated names, so check the artifacts of a passed request of the same
+plan before relying on `handback`. The ZIP must fit `external-fetch`'s
+128 MiB archive bound and hold only flat hand-back files under its ZIP
+checks. Only then are the validated files written directly into `--output`,
+which must already exist and be empty when the launcher starts. `--id` must
+not exist. GitLab Runner packages those files at the root of its own job
+archive, which the caller fetches. Do not upload the downloaded ZIP as a
+member of the job archive. Upload only on success: a failed write or
+interrupted script can leave an incomplete set of files.
+The runner's archive must independently fit the GitLab upload limit and
+the fetcher's 128 MiB compressed limit; repackaging can change its size.
+
+Testing Farm's storage holds what the guest writes there before the
+launcher or any trusted check sees it, and a download the launcher refuses
+removes nothing. The Public Ranch serves artifacts to anyone with the
+request's URL, without a token, and
+[keeps them for 90 days](https://docs.testing-farm.io/Testing%20Farm/0.1/services.html#artifacts).
+Use public storage only when the plan, variables, source, patches and logs
+are all safe to publish. Before using private source, or producing
+private patches or logs, verify the deployment's access control and
+retention.
 
 ## Removed keys and runner-mode refusals
 

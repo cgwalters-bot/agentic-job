@@ -29,6 +29,7 @@ pub mod run;
 pub mod sandbox;
 pub mod secure_host;
 pub mod session;
+pub mod testing_farm;
 pub mod workflows;
 
 pub mod detect;

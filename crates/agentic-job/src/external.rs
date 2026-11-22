@@ -21,7 +21,7 @@ const MAX_RECORD: u64 = 64 << 10;
 // for policy.yml to pass the JSON to its shell step.
 const MAX_RECEIPT: u64 = 120 << 10;
 const MAX_PAGE: u64 = 4 << 20;
-const MAX_ARCHIVE: u64 = 128 << 20;
+pub(crate) const MAX_ARCHIVE: u64 = 128 << 20;
 const MAX_PAGES: usize = 10;
 const APPEAR_SECONDS: i64 = 600;
 const MAX_LIFETIME_SECONDS: i64 = 330 * 60;
@@ -988,7 +988,7 @@ fn raw_directory_entries(bytes: &[u8]) -> Result<usize> {
 
 /// The raw archive's members by name, the whole archive validated before
 /// any is returned.
-fn members(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
+pub(crate) fn members(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
     use std::io::Read;
     let entries = raw_directory_entries(bytes)?;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;

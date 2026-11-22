@@ -41,6 +41,8 @@ zstd.workspace = true
 zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
+# A loopback HTTPS server's certificate, trusted by the test alone.
+rcgen.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 safe-outputs = { path = "../safe-outputs", features = ["clap", "test-support"] }
 secure-host = { path = "../secure-host", features = ["test-support"] }
