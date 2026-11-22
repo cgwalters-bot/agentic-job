@@ -557,6 +557,13 @@ pub fn guide(
              two, gets all of your requests refused.",
             REASONS.join(", ")
         );
+        if push.is_some_and(|push| push.replacement_max_commits > 0) {
+            text.push_str(
+                "  For a replacement series, put the open checkpoint in the last commit's \
+                 message before running `agentic-job handback replace`. The push request's \
+                 message is not published as a commit; a checkpoint there alone is refused.\n",
+            );
+        }
     }
     let _ = writeln!(
         text,

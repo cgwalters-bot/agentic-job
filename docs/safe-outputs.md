@@ -1101,6 +1101,13 @@ gate. A run stopped at a limit still pushes nothing (RC-020). A run that
 ends with neither complete work nor a checkpoint, nor any output its run
 requires, fails as before.
 
+With `ready_when_complete`, a [replacement series](#pushing-to-a-pull-requests-branch)
+takes its checkpoint from the last commit's message. If the push request
+has a checkpoint (including one copied from the outcome), check refuses the
+series unless the last commit also has a valid checkpoint. An earlier commit
+or the patch itself does not count: a poller reads the new head. Amend the last
+commit before running `agentic-job handback replace`.
+
 Immediately before marking a continuation ready, apply reads its current labels: a case-insensitive `hold`, or a failed label read, leaves it draft and records why in `applied.json`'s `readiness.reason`, without undoing or failing the push.
 
 What the checks stop is unfinished work opening ready for review, where a

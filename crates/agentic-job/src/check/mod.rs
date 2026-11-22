@@ -704,6 +704,33 @@ fn verdict_of(
     };
     let mut checked =
         safe_outputs::check::check(&handback, collected, policy, trusted, &Apply, lifecycle);
+    // Apply ignores the push request's message for a replacement. Do not
+    // publish unfinished work whose new head would look complete to a poller.
+    if policy.safe_outputs.ready_when_complete()
+        && checked.errors.is_empty()
+        && checked
+            .patch
+            .as_ref()
+            .is_some_and(|patch| patch.commit_files.is_some())
+        && let Some(content) = handback.replacement
+    {
+        let head = (|| -> Result<_> {
+            let head = checkpoint::replacement_head(content)
+                .context("the last replacement commit's checkpoint")?;
+            let request_open = checkpoint.is_some()
+                || checkpoint::push_declares_open(handback.outputs.unwrap_or_default())?;
+            anyhow::ensure!(
+                !request_open || head.is_some(),
+                "the push request has an open checkpoint but the last replacement commit does not; \
+                 amend its message to include the checkpoint and rerun `agentic-job handback replace`"
+            );
+            Ok(head)
+        })();
+        match head {
+            Ok(head) => checkpoint = head,
+            Err(err) => checked.errors.push(format!("{err:#}")),
+        }
+    }
     if let Some(bytes) = contents.get(unchanged::FILE) {
         let candidate = (|| -> Result<()> {
             let identity = policy
@@ -1892,7 +1919,7 @@ mod tests {
             std::fs::create_dir(&repo).unwrap();
             let run = |args: &[&str]| git(&repo, args).unwrap();
             run(&["init", "-q", "--initial-branch=main"]);
-            let commit = |file: &str| {
+            let commit = |file: &str, message: &str| {
                 std::fs::write(repo.join(file), format!("{file}\n")).unwrap();
                 run(&["add", "."]);
                 run(&[
@@ -1902,18 +1929,18 @@ mod tests {
                     "user.email=test@example.com",
                     "commit",
                     "-qm",
-                    file,
+                    message,
                 ]);
                 run(&["rev-parse", "HEAD"])
             };
-            let older = commit("older.txt");
-            let pinned = commit("pinned.txt");
-            let base = commit("base.txt");
+            let older = commit("older.txt", "An older base");
+            let pinned = commit("pinned.txt", "The pinned base");
+            let base = commit("base.txt", "A newer base");
             run(&["checkout", "-qb", "proposal"]);
             for n in 0..101 {
                 std::fs::write(repo.join(format!("wide-{n:03}.txt")), "new\n").unwrap();
             }
-            commit("a.txt");
+            commit("a.txt", "First change");
             let first = run(&[
                 "format-patch",
                 "--stdout",
@@ -1921,7 +1948,19 @@ mod tests {
                 "--no-renames",
                 "-1",
             ]) + "\n";
-            commit("b.txt");
+            let open = checkpoint::Checkpoint {
+                reason: "incomplete".into(),
+                done: "parser".into(),
+                left: "tests".into(),
+                next: "add tests".into(),
+            };
+            commit(
+                "b.txt",
+                &format!(
+                    "Second change\n\n{}\n\n------------------------ >8 ------------------------\n\nStill part of the message.",
+                    open.markdown()
+                ),
+            );
             let second = run(&[
                 "format-patch",
                 "--stdout",
@@ -1932,7 +1971,7 @@ mod tests {
             let tree = run(&["rev-parse", "HEAD^{tree}"]);
             let proposal_head = run(&["rev-parse", "HEAD"]);
             run(&["checkout", "-q", "main"]);
-            let current = commit("advanced.txt");
+            let current = commit("advanced.txt", "Base advances again");
 
             let mut policy = push_policy();
             let config = policy
@@ -1942,6 +1981,7 @@ mod tests {
                 .unwrap();
             config.replacement_max_commits = 2;
             config.replacement_base = Some(pinned.clone());
+            config.ready_when_complete = true;
             config.head = proposal_head.clone();
             let series = json!({"base_commit": base, "commits": [first, second]});
             let handback = Handback {
@@ -1959,6 +1999,7 @@ mod tests {
                 .max_patch_files = None;
             let verdict = handback.check_against(&policy);
             assert!(verdict.ok, "{:?}", verdict.errors);
+            assert_eq!(verdict.checkpoint.as_ref(), Some(&open));
             let report = temp.path().join("report.json");
             std::fs::write(&report, serde_json::to_vec(&verdict).unwrap()).unwrap();
             let series_file = temp.path().join("replacement.json");
@@ -1977,8 +2018,13 @@ mod tests {
                 remote: repo.to_str().unwrap().into(),
                 temp: temp.path().into(),
             };
+            run(&["config", "mailinfo.scissors", "true"]);
             let built = trial(&args, &repo, &crate::apply::read_checked).unwrap();
             assert_eq!(built.tree, tree);
+            assert_eq!(
+                checkpoint::find(&run(&["show", "-s", "--format=%B", &built.head])).unwrap(),
+                Some(open)
+            );
             assert_eq!(
                 run(&["rev-list", "--count", &format!("{base}..{}", built.head)]),
                 "2"
@@ -2124,6 +2170,112 @@ mod tests {
             let verdict = with_item(json!({"message": message})).check_against(&policy);
             assert_eq!(verdict.errors, Vec::<String>::new());
             assert_eq!(verdict.checkpoint.unwrap().reason, "runtime");
+        }
+
+        #[test]
+        fn replacement_requires_an_open_checkpoint_on_its_head() {
+            let open = checkpoint::Checkpoint {
+                reason: "incomplete".into(),
+                done: "parser".into(),
+                left: "tests".into(),
+                next: "add tests".into(),
+            };
+            let block = open.markdown();
+            let mail = |path, body: &str| {
+                patch_of(path)
+                    .replace(&format!("{BASE_COMMIT_HEADER}: {BASE}\n"), "")
+                    .replacen("\n\n---\n", &format!("\n\n{body}\n\n---\n"), 1)
+            };
+            let head = mail("b.txt", &block);
+            let plain = mail("b.txt", "Done.");
+            // This fence is after the format-patch separator, not in the message.
+            let diffstat = plain.replacen("\n---\n", &format!("\n---\n{block}\n"), 1);
+            let malformed = mail("b.txt", checkpoint::FENCE);
+            let subject_fence = plain.replace("[PATCH] Change things", "[PATCH] ```checkpoint");
+            let duplicate = mail("b.txt", &format!("{block}\n\n{block}"));
+            let first = mail("a.txt", &block);
+            let mut policy = push_policy();
+            let config = policy
+                .safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap();
+            config.replacement_max_commits = 2;
+            config.replacement_base = Some(BASE.into());
+            config.ready_when_complete = true;
+            let mut off = policy.clone();
+            off.safe_outputs
+                .push_to_pull_request_branch
+                .as_mut()
+                .unwrap()
+                .ready_when_complete = false;
+            for (name, policy, request_open, last, expected) in [
+                ("open on head", &policy, true, &head, Ok(Some(&open))),
+                ("head only", &policy, false, &head, Ok(Some(&open))),
+                ("complete", &policy, false, &plain, Ok(None)),
+                ("opt-out", &off, true, &plain, Ok(None)),
+                (
+                    "subject fence",
+                    &policy,
+                    false,
+                    &subject_fence,
+                    Err("closing fence"),
+                ),
+                (
+                    "earlier only",
+                    &policy,
+                    true,
+                    &plain,
+                    Err("last replacement commit does not"),
+                ),
+                (
+                    "after separator",
+                    &policy,
+                    true,
+                    &diffstat,
+                    Err("last replacement commit does not"),
+                ),
+                (
+                    "malformed head",
+                    &policy,
+                    false,
+                    &malformed,
+                    Err("closing fence"),
+                ),
+                (
+                    "duplicate on head",
+                    &policy,
+                    true,
+                    &duplicate,
+                    Err("more than one checkpoint"),
+                ),
+            ] {
+                let mut item = push();
+                if request_open {
+                    item["message"] = format!("Fix the thing\n\n{block}").into();
+                }
+                let series = json!({"base_commit": BASE, "commits": [first, last]});
+                let verdict = Handback {
+                    items: vec![item],
+                    files: vec![(replacement::REPLACEMENT_FILE, series.to_string())],
+                    ..Handback::default()
+                }
+                .check_against(policy);
+                match expected {
+                    Ok(checkpoint) => {
+                        assert!(verdict.ok, "{name}: {:?}", verdict.errors);
+                        assert_eq!(verdict.checkpoint.as_ref(), checkpoint, "{name}");
+                    }
+                    Err(why) => {
+                        assert!(!verdict.ok, "{name}");
+                        assert!(
+                            verdict.errors.iter().any(|e| e.contains(why)),
+                            "{name}: {:?}",
+                            verdict.errors
+                        );
+                    }
+                }
+            }
         }
 
         fn with_item(fields: Value) -> Handback {

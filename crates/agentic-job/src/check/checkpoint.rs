@@ -15,6 +15,9 @@
 //! one of two, is refused rather than taken for complete work, which
 //! would open ready what the agent meant to leave a draft.
 
+use std::io::{Seek, Write};
+use std::process::{Command, Stdio};
+
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +106,75 @@ pub fn find(text: &str) -> Result<Option<Checkpoint>> {
         found = Some(checkpoint);
     }
     Ok(found)
+}
+
+/// Read the push request before collection can truncate its checkpoint.
+pub(super) fn push_declares_open(outputs: &[u8]) -> Result<bool> {
+    for line in outputs.split(|&b| b == b'\n') {
+        let Ok(item) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue; // Malformed requests are the collector's to refuse.
+        };
+        if item["type"].as_str().is_some_and(|kind| {
+            kind.replace('-', "_") == crate::policy::PUSH_TO_PULL_REQUEST_BRANCH
+        }) && let Some(message) = item["message"].as_str()
+            && find(message)
+                .context("the original push request's checkpoint")?
+                .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The last commit's checkpoint after git separates the message from the diff.
+/// Only call on a series already bounded and validated by replacement check.
+pub(super) fn replacement_head(content: &[u8]) -> Result<Option<Checkpoint>> {
+    let series: super::replacement::Replacement = serde_json::from_slice(content)?;
+    let mail = series.commits.last().context("empty replacement series")?;
+    let scratch = tempfile::tempdir()?;
+    let body = scratch.path().join("message");
+    let mut input = tempfile::tempfile()?;
+    input.write_all(mail.as_bytes())?;
+    input.rewind()?;
+    // Parse the same plain mail as git am, without importing a repository or
+    // applying the patch. A fence in the diff or diffstat is not a checkpoint.
+    let output = Command::new("git")
+        .args(["mailinfo", "--no-scissors", "--encoding=UTF-8"])
+        .arg(&body)
+        .arg("/dev/null")
+        .current_dir(scratch.path())
+        .env_clear()
+        .envs(std::env::var_os("PATH").map(|path| ("PATH", path)))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .envs(
+            scratch
+                .path()
+                .parent()
+                .map(|p| ("GIT_CEILING_DIRECTORIES", p)),
+        )
+        .stdin(input)
+        .stderr(Stdio::null())
+        .output()
+        .context("running git mailinfo")?;
+    ensure!(
+        output.status.success(),
+        "git mailinfo failed ({})",
+        output.status
+    );
+    let headers = std::str::from_utf8(&output.stdout).context("mail metadata is not UTF-8")?;
+    let subject = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Subject: "))
+        .unwrap_or_default();
+    let body = crate::files::read_regular(&body, mail.len() as u64)?;
+    ensure!(
+        !body.contains(&0) && !subject.contains('\0'),
+        "NUL in the commit message"
+    );
+    let body = std::str::from_utf8(&body).context("commit message is not UTF-8")?;
+    find(&format!("{subject}\n\n{body}"))
 }
 
 #[cfg(test)]

@@ -3940,6 +3940,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_replacement_cannot_lose_the_outcomes_checkpoint_to_truncation() {
+        for kind in [PUSH_TO_PULL_REQUEST_BRANCH, "push-to-pull-request-branch"] {
+            replacement_checkpoint_truncation(kind);
+        }
+    }
+
+    fn replacement_checkpoint_truncation(kind: &str) {
+        let (home, mut policy, mail) = replacement_home();
+        policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap()
+            .ready_when_complete = true;
+        let series = json!({"base_commit": home.checkout.base_commit, "commits": [mail]});
+        std::fs::write(home.path(REPLACEMENT_PATH), series.to_string()).unwrap();
+        let item = json!({"type": kind, "message": "a".repeat(65_000)});
+        std::fs::write(home.path(AGENT_OUTPUTS), format!("{item}\n")).unwrap();
+        std::fs::write(home.path(AGENT_OUTCOME), r#"{"summary":"Partial.","checkpoint":{"complete":false,"done":"parser","left":"tests","next":"add tests"}}"#).unwrap();
+
+        let change = home.collect(&policy, &config::Commit::default());
+        assert!(change.dropped.is_none(), "{:?}", change.dropped);
+        let collected = crate::collect::collect_dir(&home.path("safe-outputs"), &policy).unwrap();
+        assert!(
+            !collected.items[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains(checkpoint::FENCE)
+        );
+        let collected_path = home.path("collected.json");
+        std::fs::write(&collected_path, serde_json::to_vec(&collected).unwrap()).unwrap();
+        let verdict =
+            check::check_run_outputs(&home.path("safe-outputs"), &collected_path, &policy, RUN_ID)
+                .unwrap();
+        assert!(!verdict.ok);
+        assert!(
+            verdict
+                .errors
+                .iter()
+                .any(|err| err.contains("last replacement commit does not")),
+            "{:?}",
+            verdict.errors
+        );
+    }
+
     /// What `$(git format-patch ...)` leaves: the mail without its final
     /// newline, which `git am` calls corrupt at apply.
     #[test]

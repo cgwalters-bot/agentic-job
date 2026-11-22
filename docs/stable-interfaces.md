@@ -462,6 +462,8 @@ What a producer leaves for `run` to take
   target-branch snapshots. Apply proves the base from trusted history; a
   fork PR uses its upstream target, not the fork's default branch
   ([replacement series](safe-outputs.md#the-bounds-and-the-policy)).
+  Under `ready_when_complete`, the last commit's message supplies the
+  checkpoint and must contain one if the push request does.
   With `[github.outputs] upstream-pull-request-base = true` (off by default),
   a fork-side PR uses a unique open same-author, same-head PR in its forge-reported
   parent to resolve that target. This opts into parent history outside the

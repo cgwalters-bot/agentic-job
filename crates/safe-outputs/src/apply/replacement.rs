@@ -239,8 +239,15 @@ pub(crate) fn apply_mail(dir: &Path, file: &Path, mail: &str, checked: &[&str]) 
     let before = git(dir, &["rev-parse", "HEAD"])?;
     std::fs::write(file, mail).with_context(|| format!("writing {}", file.display()))?;
     let mut am = COMMITTER.to_vec();
+    // Check reads the whole message. Repository configuration must not
+    // make git am drop a checkpoint above a scissors line.
     am.extend([
+        "-c",
+        "i18n.commitEncoding=UTF-8",
         "am",
+        "--no-scissors",
+        "--no-message-id",
+        "--utf8",
         "--keep-cr",
         "--committer-date-is-author-date",
         file_arg,
