@@ -232,6 +232,42 @@ fn receipt_is_caller_owned_and_does_not_bypass_policy_check_or_detection() {
     )
     .unwrap();
     refused("not in the external receipt");
+    std::fs::remove_file(dir.join("raw/base.json")).unwrap();
+    // Nor is one read: a large file the receipt never named spends none of
+    // the read or scan budget, and is the one refusal, not a size refusal.
+    let large = std::fs::File::create(dir.join("raw/test-evidence-1.log")).unwrap();
+    large.set_len(1 << 33).unwrap();
+    status(&command(dir, &check), 1);
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(
+        report["errors"],
+        json!(["files not in the external receipt: test-evidence-1.log"])
+    );
+    std::fs::remove_file(dir.join("raw/test-evidence-1.log")).unwrap();
+    status(&command(dir, &check), 0);
+    // Nor is a file staged for upload that the receipt never named.
+    std::fs::create_dir(dir.join("staged")).unwrap();
+    let staged = [
+        "external-staged",
+        "--policy",
+        "policy.json",
+        "--dir",
+        "staged",
+    ];
+    // Any name the upload's patterns take, not only those check accepts.
+    for name in ["test-evidence.json", "test-evidence-x.log", "aw-x.patch"] {
+        let path = dir.join("staged").join(name);
+        std::fs::write(&path, b"{}").unwrap();
+        let output = command(dir, &staged);
+        status(&output, 2);
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not in the external receipt"),
+            "{name}: {output:?}"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+    status(&command(dir, &staged), 0);
     // Apply-only retries keep the same run's idempotency keys; another run
     // cannot borrow the checked policy even with a successful detector flag.
     let mut retry = Command::new(BIN);

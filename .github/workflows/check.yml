@@ -320,8 +320,13 @@ jobs:
       # reads it from the report, with the policy beside it. Test evidence
       # check accepted goes too, every log of it (check refused any other):
       # the draft links this upload for it, and apply binds its tree.
+      # Copied by path after check read them, an external hand-back's files
+      # are held to the receipt again: apply's artifact digest vouches for
+      # what is uploaded, not for what check verified.
       - name: Put the patch beside the ingested outputs
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
+        env:
+          EXTERNAL_RUN: ${{ fromJSON(inputs.policy).external-run-id }}
         run: |
           jq --slurpfile policy "$JOB_DIR/policy.json" '($policy[0].secondary_pull_request.repo // null) as $repo |
             {items: [.items[] | select($repo == null or .type != "create_pull_request" or .repo != $repo)], errors: []}' \
@@ -335,6 +340,7 @@ jobs:
           [ -z "$secondary" ] || cp "$JOB_DIR/safe-outputs/$secondary" "$GH_AW_TMP/secondary"
           jq -e '.test_evidence == null' "$GH_AW_TMP/report.json" > /dev/null ||
             cp "$JOB_DIR/safe-outputs/test-evidence.json" "$JOB_DIR"/safe-outputs/test-evidence-*.log "$GH_AW_TMP"
+          [ -z "$EXTERNAL_RUN" ] || "$JOB_DIR/agentic-job" external-staged --policy "$JOB_DIR/policy.json" --dir "$GH_AW_TMP"
       # A review's inline findings, for when apply posts its verdict as the
       # comment (review.yml submitted no review): in that comment's body
       # after the verdict line, not as a second review without a verdict

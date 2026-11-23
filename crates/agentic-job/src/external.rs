@@ -75,6 +75,85 @@ pub struct ReleaseArgs {
     pub detection_result: String,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct StagedArgs {
+    #[arg(long)]
+    pub policy: PathBuf,
+    /// check.yml's staging directory, as it uploads it: patches, replacement
+    /// and test evidence at the top, the secondary patch in `secondary/`
+    #[arg(long)]
+    pub dir: PathBuf,
+}
+
+/// Refuses an external upload whose staged hand-back files are not the bytes
+/// check verified. check.yml stages them by path after check read them, so a
+/// file replaced on the check runner in between would otherwise be uploaded
+/// with apply's artifact digest vouching for it. The names are held to the
+/// receipt before any file is opened, as check holds the outputs'.
+pub fn staged(args: &StagedArgs) -> Result<Exit> {
+    use crate::policy::Load;
+    let policy = Policy::load(&args.policy)?;
+    let external = policy
+        .external
+        .as_ref()
+        .context("external-staged requires an external policy")?;
+    // The upload's own patterns, not check's stricter names: whatever the
+    // upload would take is held to the receipt.
+    let staged = |name: &str| {
+        (name.starts_with("aw-") && name.ends_with(".patch"))
+            || (name.starts_with("test-evidence-") && name.ends_with(".log"))
+            || name == crate::check::replacement::REPLACEMENT_FILE
+            || name == crate::check::test_evidence::TEST_EVIDENCE_FILE
+    };
+    let mut files = Vec::new();
+    for name in list(&args.dir)? {
+        if staged(&name) {
+            files.push(args.dir.join(&name));
+        }
+    }
+    let secondary = args.dir.join("secondary");
+    if secondary.try_exists()? {
+        files.extend(list(&secondary)?.iter().map(|name| secondary.join(name)));
+    }
+    let name = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    for path in &files {
+        ensure!(
+            external.files.contains_key(&name(path)),
+            "staged {} is not in the external receipt",
+            path.display()
+        );
+    }
+    for path in &files {
+        let name = name(path);
+        let bytes = crate::files::read_regular(path, crate::check::max_bytes_of(&name, &policy))
+            .with_context(|| format!("staged {}", path.display()))?;
+        ensure!(
+            external.files.get(&name) == Some(&sha256(&bytes)),
+            "staged {} differs from the external receipt's digest",
+            path.display()
+        );
+    }
+    Ok(Exit::Success)
+}
+
+/// The names in DIR, each UTF-8.
+fn list(dir: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let name = entry?.file_name();
+        names.push(
+            name.into_string()
+                .map_err(|name| anyhow::anyhow!("staged file name {name:?} is not UTF-8"))?,
+        );
+    }
+    Ok(names)
+}
+
 /// Apply-only retries keep their original record and idempotency names, but
 /// another run or an earlier attempt cannot reuse the caller's policy.
 pub fn caller_policy(policy: &Policy) -> Result<()> {
@@ -383,16 +462,10 @@ fn digests(files: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The outputs directory check reads, its file names PRESENT and the
-/// CONTENTS it accepted by name, held to the receipt's MANIFEST: the same
-/// names, each with the digest fetch wrote. A substituted, changed,
-/// dropped or added file refuses the hand-back, as does a receipt from
-/// another fetch. A file check refused to read is refused by that alone.
-pub fn bound(
-    present: &BTreeSet<&str>,
-    contents: &BTreeMap<String, Vec<u8>>,
-    manifest: &BTreeMap<String, String>,
-) -> Result<()> {
+/// The file names PRESENT in the outputs directory check reads, held to the
+/// receipt's MANIFEST before any is opened: a dropped or added file refuses
+/// the hand-back unread.
+pub fn names(present: &BTreeSet<&str>, manifest: &BTreeMap<String, String>) -> Result<()> {
     let receipted: BTreeSet<&str> = manifest.keys().map(String::as_str).collect();
     let missing: Vec<_> = receipted.difference(present).copied().collect();
     ensure!(
@@ -406,6 +479,17 @@ pub fn bound(
         "files not in the external receipt: {}",
         extra.join(", ")
     );
+    Ok(())
+}
+
+/// The CONTENTS check accepted by name, the bytes it goes on to use, held to
+/// the receipt's MANIFEST: each with the digest fetch wrote. A substituted
+/// or changed file refuses the hand-back, as does a receipt from another
+/// fetch. A file check refused to read is refused by that alone.
+pub fn bound(
+    contents: &BTreeMap<String, Vec<u8>>,
+    manifest: &BTreeMap<String, String>,
+) -> Result<()> {
     for (name, content) in contents {
         ensure!(
             manifest.get(name) == Some(&sha256(content)),

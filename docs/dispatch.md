@@ -1028,9 +1028,13 @@ run, retaining that upload's ID and digest. It composes the same-pinned
   This supports only one draft-only GitHub implement target, not fix,
   secondary targets or a different output repository.
 - Pass the new raw upload's ID and digest to check, never a legacy artifact
-  name. Check holds the files it reads to the receipt's `files`: the same
-  names, each with its digest, so a substituted, changed, dropped or added
-  file refuses the hand-back. The collected result must also match what the
+  name. Check holds the outputs directory to the receipt's `files`: first
+  the same names, before it opens any file, then each file's digest over
+  the bytes it goes on to use, so a substituted, changed, dropped or added
+  file refuses the hand-back. Endpoint replay uses those bytes too, and
+  check.yml runs `external-staged --policy FILE --dir DIR` on the patches
+  and test evidence it stages for upload, refusing any not receipted or
+  replaced since check read it. The collected result must also match what the
   native collector produces from the verified `outputs.jsonl` bytes. The
   ordinary patch, protected-path and size checks still run. `base.json`
   must match the record's exact commit; the request's

@@ -2,7 +2,8 @@
 //! threat is an agent using a placeholder as a wildcard to recover arbitrary
 //! base bytes (or make a privileged publisher apply a different tree).
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
 use safe_outputs::apply::git::Git;
@@ -12,14 +13,28 @@ use super::{CREATE_PULL_REQUEST, Verdict};
 use crate::policy::{Forge, Policy};
 use crate::{exit::Exit, files};
 
+/// Replays the verdict's patch from CONTENTS, the hand-back's files as check
+/// read and verified them, never from its directory again: a file replaced
+/// since then is not what the receipt below digests.
 pub fn check(
     verdict: &mut Verdict,
-    outputs: &Path,
+    contents: &BTreeMap<String, Vec<u8>>,
     policy: &Policy,
     literals: Option<&[Literal]>,
 ) -> Result<()> {
     let Some(literals) = literals else {
         return Ok(());
+    };
+    let read = |name: &str, max: u64| -> Result<&[u8]> {
+        let bytes = contents
+            .get(name)
+            .with_context(|| format!("{name} was not read by check"))?;
+        ensure!(
+            bytes.len() as u64 <= max,
+            "{name} is {} bytes, over {max}",
+            bytes.len()
+        );
+        Ok(bytes)
     };
     // Replacement and secondary carriers deliberately get no alternative
     // replay semantics. Their endpoint-bearing hand-backs must be regenerated.
@@ -37,17 +52,17 @@ pub fn check(
                 .context("secondary patch without policy")?
                 .max_patch_bytes
         };
-        let bytes = files::read_regular(&outputs.join(&info.file), limit)?;
+        let bytes = read(&info.file, limit)?;
         ensure!(
-            !String::from_utf8_lossy(&bytes).contains(safe_outputs::replay::PLACEHOLDER),
+            !String::from_utf8_lossy(bytes).contains(safe_outputs::replay::PLACEHOLDER),
             "endpoint replay is unsupported for replacement/secondary patches; regenerate without endpoint substitutions"
         );
     }
     let Some(info) = verdict.patch.as_mut().filter(|p| p.commit_files.is_none()) else {
         return Ok(());
     };
-    let bytes = files::read_regular(&outputs.join(&info.file), policy.patch_read_limit())?;
-    let text = std::str::from_utf8(&bytes)?;
+    let bytes = read(&info.file, policy.patch_read_limit())?;
+    let text = std::str::from_utf8(bytes)?;
     if !text.lines().any(|line| {
         matches!(line.as_bytes().first(), Some(b'-' | b' '))
             && line.contains(safe_outputs::replay::PLACEHOLDER)
@@ -67,12 +82,12 @@ pub fn check(
         "endpoint replay requires the primary native GitHub create_pull_request publisher; legacy, push and other forge paths are unsupported"
     );
     let mut receipt = Receipt {
-        patch_sha256: safe_outputs::replay::digest(&bytes),
+        patch_sha256: safe_outputs::replay::digest(bytes),
         base_commit: info.base_commit.clone(),
         literals: literals.to_vec(),
         tree: String::new(),
     };
-    receipt.tree = trial(policy, &bytes, &receipt, &info.files)?;
+    receipt.tree = trial(policy, bytes, &receipt, &info.files)?;
     info.replay = Some(receipt);
     Ok(())
 }
@@ -205,6 +220,7 @@ mod tests {
         upload::{Gate, Staging},
     };
     use serde_json::json;
+    use std::path::Path;
 
     const ADDRESS: &str = "inference.example.test:8443";
     const NAME: &str = "aw-agent-run-7.patch";
@@ -320,6 +336,18 @@ mod tests {
             std::fs::read_to_string(self.staging.safe_outputs().join(NAME)).unwrap()
         }
 
+        /// The hand-back's files as check reads them.
+        fn contents(&self) -> BTreeMap<String, Vec<u8>> {
+            std::fs::read_dir(self.staging.safe_outputs())
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let name = entry.file_name().into_string().unwrap();
+                    (name, std::fs::read(entry.path()).unwrap())
+                })
+                .collect()
+        }
+
         fn verdict(&self) -> Verdict {
             let verdict = crate::check::check_run_outputs(
                 &self.staging.safe_outputs(),
@@ -341,15 +369,18 @@ mod tests {
             assert!(patch.contains(INFERENCE_PLACEHOLDER) && !patch.contains(ADDRESS));
             let mut verdict = f.verdict();
             let literals = [Literal::new(ADDRESS).unwrap()];
-            check(
-                &mut verdict,
-                &f.staging.safe_outputs(),
-                &f.policy,
-                Some(&literals),
-            )
-            .unwrap();
+            // Replay takes the bytes check read, not a patch swapped in since.
+            let contents = f.contents();
+            let staged = f.staging.safe_outputs().join(NAME);
+            std::fs::write(&staged, patch.replace("before", "swapped")).unwrap();
+            check(&mut verdict, &contents, &f.policy, Some(&literals)).unwrap();
+            std::fs::write(&staged, &patch).unwrap();
             let info = verdict.patch.as_ref().unwrap();
             let receipt = info.replay.as_ref().unwrap();
+            assert_eq!(
+                receipt.patch_sha256,
+                safe_outputs::replay::digest(patch.as_bytes())
+            );
             let serialized = serde_json::to_string(&verdict).unwrap();
             assert!(!serialized.contains(ADDRESS));
             assert_eq!(
@@ -478,41 +509,31 @@ mod tests {
             assert!(!result.unwrap_err().to_string().contains(ADDRESS));
         }
         let mut verdict = f.verdict();
+        let contents = f.contents();
         let mut secondary = verdict.clone();
         secondary.secondary_patch = secondary.patch.take();
-        assert!(
-            check(
-                &mut secondary,
-                &f.staging.safe_outputs(),
-                &f.policy,
-                Some(&literals)
-            )
-            .is_err()
-        );
+        assert!(check(&mut secondary, &contents, &f.policy, Some(&literals)).is_err());
         let mut replacement = verdict.clone();
         replacement.patch.as_mut().unwrap().commit_files =
             Some(vec![vec!["sample.txt".to_owned()]]);
+        assert!(check(&mut replacement, &contents, &f.policy, Some(&literals)).is_err());
+        let mut legacy = f.policy.clone();
+        legacy.native_handlers.clear();
+        assert!(check(&mut verdict, &contents, &legacy, Some(&literals)).is_err());
+        // Nor is a patch check did not read, or one over its own bound.
         assert!(
             check(
-                &mut replacement,
-                &f.staging.safe_outputs(),
+                &mut verdict.clone(),
+                &BTreeMap::new(),
                 &f.policy,
                 Some(&literals)
             )
             .is_err()
         );
-        let mut legacy = f.policy.clone();
-        legacy.native_handlers.clear();
-        assert!(
-            check(
-                &mut verdict,
-                &f.staging.safe_outputs(),
-                &legacy,
-                Some(&literals)
-            )
-            .is_err()
-        );
-        check(&mut verdict, &f.staging.safe_outputs(), &f.policy, None).unwrap();
+        let mut small = f.policy.clone();
+        small.max_patch_bytes = Some(1);
+        assert!(check(&mut verdict.clone(), &contents, &small, Some(&literals)).is_err());
+        check(&mut verdict, &contents, &f.policy, None).unwrap();
         assert!(verdict.patch.unwrap().replay.is_none());
 
         let ordinary = Fixture::new(false, false);
@@ -520,7 +541,7 @@ mod tests {
         let mut verdict = ordinary.verdict();
         check(
             &mut verdict,
-            &ordinary.staging.safe_outputs(),
+            &ordinary.contents(),
             &ordinary.policy,
             Some(&literals),
         )

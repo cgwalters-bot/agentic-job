@@ -385,7 +385,7 @@ pub(crate) fn is_handback_file(name: &str) -> bool {
 /// The most a file of a hand-back may hold. Which patch is which is
 /// known only from the requests, so each is read within the larger
 /// budget and held to its own once it is.
-fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
+pub(crate) fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
     match name {
         unchanged::FILE => unchanged::MAX_BYTES,
         HOST_ISOLATION_FILE => MAX_HOST_ISOLATION_BYTES,
@@ -491,7 +491,7 @@ fn check_outputs_with_public(
     continuation: Option<&crate::policy::Continuation>,
     public: &PublicAddresses,
 ) -> Result<Verdict> {
-    let mut verdict = verdict_of(
+    let (mut verdict, _) = verdict_of(
         dir,
         collected,
         policy,
@@ -504,6 +504,8 @@ fn check_outputs_with_public(
     Ok(verdict)
 }
 
+/// The verdict, and the hand-back's files as check read them, by name:
+/// what endpoint replay uses rather than reading the directory again.
 fn verdict_of(
     dir: &Path,
     collected: &Path,
@@ -512,7 +514,7 @@ fn verdict_of(
     run_id: Option<&str>,
     continuation: Option<&crate::policy::Continuation>,
     public: &PublicAddresses,
-) -> Result<Verdict> {
+) -> Result<(Verdict, BTreeMap<String, Vec<u8>>)> {
     let mut errors = Vec::new();
     let mut names = std::fs::read_dir(dir)
         .and_then(|entries| {
@@ -522,6 +524,21 @@ fn verdict_of(
         })
         .with_context(|| format!("reading the outputs directory {}", dir.display()))?;
     names.sort();
+
+    // An external hand-back is what the trusted fetch extracted and
+    // receipted, file for file, not whatever reached this directory since.
+    // Its names are held to the receipt before any file is opened, so a
+    // file the receipt never named spends none of the read or scan budget.
+    if let Some(external) = &policy.external {
+        let present: Vec<_> = names.iter().map(|name| name.to_string_lossy()).collect();
+        let present = present.iter().map(AsRef::as_ref).collect();
+        if let Err(error) = crate::external::names(&present, &external.files) {
+            return Ok((
+                Verdict::new(vec![format!("{error:#}")], Vec::new(), None),
+                BTreeMap::new(),
+            ));
+        }
+    }
 
     // Refuse excess patch artifacts before reading any of them: per-file
     // read bounds alone would allow unbounded aggregate memory use.
@@ -589,13 +606,11 @@ fn verdict_of(
         }
     }
     warnings.truncate(redact::MAX_SHAPE_WARNINGS);
-    // An external hand-back is what the trusted fetch extracted and
-    // receipted, file for file, not whatever reached this directory since.
-    if let Some(external) = &policy.external {
-        let present = names.iter().filter_map(|name| name.to_str()).collect();
-        if let Err(error) = crate::external::bound(&present, &contents, &external.files) {
-            errors.push(format!("{error:#}"));
-        }
+    // And each is the bytes it receipted: these, which check goes on to use.
+    if let Some(external) = &policy.external
+        && let Err(error) = crate::external::bound(&contents, &external.files)
+    {
+        errors.push(format!("{error:#}"));
     }
     let isolation = contents.get(HOST_ISOLATION_FILE).and_then(|bytes| {
         // Only external provenance is supported. In particular a producer
@@ -641,10 +656,11 @@ fn verdict_of(
         }
     }
     if !errors.is_empty() {
-        return Ok(Verdict {
+        let verdict = Verdict {
             warnings,
             ..Verdict::new(errors, Vec::new(), None)
-        });
+        };
+        return Ok((verdict, contents));
     }
 
     let collected: Collected = serde_json::from_slice(&collected_bytes).with_context(|| {
@@ -761,7 +777,7 @@ fn verdict_of(
         ..Verdict::new(checked.errors, checked.items, checked.patch)
     };
     verdict.blocked = verdict.is_blocked();
-    Ok(verdict)
+    Ok((verdict, contents))
 }
 
 /// The hand-back's test evidence, if any, held to the policy and bound to
@@ -840,7 +856,7 @@ pub fn run(args: &Args) -> Result<Exit> {
         })
         .transpose()?
         .unwrap_or_default();
-    let mut verdict = verdict_of(
+    let (mut verdict, contents) = verdict_of(
         &args.outputs,
         &args.collected,
         &policy,
@@ -852,7 +868,7 @@ pub fn run(args: &Args) -> Result<Exit> {
     if verdict.ok
         && let Err(error) = replay::check(
             &mut verdict,
-            &args.outputs,
+            &contents,
             &policy,
             public
                 .replay

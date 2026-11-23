@@ -474,6 +474,39 @@ fn fetched_raw_passes_real_collect_check_git_trial_and_staged_apply() {
             .unwrap()
             .ok
     );
+    // What check.yml stages for upload is what check verified: a staged
+    // file swapped since, or one the receipt never named, is refused.
+    let stage = root.path().join("staged");
+    std::fs::create_dir_all(stage.join("secondary")).unwrap();
+    std::fs::copy(outputs.join(&name), stage.join(&name)).unwrap();
+    // Not a staged hand-back file, so not held to the receipt.
+    std::fs::write(stage.join("report.json"), b"{}").unwrap();
+    let staged = || {
+        super::staged(&StagedArgs {
+            policy: policy_file.clone(),
+            dir: stage.clone(),
+        })
+    };
+    assert_eq!(staged().unwrap(), Exit::Success);
+    let differs = || {
+        let error = staged().unwrap_err().to_string();
+        assert!(
+            error.contains("differs from the external receipt"),
+            "{error}"
+        );
+    };
+    std::fs::write(stage.join(&name), format!("{patch}\n")).unwrap();
+    differs();
+    std::fs::copy(outputs.join(&name), stage.join(&name)).unwrap();
+    std::fs::write(stage.join("secondary").join(&name), b"").unwrap();
+    differs();
+    std::fs::rename(
+        stage.join("secondary").join(&name),
+        stage.join("secondary/aw-other.patch"),
+    )
+    .unwrap();
+    let error = staged().unwrap_err().to_string();
+    assert!(error.contains("not in the external receipt"), "{error}");
     // The real apply trial: exact base, git am (no target code/hooks), and
     // compare the resulting paths with check's. Nothing is pushed.
     let work = root.path().join("work");
@@ -783,7 +816,9 @@ fn storage_redirect_is_followed_once_without_the_credential() {
             let redirect = |to: String| (302, format!("Location: {to}\r\n"), Vec::new());
             let (status, extra, body) = if path.ends_with("/zip") {
                 match *case.lock().unwrap() {
-                    "elsewhere" => redirect(format!("{root}/other/ok")),
+                    // The production storage prefix refuses a plain HTTP
+                    // Location, before its destination gets a request.
+                    "plain" => redirect(format!("{root}/storage/ok")),
                     case => redirect(format!("{root}/storage/{case}")),
                 }
             } else if path == "/storage/again" {
@@ -824,9 +859,12 @@ fn storage_redirect_is_followed_once_without_the_credential() {
         ("ok", None),
         ("again", Some("HTTP 302")),
         ("bad", Some("digest mismatch")),
-        ("elsewhere", Some("storage over HTTPS")),
+        ("plain", Some("storage over HTTPS")),
     ] {
         *case.lock().unwrap() = name;
+        if name == "plain" {
+            api.storage = STORAGE.to_owned();
+        }
         let dir = tempfile::tempdir().unwrap();
         let args = Args {
             forge: Caller::Github,
@@ -868,6 +906,7 @@ fn storage_redirect_is_followed_once_without_the_credential() {
             "{path}: credential sent {authenticated}"
         );
     }
+    // One each for ok, again and bad; none for plain.
     assert_eq!(
         requests
             .iter()
