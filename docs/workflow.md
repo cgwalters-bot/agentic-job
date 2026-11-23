@@ -2184,7 +2184,8 @@ new pull request gets `Closes #N` unless that line is already present,
 or a line of the body starts with `Part of #N` or `Refs #N`: the agent's
 word that its change does only part of the issue, which merging must not close;
 an item in another repository gets `Refs OWNER/NAME#N` instead. Existing batch
-references are preserved, and fix runs leave the PR body alone. Without
+references are preserved, and fix runs leave the PR body alone unless the
+caller enabled a [scoped fix PR text update](safe-outputs.md#scoped-fix-pr-text-updates). Without
 `issue` a pull request links nothing, and apply warns that it does: a
 caller that composes `policy.yml` itself, as a wrapper of `dispatch.yml`
 might, has to pass its item as `issue`, not only as `comment-target`. When notifications are

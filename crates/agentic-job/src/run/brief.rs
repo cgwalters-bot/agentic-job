@@ -497,6 +497,24 @@ pub fn guide(
             let _ = writeln!(text, "  - `{name}`: {fields}");
         }
     }
+    if let Some(push) = push
+        && let Some(scope) = &push.fix_pull_request
+    {
+        if scope
+            .snapshot_digest
+            .as_ref()
+            .is_some_and(|digest| !digest.is_empty())
+        {
+            let repo = &policy.repo;
+            let number = &push.target;
+            let _ = writeln!(
+                text,
+                "  To replace only the pull request text, write `{{\"type\":\"update_pull_request\",\"repo\":\"{repo}\",\"pull_request_number\":{number},\"title\":\"...\",\"body\":\"...\"}}`. This must be the only request, with no patch or extra fields. Do not include closing directives or reserved markers."
+            );
+        } else {
+            text.push_str("  Scoped PR text replacement is unavailable without a trusted snapshot free of closing directives. Report a needed text edit instead.\n");
+        }
+    }
     if push.is_some() {
         if let Some(push) = push.filter(|push| push.replacement_max_commits > 0) {
             let total_files = push.replacement_files().map_or_else(String::new, |max| {

@@ -29,6 +29,7 @@
 //! docs/safe-outputs.md#library-boundary says what stays with the caller.
 
 mod document;
+mod fix_pull;
 pub mod forgejo;
 pub mod git;
 pub mod github;

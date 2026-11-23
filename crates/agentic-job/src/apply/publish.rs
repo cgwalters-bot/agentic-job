@@ -74,7 +74,8 @@ fn publish_all(args: &Args) -> Result<bool> {
     let policy = Policy::load(&args.policy)?;
     policy.publishable()?;
     ensure!(
-        !policy.native_handlers.is_empty(),
+        !policy.native_handlers.is_empty()
+            || safe_outputs::check::fix_pull::scope(&policy, "update_pull_request").is_some(),
         "the policy routes no output type to agentic-job publish"
     );
     let read = |path: &Path| -> Result<Value> {

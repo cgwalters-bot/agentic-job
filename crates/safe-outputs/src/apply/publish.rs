@@ -1097,6 +1097,7 @@ fn holds_temporary_reference(value: &Value) -> bool {
 /// One routed request, everything that does not take the forge decided.
 #[derive(Debug, Clone)]
 enum Op {
+    FixPull(super::fix_pull::Request),
     Document {
         index: usize,
         max: u64,
@@ -1249,6 +1250,7 @@ struct LabelRequest {
 impl Op {
     fn index(&self) -> usize {
         match self {
+            Self::FixPull(_) => 0,
             Self::Comment { index, .. }
             | Self::Document { index, .. }
             | Self::PullRequest { index, .. }
@@ -1262,6 +1264,7 @@ impl Op {
 
     fn max(&self) -> u64 {
         match self {
+            Self::FixPull(_) => 1,
             Self::Comment { max, .. }
             | Self::Document { max, .. }
             | Self::PullRequest { max, .. }
@@ -1275,6 +1278,7 @@ impl Op {
 
     fn output(&self) -> &'static str {
         match self {
+            Self::FixPull(_) => check::fix_pull::UPDATE,
             Self::Document { .. } => "document",
             Self::Comment { .. } => ADD_COMMENT,
             Self::PullRequest { .. } => CREATE_PULL_REQUEST,
@@ -3012,6 +3016,12 @@ fn publish_one(
         repo: publisher.repo.clone(),
     };
     match op {
+        Op::FixPull(request) => {
+            match super::fix_pull::publish(&publisher.github, request, &run.server) {
+                Ok(result) => Outcome::succeeded(op, result),
+                Err(err) => Outcome::failed(op, format!("{err:#}")),
+            }
+        }
         Op::Document {
             document,
             settings,
@@ -4784,9 +4794,8 @@ pub fn apply_with_guarded_push(
         Ok(held) => held,
         Err(error) => return refuse(vec![format!("{error:#}")]),
     };
-    let Split { ours, rest } = match split(items, &policy.native_handlers) {
-        Ok(split) => split,
-        Err(errors) => return refuse(errors),
+    let scoped = |item: &Map<String, Value>| {
+        check::fix_pull::scope(policy, check::item_type(item)).is_some()
     };
     if items.iter().any(|item| item["type"] == "document") {
         ensure!(
@@ -4802,9 +4811,36 @@ pub fn apply_with_guarded_push(
             "document runs permit one document and no other writing outputs"
         );
     }
-    let mut ops = match plan(ours, handlers, &upload, policy, run) {
-        Ok(ops) => ops,
-        Err(errors) => return refuse(errors),
+    let (mut ops, rest) = if items.iter().filter_map(Value::as_object).any(scoped) {
+        policy.validate()?;
+        let report = read_report(&upload)?;
+        let [item] = report.items.as_slice() else {
+            bail!("expected exactly one checked scoped fix PR action");
+        };
+        ensure!(
+            report.ok
+                && report.errors.is_empty()
+                && report.patch.is_none()
+                && report.secondary_patch.is_none()
+                && report.checkpoint.is_none()
+                && items == [Value::Object(item.clone())]
+                && guarded.is_none(),
+            "a scoped fix PR action must match the successful check report, with no patch or checkpoint"
+        );
+        (
+            vec![Op::FixPull(super::fix_pull::Request::new(item, policy)?)],
+            vec![],
+        )
+    } else {
+        let Split { ours, rest } = match split(items, &policy.native_handlers) {
+            Ok(split) => split,
+            Err(errors) => return refuse(errors),
+        };
+        let ops = match plan(ours, handlers, &upload, policy, run) {
+            Ok(ops) => ops,
+            Err(errors) => return refuse(errors),
+        };
+        (ops, rest)
     };
     if held.is_some() {
         ops.sort_by_key(|op| matches!(op, Op::Comment { .. }));
@@ -5058,6 +5094,101 @@ mod tests {
 
     fn read_json(path: &Path) -> Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn fix_pr_routes_only_the_unchanged_checked_action_to_native_publication() {
+        use crate::check::fix_pull::UPDATE;
+        use crate::contract::{FixPullRequest, OutputLimit};
+
+        let mut policy = crate::check::fixtures::push_policy();
+        let push = policy
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap();
+        let pr = json!({"number":42, "state":"open", "user":{"login":"example-bot"},
+            "base":{"ref":"main","repo":{"full_name":policy.repo}}, "head":{"sha":push.head,"ref":policy.base},
+            "title":"Original", "body":"Original body"});
+        push.fix_pull_request = Some(FixPullRequest {
+            author: "example-bot".into(),
+            snapshot_digest: super::super::push::pull_snapshot_digest(&pr),
+        });
+        policy.safe_outputs.others.insert(
+            UPDATE.into(),
+            OutputLimit {
+                max: 1,
+                fields: vec!["title".into(), "body".into()],
+                ..Default::default()
+            },
+        );
+        let item = json!({"type":UPDATE,"repo":policy.repo,"pull_request_number":42,
+                "title":"Narrow scope","body":"Narrowed scope"});
+        for changed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = |name: &str| dir.path().join(name);
+            std::fs::write(
+                path("report.json"),
+                json!({"ok":true,"errors":[],"items":[item],"patch":null}).to_string(),
+            )
+            .unwrap();
+            let pulls = format!("/repos/{}/pulls/42", policy.repo);
+            let pr = pr.to_string();
+            let (api, requests) = serve(usize::MAX, move |request: &Request| {
+                if request.line == "GET /user HTTP/1.1" {
+                    (200, json!({"login":"example-bot"}).to_string())
+                } else if request.line == format!("GET {pulls} HTTP/1.1") {
+                    (200, pr.clone())
+                } else if request.line.starts_with("GET ") {
+                    (200, "[]".into())
+                } else {
+                    (200, "{}".into())
+                }
+            });
+            let run = run(1, &api);
+            let mut request = item.clone();
+            if changed {
+                request["body"] = json!("Not checked");
+            }
+            let checked = Checked {
+                items: &[request],
+                handlers: &Map::new(),
+                upload: upload(dir.path()),
+                policy: &policy,
+            };
+            let github = Github::new(&api, TOKEN.into(), PROVENANCE).unwrap();
+            let publisher = publisher(github, SERVER, &checked, &run).unwrap();
+            let result = apply(
+                &checked,
+                &run,
+                &publisher,
+                &Records {
+                    remainder: &path("remainder.json"),
+                    made: &path("made.jsonl"),
+                    errors: &path("errors.json"),
+                    output: None,
+                    summary: None,
+                    workflow: "agentic-job",
+                },
+                &mut |_| {},
+            );
+            if changed {
+                assert!(result.is_err());
+                assert_eq!(requests.try_iter().count(), 0);
+                assert!(!path("remainder.json").exists());
+            } else {
+                assert!(result.unwrap());
+                assert_eq!(read_json(&path("remainder.json"))["items"], json!([]));
+                assert_eq!(read_json(&path("made.jsonl"))["type"], UPDATE);
+                assert_eq!(
+                    requests
+                        .try_iter()
+                        .filter(|req| req.line.starts_with("PATCH "))
+                        .count(),
+                    1
+                );
+            }
+        }
     }
 
     /// The run as publication.rs gives it to gh-aw's handlers.

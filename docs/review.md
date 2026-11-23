@@ -491,9 +491,9 @@ verified cause, not just a similar symptom.
 
 With `REVIEW_HISTORY=true`, authors and maintainers can put evidence disputing
 earlier findings in a "Disputed" section near the top of the PR description.
-Automated fix runs leave the description alone. Editing it doesn't trigger a
-review: add the dispute before the next review starts, or ask someone with
-write access to request `/review`. An edit after policy captures the description
+Editing the description doesn't trigger a review: add the dispute
+before the next review starts, or ask someone with write access to request
+`/review`. An edit after policy captures the description
 isn't visible to that run. The reviewer answers each matching history ID once;
 IDs no longer in the supplied history are ignored. It drops or downgrades a
 finding only if the admitted code confirms evidence that refutes it or changes

@@ -386,6 +386,10 @@ is not the full acceptance contract:
 `resolve_pull_request_review_thread`, `noop`, `missing_tool` and
 `missing_data`.
 
+GitHub fix bounds can derive an exact-PR `update_pull_request` grant from
+`allow_pr_text_update` under `[github.outputs.push_to_pull_request_branch]`.
+This is off by default; see [scoped fix PR text updates](safe-outputs.md#scoped-fix-pr-text-updates).
+
 The bounds' `native_handlers` may have `add_comment`,
 `create_pull_request`, `add_labels`, `remove_labels`, `close_issue`,
 `close_pull_request`, `push_to_pull_request_branch`, `create_issue` and

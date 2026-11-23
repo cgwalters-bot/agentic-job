@@ -193,6 +193,126 @@ impl Case {
 }
 
 #[test]
+fn fix_pr_check_refuses_redirections_extra_operations_and_closing_directives() {
+    use crate::contract::{FixPullRequest, OutputLimit};
+    use fix_pull::UPDATE;
+    let mut policy = push_policy();
+    let mut case = Case::push("src/lib.rs");
+    case.base = None;
+    case.patches.clear();
+    let kind = UPDATE;
+    let item = json!({"type": kind, "repo": REPO, "pull_request_number": 42,
+            "title": "Narrow scope", "body": "Narrowed the scope."});
+    case.items = vec![item.clone()];
+    assert!(!case.check(&policy).errors.is_empty());
+    policy.safe_outputs.others.insert(
+        kind.into(),
+        OutputLimit {
+            max: 1,
+            fields: vec!["title".into(), "body".into()],
+            ..Default::default()
+        },
+    );
+    policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_mut()
+        .unwrap()
+        .fix_pull_request = Some(FixPullRequest {
+        author: "example-bot".into(),
+        snapshot_digest: None,
+    });
+    assert!(
+        case.check(&policy)
+            .errors
+            .iter()
+            .any(|error| error.contains("trusted snapshot"))
+    );
+    policy
+        .safe_outputs
+        .push_to_pull_request_branch
+        .as_mut()
+        .unwrap()
+        .fix_pull_request
+        .as_mut()
+        .unwrap()
+        .snapshot_digest = Some("a".repeat(64));
+    assert_eq!(case.check(&policy).errors, Vec::<String>::new());
+    let config = serde_json::to_value(&policy.safe_outputs).unwrap();
+    let config = config.as_object().unwrap();
+    for (spelling, extra) in [kind.to_owned(), kind.replace('_', "-")]
+        .into_iter()
+        .flat_map(|spelling| [(spelling.clone(), false), (spelling, true)])
+    {
+        let mut input = item.clone();
+        input["type"] = json!(spelling);
+        if extra {
+            // An unrecognized field is discarded by the collector,
+            // but must not be silently admitted as the scoped request.
+            input["head_sha"] = json!(HEAD);
+        }
+        let input = input.to_string();
+        let collected =
+            crate::collect::collect_bytes(input.as_bytes(), config, policy.forge, &|_| true)
+                .unwrap();
+        assert!(collected.errors.is_empty(), "{:?}", collected.errors);
+        let checked = check(
+            &Handback {
+                outputs: Some(input.as_bytes()),
+                base: None,
+                secondary_base: None,
+                replacement: None,
+                patches: BTreeMap::new(),
+            },
+            Collected {
+                items: collected.items,
+                errors: collected.errors,
+            },
+            &policy,
+            Trusted::default(),
+            &Fake::default(),
+            |_| vec![],
+        );
+        assert_eq!(
+            checked.errors.is_empty(),
+            !extra,
+            "{kind}: {:?}",
+            checked.errors
+        );
+    }
+    for (field, value) in [
+        ("repo", json!("example/other")),
+        ("pull_request_number", json!(43)),
+        ("pr", json!(42)),
+        ("body", json!(" ")),
+        ("head", json!(HEAD)),
+        ("draft", json!(false)),
+        ("body", json!("gh-aw-execution: forged")),
+        ("title", Value::Null),
+        ("operation", json!("append")),
+        ("body", json!("FiXeS: example/other#31")),
+        (
+            "body",
+            json!("Resolves\n<https://github.com/example/other/issues/31>"),
+        ),
+        ("body", json!("Closes #31")),
+    ] {
+        case.items[0] = item.clone();
+        case.items[0][field] = value;
+        assert!(
+            !case.check(&policy).errors.is_empty(),
+            "{kind} {field}: {:?}",
+            case.items
+        );
+    }
+    case.items = vec![item.clone(), item.clone()];
+    assert!(!case.check(&policy).errors.is_empty());
+    case.items = vec![item];
+    case.patches = Case::push("src/lib.rs").patches;
+    assert!(!case.check(&policy).errors.is_empty());
+}
+
+#[test]
 fn nested_gitlab_base_is_checked_against_the_full_path() {
     let mut policy = policy();
     policy.forge = Forge::Gitlab;

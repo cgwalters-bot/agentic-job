@@ -72,6 +72,8 @@ struct Made {
     #[serde(rename = "type")]
     kind: Option<String>,
     url: Option<String>,
+    #[serde(default)]
+    metadata: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,9 +162,11 @@ fn report(dir: &Path, run_url: &str, artifact_url: &str, links: &Links) -> Resul
         .iter()
         .chain(&applied.made)
         .filter(|made| {
-            made.kind
-                .as_deref()
-                .is_some_and(|kind| POSTED.contains(&kind))
+            made.kind.as_deref().is_some_and(|kind| {
+                POSTED.contains(&kind)
+                    || (kind == safe_outputs::check::fix_pull::UPDATE
+                        && made.metadata["scoped_fix_pr"] == true)
+            })
         })
         .find_map(|made| made.url.as_deref().filter(|url| !url.is_empty()));
     // A pull request's URL is taken even when empty, as `??` takes it.
@@ -391,6 +395,17 @@ mod tests {
             .iter()
             .find(|(key, _)| *key == name)
             .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn fix_pr_mutation_reports_the_destination_without_issuing_a_review_notice() {
+        let url = "https://github.com/owner/repo/pull/42";
+        let kind = safe_outputs::check::fix_pull::UPDATE;
+        let report = result(
+            json!({"made":[{"type":kind,"url":url,"metadata":{"scoped_fix_pr":true}}]}),
+            json!([{"type":kind}]),
+        );
+        assert_eq!(report.outputs, vec![("result-url", url.into())]);
     }
 
     fn linked(url: &str) -> String {

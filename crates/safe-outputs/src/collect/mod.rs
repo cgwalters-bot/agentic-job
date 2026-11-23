@@ -73,6 +73,10 @@ pub struct Collected {
     pub errors: Vec<String>,
 }
 
+pub(crate) fn normalize_type(kind: &str) -> String {
+    kind.replace('-', "_")
+}
+
 /// The longest text gh-aw's validator gives a sanitized field without a
 /// `maxLength` of its own (`MAX_BODY_LENGTH`).
 const MAX_BODY_LENGTH: usize = 65_000;
@@ -1658,7 +1662,7 @@ fn request(
 ) -> Result<Option<Map<String, Value>>, String> {
     let missing = || format!("Line {line}: Missing required 'type' field");
     let (kind, item) = match decode::frame(text) {
-        Ok(Request { kind, object }) if !kind.is_empty() => (kind.replace('-', "_"), object),
+        Ok(Request { kind, object }) if !kind.is_empty() => (normalize_type(&kind), object),
         Ok(_) | Err(Malformed::NotObject | Malformed::MissingType) => return Err(missing()),
         Err(Malformed::Json(err)) => return Err(format!("Line {line}: Invalid JSON - {err}")),
         Err(Malformed::TypeNotString(kind)) if truthy(&kind) => {

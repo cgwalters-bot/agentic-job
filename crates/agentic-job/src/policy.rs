@@ -540,6 +540,23 @@ impl Admit for Bounds {
         // one the bounds let a push go to, and `bases` does not say which.
         let push = types.contains(&PUSH_TO_PULL_REQUEST_BRANCH);
         let push_limit = limits.get(PUSH_TO_PULL_REQUEST_BRANCH);
+        let fix_pull_request = push_limit.zip(own_author).and_then(|(limit, author)| {
+            limit.allow_pr_text_update.then(|| FixPullRequest {
+                author: author.to_owned(),
+                snapshot_digest: None,
+            })
+        });
+        // A generic grant must not replace a scoped grant when the author
+        // does not match. Disallow combining the two mechanisms.
+        if push
+            && push_limit.is_some_and(|limit| limit.allow_pr_text_update)
+            && types.contains(&"update_pull_request")
+        {
+            errors.push(
+                "update_pull_request is derived from fix bounds, not a generic output for this run"
+                    .into(),
+            );
+        }
         let branches = match push_limit {
             Some(limit) if push => &limit.branches[..],
             _ => &self.bases[..],
@@ -673,6 +690,7 @@ impl Admit for Bounds {
             replacement_max_commits: 0,
             replacement_max_files: 0,
             own_author: None,
+            allow_pr_text_update: false,
             name: limits.get(output).and_then(|bound| bound.name.clone()),
             category: limits.get(output).and_then(|bound| bound.category.clone()),
             allowed_reasons: limits
@@ -733,6 +751,7 @@ impl Admit for Bounds {
                     .map_or(0, |bound| bound.replacement_max_files),
                 replacement_base: None,
                 author: own_author.filter(|_| by_author).map(str::to_owned),
+                fix_pull_request: fix_pull_request.clone(),
                 ready_when_complete: ready(PUSH_TO_PULL_REQUEST_BRANCH),
                 protected_files: protected_files(&self.unprotected_files, false),
                 protect_top_level_dot_folders: true,
@@ -748,6 +767,16 @@ impl Admit for Bounds {
                     !matches!(**output, CREATE_PULL_REQUEST | PUSH_TO_PULL_REQUEST_BRANCH)
                 })
                 .map(|output| ((*output).to_owned(), limit(output)))
+                .chain(fix_pull_request.map(|_| {
+                    (
+                        "update_pull_request".into(),
+                        OutputLimit {
+                            max: 1,
+                            fields: vec!["title".into(), "body".into()],
+                            ..Default::default()
+                        },
+                    )
+                }))
                 .collect(),
         };
         Ok(Policy {
@@ -4216,6 +4245,85 @@ max_patch_files = 10
     /// `agent-run-12`, at [`HEAD`].
     pub(crate) fn push_policy() -> Policy {
         push_bounds().compile(&push_request()).unwrap()
+    }
+
+    #[test]
+    fn fix_pr_outputs_are_derived_only_for_the_configured_author() {
+        use safe_outputs::check::fix_pull::{UPDATE, scope};
+        let mut bounds = push_bounds();
+        let push = bounds
+            .outputs_mut()
+            .unwrap()
+            .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
+            .unwrap();
+        push.own_author = Some("example-bot".into());
+        let req = Request {
+            pull_author: Some("Example-Bot"),
+            ..push_request()
+        };
+        for text in [false, true] {
+            let push = bounds
+                .outputs_mut()
+                .unwrap()
+                .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
+                .unwrap();
+            push.allow_pr_text_update = text;
+            bounds.validate().unwrap();
+            for (request, owned) in [
+                (req, true),
+                (
+                    Request {
+                        pull_author: Some("other"),
+                        ..req
+                    },
+                    false,
+                ),
+                (
+                    Request {
+                        pull_author: None,
+                        ..req
+                    },
+                    false,
+                ),
+            ] {
+                let policy = bounds.compile(&request).unwrap();
+                policy.validate().unwrap();
+                let allowed = text && owned;
+                assert_eq!(policy.safe_outputs.max_of(UPDATE), allowed.then_some(1));
+                assert_eq!(
+                    scope(&policy, UPDATE).map(|push| (push.target.as_str(), push.head.as_str())),
+                    allowed.then_some(("42", HEAD))
+                );
+                assert_eq!(
+                    scope(&policy, UPDATE)
+                        .and_then(|push| push.fix_pull_request.as_ref())
+                        .map(|fix| fix.author.as_str()),
+                    allowed.then_some("example-bot")
+                );
+                let common = intersect(policy.clone(), push_policy()).unwrap();
+                assert_eq!(common.safe_outputs.max_of(UPDATE), None);
+                let both = intersect(policy.clone(), policy.clone()).unwrap();
+                assert_eq!(both.safe_outputs, policy.safe_outputs);
+            }
+        }
+        let bypass = Request {
+            outputs: "push_to_pull_request_branch,update_pull_request",
+            ..req
+        };
+        assert!(
+            bounds
+                .compile(&bypass)
+                .unwrap_err()
+                .iter()
+                .any(|error| error.contains("derived from fix bounds"))
+        );
+        let push = bounds
+            .outputs_mut()
+            .unwrap()
+            .get_mut(PUSH_TO_PULL_REQUEST_BRANCH)
+            .unwrap();
+        push.own_author = None;
+        assert!(bounds.validate().is_err());
     }
 
     /// BOUNDS with its `[github]` outputs moved to the `[forgejo]` or

@@ -50,6 +50,9 @@ impl Command {
                 println!("head={}", pull.head);
                 println!("replacement-base={}", pull.base);
                 println!("author={}", pull.author);
+                if let Some(digest) = pull.snapshot_digest {
+                    println!("snapshot-digest={digest}");
+                }
             }
             Self::Target { args, policy } => {
                 let github =

@@ -817,6 +817,7 @@ jobs:
           PUSH_BRANCH: ${{ steps.push.outputs.branch }}
           PUSH_HEAD: ${{ steps.push.outputs.head }}
           PUSH_AUTHOR: ${{ steps.push.outputs.author }}
+          PUSH_SNAPSHOT_DIGEST: ${{ steps.push.outputs.snapshot-digest }}
           REPLACEMENT_BASE: ${{ steps.push.outputs.replacement-base }}
           OUTPUT_REPO: ${{ inputs.output-repo }}
           ITEM_REPO: ${{ inputs.item-repo }}
@@ -893,7 +894,10 @@ jobs:
             --base "$base" --stack-author "$STACK_AUTHOR" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json" ||
             { echo "::error::The request was refused; this step's log says why"; exit 1; }
           if [ -n "$PUSH_ITEM" ]; then
-            jq --arg base "$REPLACEMENT_BASE" '.safe_outputs.push_to_pull_request_branch.replacement_base = $base' "$JOB_DIR/policy.json" > "$JOB_DIR/policy-base.json"
+            jq --arg base "$REPLACEMENT_BASE" --arg digest "$PUSH_SNAPSHOT_DIGEST" '
+              .safe_outputs.push_to_pull_request_branch |= (.replacement_base = $base
+                | if .fix_pull_request then .fix_pull_request.snapshot_digest = $digest else . end)
+            ' "$JOB_DIR/policy.json" > "$JOB_DIR/policy-base.json"
             mv "$JOB_DIR/policy-base.json" "$JOB_DIR/policy.json"
           fi
           # An event's item is in the calling repository, but check and apply

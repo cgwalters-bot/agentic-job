@@ -1842,8 +1842,8 @@ branch that no longer holds the commit, leaves the comment unposted.
 The comment's SHA records what was verified before posting, not a
 guarantee that the branch still holds it. Besides these, the only write
 to a repository the bounds never listed is the run's status comment on
-that pull request, where the caller posts one (`notify`): no label,
-close or other comment. Apply reads the pull request again and refuses
+that pull request, where the caller posts one (`notify`), and an explicitly
+enabled [scoped fix PR text update](#scoped-fix-pr-text-updates). Apply reads the pull request again and refuses
 unless it is still by `author`, and `author` is the identity apply holds.
 The branch globs, replacement limits and every apply check below are those
 of any push. This stops a fix run admitted this way from pushing to a
@@ -1897,6 +1897,35 @@ logs a warning and applies the patch with `git am --3way` on the branch as it
 finds it, that push succeeds, and apply's last step fails after the commit is
 on the branch. The handler does not check the pull request's state; apply
 does, so a pull request closed before apply runs is not pushed to.
+
+#### Scoped fix PR text updates
+
+A GitHub fix run can replace the title and body of its own PR instead of
+pushing a commit. This is off by default. Set `allow_pr_text_update = true` under
+`[github.outputs.push_to_pull_request_branch]`, alongside `own_author`.
+If two bounds files apply, both must enable the update for the same author.
+Keep requesting the push output in the reusable workflow; policy derives the
+scoped grant instead of using repository-wide handler grants. The reusable
+policy workflow supplies the trusted PR snapshot from `push resolve`;
+the standalone `policy` command does not supply it on its own.
+
+Check accepts one update, no patch and no other outputs. The request must
+name the pinned PR via `repo` and `pull_request_number`. An update requires
+both `title` and `body` and accepts only replacement. A replacement cannot
+contain closing directives, even when quoted. If the original body contains a
+closing directive, the workflow withholds the snapshot needed by check. Report
+the needed edit for a person to make without breaking the existing issue linkage.
+Apply retains existing publication markers itself.
+
+Apply uses the checked repository and number, not handler fallback or
+agent-selected routing. It requires the applying PAT to name the PR author
+and refuses a closed PR or a change in author, head, source branch,
+destination branch or original text. GitHub does not provide an atomic
+precondition for this write: a concurrent update after the final read can
+still race. Role credentials are not supported for scoped text updates.
+
+An edit does not trigger a review or invalidate a head-only approval. Leave
+this disabled where the merge gate must enforce approval of the current text.
 
 ## The bounds and the policy
 

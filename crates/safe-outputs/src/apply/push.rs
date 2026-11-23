@@ -112,6 +112,28 @@ pub struct Resolved {
     /// The login that opened it, which bounds' `own_author` may admit in
     /// any repository.
     pub author: String,
+    pub snapshot_digest: Option<String>,
+}
+
+/// Bind the exact pre-run PR text and destination to the same resolve read.
+pub fn pull_snapshot_digest(pull: &Value) -> Option<String> {
+    let base = pull.get("base")?.get("ref")?.as_str()?;
+    if base.is_empty() {
+        return None;
+    }
+    let title = pull.get("title")?.as_str()?;
+    let body = pull.get("body")?;
+    if !body.is_null() && !body.is_string() {
+        return None;
+    }
+    let bytes = json!([base, title, body]).to_string();
+    let hash = ring::digest::digest(&ring::digest::SHA256, bytes.as_bytes());
+    Some(
+        hash.as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
 }
 
 pub fn resolve(github: &Github, args: &ResolveArgs, upstream: bool) -> Result<Resolved> {
@@ -160,6 +182,13 @@ pub fn resolve(github: &Github, args: &ResolveArgs, upstream: bool) -> Result<Re
         head: pull["head"]["sha"].as_str().unwrap_or_default().to_owned(),
         base: current_base(github, &args.repo, &pull, upstream)?,
         author: author.to_owned(),
+        // Withhold text-replacement authority for a linked body. A normal
+        // push does not need this digest and is still available.
+        snapshot_digest: (!pull["body"]
+            .as_str()
+            .is_some_and(crate::check::fix_pull::has_closing_directive))
+        .then(|| pull_snapshot_digest(&pull))
+        .flatten(),
     })
 }
 
@@ -1889,12 +1918,22 @@ mod tests {
             head: sha('a'),
             base: sha('c'),
             author: "carol".into(),
+            snapshot_digest: None,
         };
         // An app's pull request resolves, by no author a bound can name.
         let mut app = Case::new();
         app.edit(PULL, "user", json!({"login": "renovate[bot]"}));
         let (github, _requests) = forge(app.routes);
         assert_eq!(resolve(&github, &args(), false).unwrap().author, "");
+        for (body, eligible) in [("Details.", true), ("Details.\n\nCloses #31", false)] {
+            let mut case = Case::new();
+            case.edit(PULL, "title", json!("Fix"));
+            case.edit(PULL, "body", json!(body));
+            let (github, _) = forge(case.routes);
+            let snap = resolve(&github, &args(), false).unwrap();
+            assert_eq!(snap.snapshot_digest.is_some(), eligible);
+            assert_eq!(snap.head, resolved.head);
+        }
         type Edit = fn(&mut ResolveArgs, &mut Case);
         // (what, the request and forge, the error's words or none)
         let cases: Vec<(&str, Edit, Option<&str>)> = vec![

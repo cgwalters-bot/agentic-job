@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::contract::{
     DEFAULT_PROTECTED_FILES, ForgeAdmission, KB, MAX_PROTECTED_GLOBS, MAX_PULL_REQUESTS, Memory,
-    OutputLimit, PERSON_OUTPUTS, PLAIN_HTTP_PREFIX, Policy, REPO_RE, Secondary, TestEvidence,
+    OutputLimit, PERSON_OUTPUTS, PLAIN_HTTP_PREFIX, Policy, Push, REPO_RE, Secondary, TestEvidence,
     UPDATE_FIELDS, allows_http, check_comment_on_duplicate, check_commit_author,
     check_native_handlers, check_secondary, dotted, glob, validate_dot_folders, validate_protected,
 };
@@ -909,6 +909,10 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
     };
     // Both compiled the one request, so the pull request and head are to
     // agree; a pair that does not pins no single push.
+    let scoped = |push: &Option<Push>| push.as_ref().and_then(|push| push.fix_pull_request.clone());
+    let left = scoped(&policy.safe_outputs.push_to_pull_request_branch);
+    let right = scoped(&other.safe_outputs.push_to_pull_request_branch);
+    let scoped_update = left.is_some() || right.is_some();
     policy.safe_outputs.push_to_pull_request_branch = match (
         policy.safe_outputs.push_to_pull_request_branch,
         other.safe_outputs.push_to_pull_request_branch,
@@ -932,6 +936,11 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
             )]);
         }
         (Some(mut push), Some(bound)) => {
+            push.fix_pull_request = left.zip(right).and_then(|(left, right)| {
+                (left.author.eq_ignore_ascii_case(&right.author)
+                    && left.snapshot_digest == right.snapshot_digest)
+                    .then_some(left)
+            });
             // Where either file admitted the repository only by the pull
             // request's author, apply checks that author again.
             push.author = push.author.or_else(|| bound.author.clone());
@@ -962,6 +971,9 @@ pub fn intersect(mut policy: Policy, other: Policy) -> Result<Policy, Vec<String
         }
         _ => None,
     };
+    if scoped_update && scoped(&policy.safe_outputs.push_to_pull_request_branch).is_none() {
+        policy.safe_outputs.others.remove("update_pull_request");
+    }
     // Only where both files name the one destination alike, within the
     // tighter of each budget and the exemptions both make.
     policy.secondary_pull_request =

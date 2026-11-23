@@ -15,6 +15,7 @@
 //! checkpoint and memory) it asks the caller for, where they fall in the
 //! order of refusals.
 
+pub mod fix_pull;
 pub mod handler_limits;
 pub mod inline;
 pub mod links;
@@ -960,6 +961,23 @@ pub fn check(
         .map(|name| format!("unexpected file {name:?}"))
         .collect();
     drop_collectors_incomplete(&mut collected.items);
+    if fix_pull::scope(policy, fix_pull::UPDATE).is_some() {
+        let validate = || -> Result<()> {
+            if let Some(raw) = handback.outputs {
+                for mut request in crate::decode::decode(raw)? {
+                    let kind = crate::collect::normalize_type(&request.kind);
+                    if fix_pull::scope(policy, &kind).is_some() {
+                        request.object.insert("type".into(), Value::String(kind));
+                        fix_pull::request(&request.object, policy)?;
+                    }
+                }
+            }
+            Ok(())
+        };
+        if let Err(error) = validate() {
+            errors.push(format!("invalid raw fix PR request: {error}"));
+        }
+    }
     // Collection is lossy: a raw alias must not vanish before the reviewed
     // label reaches policy validation. Inspect the bounded original JSONL too.
     if policy.safe_outputs.others.contains_key("add_labels")
@@ -1030,6 +1048,17 @@ pub fn check(
         }
         Vec::new()
     };
+
+    for item in &items {
+        if fix_pull::scope(policy, item_type(item)).is_some() {
+            if items.len() != 1 || !handback.patches.is_empty() {
+                errors.push("a scoped fix PR action must be the only output, with no patch".into());
+            }
+            if let Err(error) = fix_pull::request(item, policy) {
+                errors.push(error.to_string());
+            }
+        }
+    }
 
     // The collector counts each type against the configuration it was
     // given. Counting again costs nothing and shows a collector that was

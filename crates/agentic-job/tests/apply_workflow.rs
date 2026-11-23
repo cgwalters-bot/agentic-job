@@ -17,6 +17,58 @@ const TRIAL: &str =
 const BIN: &str = env!("CARGO_BIN_EXE_agentic-job");
 
 #[test]
+fn fix_pr_policy_routes_the_batch_through_native_publication() {
+    let doc = definition("apply.yml");
+    let native = step(&doc, "apply", "Publish the outputs routed to agentic-job");
+    assert!(
+        native["if"]
+            .as_str()
+            .unwrap()
+            .contains("steps.route.outputs.native == 'true'")
+    );
+    assert!(
+        native["run"]
+            .as_str()
+            .unwrap()
+            .contains("--remainder \"$GH_AW_TMP/gh-aw-output.json\"")
+    );
+    let fallback = step(&doc, "apply", "Apply the outputs with gh-aw's handlers");
+    assert_eq!(
+        fallback["env"]["GH_AW_AGENT_OUTPUT"].as_str(),
+        Some(
+            "${{ env.GH_AW_TMP }}/${{ steps.route.outputs.native == 'true' && 'gh-aw-output.json' || 'agent_output.json' }}"
+        )
+    );
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path();
+    let output = path.join("output");
+    for (scope, expected) in [
+        (Value::Null, "native=false\n"),
+        (json!({"author":"example-bot"}), "native=true\n"),
+    ] {
+        json_file(
+            path,
+            "policy.json",
+            &json!({"safe_outputs":{"push_to_pull_request_branch":{"fix_pull_request":scope}}}),
+        );
+        fs::write(&output, "").unwrap();
+        status(
+            &run_step(
+                path,
+                "Which outputs agentic-job publishes",
+                &[
+                    ("GH_AW_TMP", path.to_str().unwrap()),
+                    ("GITHUB_OUTPUT", output.to_str().unwrap()),
+                ],
+            ),
+            0,
+        );
+        assert_eq!(fs::read_to_string(&output).unwrap(), expected);
+    }
+}
+
+#[test]
 fn staged_apply_skips_credential_steps_and_defaults_off() {
     let doc = definition("apply.yml");
     let text = workflow("apply.yml");

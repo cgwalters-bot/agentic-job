@@ -64,6 +64,10 @@ pub fn run(args: &Args) -> Result<Exit> {
         for item in items {
             let output = item["type"].as_str().context("output has no type")?;
             ensure!(
+                safe_outputs::check::fix_pull::scope(&policy, output).is_none(),
+                "scoped fix PR actions require the applying user's PAT, not role credentials"
+            );
+            ensure!(
                 ["noop", "missing_data", "missing_tool"].contains(&output)
                     || (policy.native_handlers.iter().any(|native| native == output)
                         && crate::apply::publish::handler(output).is_some()),

@@ -603,6 +603,9 @@ pub struct OutputLimit {
     /// as for any push. Absent (the default), only `repos` admits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_author: Option<String>,
+    /// GitHub: allow a fix run to replace the text of its own PR, without a push.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_pr_text_update: bool,
     /// The one name a check run gets, from the bounds and never the agent:
     /// gh-aw's handler takes it from its configuration. Required for
     /// `create_check_run`, and only for it.
@@ -740,6 +743,11 @@ impl OutputLimit {
                  as one login, not {login:?}"
             );
         }
+        ensure!(
+            !self.allow_pr_text_update
+                || (output == PUSH_TO_PULL_REQUEST_BRANCH && self.own_author.is_some()),
+            "outputs.{output}: scoped PR text replacement requires push_to_pull_request_branch.own_author"
+        );
         // `allowed` and `blocked` are logins for a person output and labels
         // for the rest; the pins below are for one output each, whatever
         // the type, so neither branch returns before them.
@@ -1271,6 +1279,10 @@ pub struct Push {
     /// pull request is by this login and it is the identity apply holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// Independent of repository admission: even in listed repos these
+    /// text updates must target the configured author's exact PR and head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_pull_request: Option<FixPullRequest>,
     /// As [`PullRequest::ready_when_complete`]: apply marks the pull
     /// request ready after a complete push, a draft after a checkpoint.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1288,6 +1300,15 @@ pub struct Push {
     pub max_patch_size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_patch_files: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixPullRequest {
+    pub author: String,
+    /// Destination branch and text from the same read that pinned the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_digest: Option<String>,
 }
 
 /// What a patch may touch, whichever output carries it.
@@ -1678,6 +1699,21 @@ impl Policy {
                 push.author.is_none() || self.forge == Forge::Github,
                 "a push's author is supported only on GitHub"
             );
+            if let Some(fix) = &push.fix_pull_request {
+                ensure!(
+                    self.forge == Forge::Github
+                        && is_login(&fix.author)
+                        && push
+                            .author
+                            .as_ref()
+                            .is_none_or(|author| author.eq_ignore_ascii_case(&fix.author)),
+                    "invalid scoped fix PR authority"
+                );
+                ensure!(
+                    self.safe_outputs.max_of("update_pull_request") == Some(1),
+                    "invalid scoped update_pull_request bound"
+                );
+            }
             ensure!(
                 PULL_NUMBER_RE.is_match(&push.target) && COMMIT_RE.is_match(&push.head),
                 "a push to no single pull request and commit"
