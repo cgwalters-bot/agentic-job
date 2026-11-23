@@ -1180,7 +1180,7 @@ fn a_secondary_pull_request_is_admitted_beside_the_runs_own() {
     std::fs::write(
         &allow,
         format!(
-            "{text}\n[github.secondary_pull_request]\nrepo = \"example-org/example-tool\"\n\
+            "{text}\n[github.secondary_pull_request]\nrepo = \"example-tools/example-tool\"\n\
              base = \"main\"\nbranch_prefix = \"agentic-job/\"\nmax = 1\n\
              max_patch_bytes = 65536\nmax_patch_files = 10\n"
         ),
@@ -1191,7 +1191,7 @@ fn a_secondary_pull_request_is_admitted_beside_the_runs_own() {
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        printed["secondary_pull_request"]["repo"], "example-org/example-tool",
+        printed["secondary_pull_request"]["repo"], "example-tools/example-tool",
         "{printed}"
     );
     let output = policy(&allow, &[("--outputs", "add_comment,noop")]);
