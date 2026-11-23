@@ -2591,6 +2591,8 @@ It logs the run ID, artifact ID, head SHA and source digest after verification.
 (bootstrap `BUILD_COMMIT`) restricts selection to a successful main push at
 that commit for hand rollback; unset it to resume latest-main selection.
 The pin must still have a retained artifact. No per-commit pin PR is needed.
+A review call (`review: true`, or dispatch kind `review`) ignores both
+variables, so a caller's pinned review source always runs its own binary.
 
 The artifact has exactly six files: `release.json`, `provenance.jsonl`, the three
 `*-x86_64-unknown-linux-musl` binaries and `world_write.bpf.o`. The ZIP is limited

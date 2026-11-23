@@ -9147,3 +9147,56 @@ fn the_shipped_dispatch_setups_hand_back_through_a_fake_agent_session() {
         }
     }
 }
+
+/// A review runs the binary for the called source: the caller-wide
+/// main-artifact selection, which would run a newer binary than the
+/// caller pinned, reaches binary.sh only for other calls, as before.
+#[test]
+fn review_calls_ignore_the_callers_artifact_selection() {
+    let pin = "a".repeat(40);
+    for (file, review, other) in [
+        (
+            "policy.yml",
+            ("inputs.review", Expr::Bool(true)),
+            ("inputs.review", Expr::Bool(false)),
+        ),
+        (
+            "dispatch.yml",
+            ("inputs.kind", Expr::text("review")),
+            ("inputs.kind", Expr::text("implement")),
+        ),
+    ] {
+        let doc = definition(file);
+        let env = &named_step(&doc, "Get the binary")["env"];
+        for (artifacts, commit) in [
+            (None, None),
+            (Some("true"), None),
+            (None, Some(pin.as_str())),
+            (Some("true"), Some(pin.as_str())),
+            (Some("false"), Some(pin.as_str())),
+        ] {
+            for (call, is_review) in [(&review, true), (&other, false)] {
+                let mut context = vec![call.clone()];
+                if let Some(value) = artifacts {
+                    context.push(("vars.SOURCE_BUILD_ARTIFACTS", Expr::text(value)));
+                }
+                if let Some(value) = commit {
+                    context.push(("vars.SOURCE_BUILD_COMMIT", Expr::text(value)));
+                }
+                let render = |key: &str| evaluate(expression(&env[key]), &context).render();
+                let case = format!("{file} {call:?} {artifacts:?} {commit:?}");
+                let (want_artifacts, want_commit) = if is_review {
+                    (false, "")
+                } else {
+                    (artifacts == Some("true"), commit.unwrap_or(""))
+                };
+                assert_eq!(
+                    render("BUILD_ARTIFACTS"),
+                    want_artifacts.to_string(),
+                    "{case}"
+                );
+                assert_eq!(render("BUILD_COMMIT"), want_commit, "{case}");
+            }
+        }
+    }
+}

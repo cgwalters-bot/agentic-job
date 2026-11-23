@@ -88,6 +88,8 @@ successful main push's attested `pin.yml` workflow artifact in policy and dispat
 (off by default). `SOURCE_BUILD_COMMIT=FULL_SHA` restricts that selection for hand
 rollback; the artifact must still be retained. Unlike legacy source-addressed
 fetching, this deliberately permits a binary newer than the workflow checkout.
+Review calls (`review: true`, or dispatch kind `review`) ignore both variables
+and always run the binary for the called source.
 It replaces the unused opt-in `SOURCE_BUILD_OCI` transport. It does not change
 `build-binary`, version pins or the trusted publisher identity. See
 [binary distribution](workflow.md#where-the-binary-comes-from).

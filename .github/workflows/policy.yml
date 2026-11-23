@@ -636,13 +636,15 @@ jobs:
       # at this commit, when that release was built from this commit's
       # source; a build of that source otherwise, or when the caller says
       # so. The action that secures a host gets its binary the same way,
-      # with the same script, which says why no cache is used.
+      # with the same script, which says why no cache is used. A review
+      # ignores the caller-wide main-artifact selection: a caller pins a
+      # review's source, which a newer main binary would otherwise replace.
       - name: Get the binary
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD: ${{ inputs.build-binary }}
-          BUILD_ARTIFACTS: ${{ vars.SOURCE_BUILD_ARTIFACTS == 'true' }}
-          BUILD_COMMIT: ${{ vars.SOURCE_BUILD_COMMIT }}
+          BUILD_ARTIFACTS: ${{ !inputs.review && vars.SOURCE_BUILD_ARTIFACTS == 'true' }}
+          BUILD_COMMIT: ${{ !inputs.review && vars.SOURCE_BUILD_COMMIT || '' }}
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
           # Read the new ref field at runtime: pinned actionlint's job schema
           # predates it. Do not broaden the unknown-property lint suppression.

@@ -146,12 +146,13 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .agentic-job-source
           persist-credentials: false
+      # A review takes this source's binary, as policy's does.
       - name: Get the binary
         env:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          BUILD_ARTIFACTS: ${{ vars.SOURCE_BUILD_ARTIFACTS == 'true' }}
-          BUILD_COMMIT: ${{ vars.SOURCE_BUILD_COMMIT }}
+          BUILD_ARTIFACTS: ${{ inputs.kind != 'review' && vars.SOURCE_BUILD_ARTIFACTS == 'true' }}
+          BUILD_COMMIT: ${{ inputs.kind != 'review' && vars.SOURCE_BUILD_COMMIT || '' }}
         run: bash .agentic-job-source/secure-host/binary.sh get --out "$RUNNER_TEMP/agentic-job-bin"
       # The checks, the item's read and the task: `agentic-job dispatch`.
       - id: target
