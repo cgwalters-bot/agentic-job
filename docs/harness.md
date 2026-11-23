@@ -401,6 +401,11 @@ stopped with nothing handed back exits 124, and `run` and the run action
 say `the agent timed out without handing back a result`. The budget
 cannot refuse a reply in advance, because no one knows its cost before it
 comes; `max-requests` is the cap that acts before a request is made.
+An agent that reports child sessions (opencode 2.x) can go on working
+after its prompt is answered, in turns that report no cost, so a task run
+with a `budget` whose agent advertises them fails before its first prompt,
+and one whose turn delegated to a child session fails when it ends (or
+stops on the budget, past a task allowance).
 
 `max-repeats` (off unless set, 2 to 100) is for an agent stuck making
 one tool call over and over: GLM agents have repeated one `gh api`

@@ -223,6 +223,22 @@ impl Tap {
         self.heard.subscribe()
     }
 
+    pub(super) fn children_running(&self) -> bool {
+        self.inner().digest.children_running()
+    }
+
+    pub(super) fn detached_turn(&self) -> bool {
+        self.inner().digest.detached_turn
+    }
+
+    pub(super) fn child_updates_enabled(&self) -> bool {
+        self.inner().digest.child_updates_enabled
+    }
+
+    pub(super) fn aic_budget(&self) -> bool {
+        self.limits.budget_aic.is_some()
+    }
+
     /// Whether a tool call other than a subagent's task has not finished.
     pub fn work_running(&self) -> bool {
         self.inner().digest.work_running()
@@ -252,6 +268,11 @@ impl Tap {
     /// Budget-ready task counts (total, configured workers), atomically.
     pub fn task_counts(&self, names: &[String]) -> (usize, usize) {
         self.inner().digest.task_counts(names)
+    }
+
+    pub(super) fn over_task_allowance(&self) -> Option<String> {
+        let (tasks, workers) = self.task_counts(&self.limits.worker_subagents);
+        self.limits.over_task_allowance(tasks, workers)
     }
 
     /// The agent's latest run of identical tool calls.

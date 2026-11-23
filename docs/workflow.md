@@ -1216,11 +1216,15 @@ not define, and opts into `apply-partial`, which inference does not need.
   run then has no request cap.
 
     OpenCode 2.x (`@opencode/cli`) is not a pinned agent, and installing it
-    through `npm` is not covered by the run's checks: gate admission does
-    not refuse a reused home holding its database (`opencode.db` or
-    `opencode.db-wal`), its ACP `subagent` calls are not counted against
-    `max-tasks` and `max-worker-tasks`, and the run kills the agent's process
-    group when the session ends, before a delayed child can return. The
+    through `npm` is not validated on a published host. Gate admission
+    does not refuse a reused home holding its database (`opencode.db`),
+    which keeps provider credentials beside the session state 1.x also
+    writes there, so enabling it needs managed disposable or inaccessible
+    credential storage first. A task run counts its child sessions'
+    `subagent` calls against `max-tasks` and `max-worker-tasks` and refuses
+    a `budget`. A child's report reaches the parent in a turn ACP never
+    ends, so a task run whose turn delegated to a child session fails
+    instead of handing back output the parent may still revise. The
     migration is tracked in
     [#4292](https://github.com/cgwalters-forge/agentic-job/issues/4292).
 

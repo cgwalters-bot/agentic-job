@@ -76,11 +76,11 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, HttpHeader, Implementation, InitializeRequest, McpServer,
-    McpServerHttp, NewSessionRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionId, SetSessionConfigOptionRequest, StopReason, TextContent,
+    CancelNotification, ClientCapabilities, ContentBlock, HttpHeader, Implementation,
+    InitializeRequest, McpServer, McpServerHttp, NewSessionRequest, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionId, SetSessionConfigOptionRequest, StopReason, TextContent,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Dispatch, Handled, Lines, UntypedMessage,
@@ -115,6 +115,9 @@ pub const RESULT_SCHEMA: &str = "bot-harness-result/v1";
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// How often the budget is checked.
 const BUDGET_TICK: Duration = Duration::from_millis(250);
+/// Why a task run whose turn detached through a child session fails.
+const DETACHED_DELEGATION: &str = "the agent delegated to a child session, whose report it \
+     handles after its turn has ended; a task run cannot tell when that work is done";
 /// An agent stuck before inference must not hold a runner for the full run timeout.
 const FIRST_REQUEST_DEADLINE: Duration = Duration::from_secs(5 * 60);
 /// How long an agent whose streams closed gets to exit, so that the
@@ -1326,8 +1329,9 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         stalls,
         resends,
     } = signals;
+    let one_shot = conversation.is_none();
     let (sid, model_option) = tokio::select! {
-        r = setup(&cx, task) => match r {
+        r = setup(&cx, task, one_shot, tap.aic_budget()) => match r {
             Ok(started) => started,
             Err(ended) => return ended,
         },
@@ -1398,6 +1402,9 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
                 // client's to go on from.
                 let failed = provider_failure(&r, task.rate_limit_code, tap);
                 let class = failed.as_ref().map(|(class, _)| *class);
+                if tap.detached_turn() {
+                    break Next::Answered(r, class);
+                }
                 // An overload that outlasted its waits has the agent
                 // switched to the fallback model, once, and the task sent
                 // again on it at once, the waits starting over. One the
@@ -1614,6 +1621,9 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
         Next::Answered(r, class) => {
             cancelling.store(false, Ordering::Relaxed);
             let ended = prompt_result(r, tap).with_class(class);
+            if ended.errored && tap.detached_turn() {
+                return ended;
+            }
             // A turn the client cancelled is the client's to go on from.
             if ended.errored && !client_cancelled {
                 // The session ends with the hand-back: a client's
@@ -1633,9 +1643,25 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
             let Some(talk) = conversation.take().filter(|_| goes_on) else {
                 // A conversation's client sees for itself what the
                 // agent left; a task run's turn is the run.
+                if one_shot
+                    && !client_cancelled
+                    && ended.outcome == Outcome::Success
+                    && let Some(finished) =
+                        finish_delegation(&link, &mut stop, task.hand_back_window).await
+                {
+                    return finished;
+                }
                 return match &task.output {
                     Some(check) if ended.outcome == Outcome::Success => {
-                        remind(&link, &mut stop, &mut nudges, check, ended).await
+                        remind(
+                            &link,
+                            &mut stop,
+                            &mut nudges,
+                            check,
+                            ended,
+                            task.hand_back_window,
+                        )
+                        .await
                     }
                     _ => ended,
                 };
@@ -1650,6 +1676,9 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
     };
 
     drop(restating);
+    if tap.children_running() || tap.detached_turn() {
+        return Ended::stopped(&why, false);
+    }
     // Near a limit: a notice queued now may never be read (a subagent
     // task can outlast the run), so the turn is interrupted, and what is
     // left of the budget is a turn in which the agent hands back.
@@ -1664,6 +1693,9 @@ async fn session(cx: ConnectionTo<Agent>, tap: &Tap, task: &Task<'_>, signals: S
             // run that took that for done ended well on the timeout with
             // nothing handed back (#2149). Without it, it hands back.
             ended if ended.outcome == Outcome::Success => {
+                if tap.children_running() || tap.detached_turn() {
+                    return Ended::stopped(&why, false);
+                }
                 let missing = match &task.output {
                     Some(check) => match has_output(check, &mut stop).await {
                         Ok(missing) => missing.is_some(),
@@ -1775,6 +1807,32 @@ fn into_turn(
     }
 }
 
+/// Native ACP delivers a child's report to the parent in a turn it never
+/// ends, after the child's status and possibly after the prompt's answer.
+/// Output on disk then may be provisional, and nothing says when the parent
+/// is done, so a task run whose turn detached fails rather than hand back
+/// what may be unfinished.
+async fn finish_delegation(
+    link: &Link<'_>,
+    stop: &mut watch::Receiver<Option<Stop>>,
+    window: Duration,
+) -> Option<Ended> {
+    if !link.tap.child_updates_enabled() {
+        return None;
+    }
+    let over = link.tap.over_task_allowance();
+    if link.tap.detached_turn() {
+        return Some(match over {
+            Some(used) => Ended::stopped(&Stop::Budget(used), false),
+            None => Ended::failure(DETACHED_DELEGATION.to_owned()),
+        });
+    }
+    // A short native turn can answer before the budget watcher's tick.
+    let used = over?;
+    let text = hand_back_text(&used, window);
+    Some(hand_back(link, stop, &Stop::Budget(used), text, window).await)
+}
+
 /// Near a limit, with no turn running: the agent's last turn, in which it
 /// hands back.
 async fn hand_back(
@@ -1784,6 +1842,9 @@ async fn hand_back(
     text: String,
     window: Duration,
 ) -> Ended {
+    if link.tap.children_running() || link.tap.detached_turn() {
+        return Ended::stopped(why, false);
+    }
     let Link {
         cx,
         tap,
@@ -1803,7 +1864,7 @@ async fn hand_back(
         _ = wait_stop(stop) => None,
     };
     let handed_back = match answer {
-        Some(r) => prompt_result(r, tap).outcome == Outcome::Success,
+        Some(r) => prompt_result(r, tap).outcome == Outcome::Success && !tap.detached_turn(),
         None => {
             tap.log(&["⚠ the agent didn't hand back in time".to_owned()]);
             let _ = cancel_turn(cx, sid, cancelling, response.as_mut()).await;
@@ -1976,6 +2037,7 @@ async fn remind(
     nudges: &mut mpsc::UnboundedReceiver<Nudge>,
     check: &OutputCheck,
     ended: Ended,
+    window: Duration,
 ) -> Ended {
     let reason = match has_output(check, stop).await {
         Ok(None) => return ended,
@@ -2032,6 +2094,12 @@ async fn remind(
     };
     if reminded.outcome != Outcome::Success {
         return reminded;
+    }
+    if let Some(finished) = finish_delegation(link, stop, window).await {
+        return Ended {
+            reminded: true,
+            ..finished
+        };
     }
     match has_output(check, stop).await {
         Ok(None) => reminded,
@@ -2284,10 +2352,13 @@ where
     };
     let (_, msg) = stopped(&why);
     tap.log(&[format!("⚠ {msg}")]);
+    if tap.children_running() || tap.detached_turn() {
+        return Ended::stopped(&why, false);
+    }
     let answer = cancel_turn(cx, sid, cancelling, turn).await;
     let ended = answer
         .map(|r| prompt_result(r, tap))
-        .filter(|ended| ended.outcome == Outcome::Success);
+        .filter(|ended| ended.outcome == Outcome::Success && !tap.detached_turn());
     // The turn had ended before the cancel reached it: spending is
     // reported after the fact, so the reply that crossed the limit is
     // usually the last one, and what the agent finished stands. Not
@@ -2315,18 +2386,45 @@ where
 async fn setup(
     cx: &ConnectionTo<Agent>,
     task: &Task<'_>,
+    one_shot: bool,
+    aic_budget: bool,
 ) -> Result<(SessionId, Option<ModelOption>), Ended> {
     let fail =
         |what: &str, e: agent_client_protocol::Error| Ended::failure(format!("{what} failed: {e}"));
     // fs and terminal are left unadvertised (the defaults), so agents use
     // their own tools inside the sandbox; ACP v2 drops them anyway.
-    let init = InitializeRequest::new(ProtocolVersion::V1)
+    let mut init = InitializeRequest::new(ProtocolVersion::V1)
         .client_info(Implementation::new(CLIENT_NAME, env!("CARGO_PKG_VERSION")));
+    if one_shot {
+        init = init.client_capabilities(ClientCapabilities::new().meta(Map::from_iter([(
+            digest::CHILD_UPDATES_CAPABILITY.to_owned(),
+            Value::Bool(true),
+        )])));
+    }
     let initialized = cx
         .send_request(init)
         .block_task()
         .await
         .map_err(|e| fail("initialize", e))?;
+    // Native ACP reports no cost for the parent's turn on a child's
+    // report, which can follow the prompt's answer, and a request cap
+    // does not bound cost: refuse before any work rather than after it.
+    if one_shot
+        && aic_budget
+        && initialized
+            .agent_capabilities
+            .meta
+            .as_ref()
+            .is_some_and(|meta| {
+                meta.get(digest::CHILD_UPDATES_CAPABILITY) == Some(&Value::Bool(true))
+            })
+    {
+        return Err(Ended::failure(
+            "the agent reports child sessions, whose background turns cannot be metered \
+             against the run's AIC budget"
+                .to_owned(),
+        ));
+    }
     // An agent that cannot take them would run without the tools the
     // task is about, or reach for them some other way.
     if !task.mcp_servers.is_empty() && !initialized.agent_capabilities.mcp_capabilities.http {

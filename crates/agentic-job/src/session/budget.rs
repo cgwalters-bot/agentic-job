@@ -122,6 +122,22 @@ impl Limits {
         let aic = cost_usd * AIC_PER_USD;
         (aic > budget).then(|| Stop::Budget(format!("over budget: spent {aic:.1} of {budget} AIC")))
     }
+
+    pub(super) fn over_task_allowance(&self, tasks: usize, workers: usize) -> Option<String> {
+        [
+            (
+                self.max_tasks,
+                tasks.saturating_sub(workers),
+                "subagent tasks",
+            ),
+            (self.max_worker_tasks, workers, "worker tasks"),
+        ]
+        .into_iter()
+        .find_map(|(cap, used, label)| {
+            cap.filter(|max| used > *max)
+                .map(|max| format!("started more than {max} {label}"))
+        })
+    }
 }
 
 /// Percent of a limit at which the agent is told to converge.
@@ -315,19 +331,8 @@ impl Budget {
             return None;
         }
         let window = self.hand_back_window();
-        for (cap, used, label) in [
-            (
-                self.limits.max_tasks,
-                u.tasks.saturating_sub(u.worker_tasks),
-                "subagent tasks",
-            ),
-            (self.limits.max_worker_tasks, u.worker_tasks, "worker tasks"),
-        ] {
-            let Some(max) = cap.filter(|max| used > *max) else {
-                continue;
-            };
+        if let Some(used) = self.limits.over_task_allowance(u.tasks, u.worker_tasks) {
             self.handing_back = true;
-            let used = format!("started more than {max} {label}");
             return Some(Signal::HandBack {
                 text: hand_back_text(&used, window),
                 why: Stop::Budget(used),

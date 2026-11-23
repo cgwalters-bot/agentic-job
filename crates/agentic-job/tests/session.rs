@@ -3178,6 +3178,228 @@ fn pending_worker_does_not_spend_the_review_allowance() {
     assert_eq!(r.result["handed_back"], false);
 }
 
+#[test]
+fn opencode_subagent_updates_spend_the_right_allowance() {
+    for (second_target, extra, outcome) in [
+        ("worker", None, "cannot tell when that work is done"),
+        ("worker", Some("worker"), "started more than 1 worker tasks"),
+        ("reviewer", None, "started more than 1 subagent tasks"),
+        ("", None, "started more than 1 subagent tasks"),
+    ] {
+        let envelope = |id: &str, update: Value| {
+            let key = if id.starts_with("child:") {
+                "child_update"
+            } else {
+                "update"
+            };
+            json!({(key): update})
+        };
+        let start = |id: &str| {
+            envelope(
+                id,
+                json!({"sessionUpdate": "tool_call", "toolCallId": id,
+                "name": "subagent", "title": "subagent", "kind": "think", "status": "pending", "rawInput": {}}),
+            )
+        };
+        let update = |id: &str, status: &str, input: Value| {
+            envelope(
+                id,
+                json!({"sessionUpdate": "tool_call_update", "toolCallId": id,
+                "status": status, "rawInput": input}),
+            )
+        };
+        let mut steps = vec![
+            start("one"),
+            update("one", "in_progress", json!({"agent": "reviewer"})),
+            update("one", "completed", json!({})),
+            json!({"child_status": {"id": "child", "status": "running"}}),
+            start("child:two"),
+            update("child:two", "in_progress", json!({})),
+            json!({"sleep": 0.6}), // A budget tick sees the call before its target.
+        ];
+        if !second_target.is_empty() {
+            steps.push(update(
+                "child:two",
+                "in_progress",
+                json!({"agent": second_target}),
+            ));
+        }
+        steps.push(update("child:two", "completed", json!({})));
+        if let Some(name) = extra {
+            steps.extend([
+                start("child:three"),
+                update("child:three", "in_progress", json!({"agent": name})),
+                update("child:three", "completed", json!({})),
+            ]);
+        }
+        steps.push(json!({"child_status": {"id": "child", "status": "completed"}}));
+        let script = json!(steps).to_string();
+        let r = run(
+            SCRIPT_MODE,
+            Setup {
+                files: &[("script.json", &script)],
+                timeout_s: 60,
+                max_tasks: Some(1),
+                max_worker_tasks: Some(1),
+                ..Setup::default()
+            },
+        );
+        // Within its allowances, the delegation still detached the turn.
+        let (code, result) = match outcome {
+            "cannot tell when that work is done" => (1, "failure"),
+            _ => (3, "budget"),
+        };
+        assert_result(&r, code, result);
+        assert!(
+            r.result["message"].as_str().unwrap().contains(outcome),
+            "{}",
+            r.result
+        );
+    }
+}
+
+#[test]
+fn opencode_detached_delegation_fails_a_task_run() {
+    const PROVISIONAL: &str =
+        r#"{"execute": {"title": "provisional", "command": "echo provisional > required"}},"#;
+    // The child finishes after the prompt's answer, or before it; required
+    // output may already hold a provisional result, or not be required.
+    for (delay, output) in [
+        (r#", "delay_ms": 750"#, Some("work/required")),
+        ("", Some("work/required")),
+        (r#", "delay_ms": 750"#, None),
+        ("", None),
+    ] {
+        let provisional = if output.is_some() { PROVISIONAL } else { "" };
+        let script = format!(
+            r#"[{provisional}
+              {{"child_status": {{"id": "child", "status": "created"}}}},
+              {{"child_status": {{"id": "child", "status": "running"}}}},
+              {{"child_status": {{"id": "child", "status": "completed"{delay}, "parent_output": "required"}}}}
+            ]"#
+        );
+        let r = run(
+            SCRIPT_MODE,
+            Setup {
+                files: &[("script.json", &script)],
+                timeout_s: 60,
+                output,
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, 1, "failure");
+        assert!(
+            r.result["message"]
+                .as_str()
+                .unwrap()
+                .contains("a task run cannot tell when that work is done"),
+            "{}",
+            r.result
+        );
+        assert_eq!(r.result["reminded"], false);
+        assert_eq!(
+            r.records
+                .iter()
+                .filter(|r| r["msg"]["method"] == "session/prompt")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn opencode_subagent_call_detaches_before_any_child_status() {
+    // The child's first status follows the prompt's answer.
+    const SCRIPT: &str = r#"[
+      {"update": {"sessionUpdate": "tool_call", "toolCallId": "one", "title": "subagent",
+        "kind": "think", "status": "pending", "rawInput": {"agent": "reviewer"}}},
+      {"update": {"sessionUpdate": "tool_call_update", "toolCallId": "one", "status": "completed"}},
+      {"child_status": {"id": "child", "status": "queued", "delay_ms": 750}}
+    ]"#;
+    let r = run(
+        SCRIPT_MODE,
+        Setup {
+            files: &[("script.json", SCRIPT)],
+            timeout_s: 60,
+            ..Setup::default()
+        },
+    );
+    assert_result(&r, 1, "failure");
+    assert!(
+        r.result["message"]
+            .as_str()
+            .unwrap()
+            .contains("a task run cannot tell when that work is done"),
+        "{}",
+        r.result
+    );
+}
+
+#[test]
+fn opencode_detached_child_does_not_outlive_a_task_run() {
+    const SCRIPT: &str = r#"[
+      {"execute": {"title": "child process", "command": "sleep 60 >/dev/null 2>&1 </dev/null & echo $! > child-pid"}},
+      {"child_status": {"id": "child", "status": "running"}}
+    ]"#;
+    let r = run(
+        SCRIPT_MODE,
+        Setup {
+            files: &[("script.json", SCRIPT)],
+            timeout_s: 60,
+            ..Setup::default()
+        },
+    );
+    // The run ends at the prompt's answer, not when the child does.
+    assert_result(&r, 1, "failure");
+    assert_eq!(r.result["handed_back"], false);
+    assert!(
+        r.records
+            .iter()
+            .any(|r| r["msg"]["result"]["stopReason"] == "end_turn")
+    );
+    let pid = std::fs::read_to_string(r.path("work").join("child-pid")).unwrap();
+    assert!(!session::process::is_running(pid.trim().parse().unwrap()));
+    assert_eq!(
+        r.records
+            .iter()
+            .filter(|r| r["msg"]["method"] == "session/prompt")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn opencode_refuses_an_aic_budget_before_delegating() {
+    const SCRIPT: &str = r#"[{"child_status": {"id": "child", "status": "completed"}}]"#;
+    // A request cap does not meter cost.
+    for count_requests in [false, true] {
+        let r = run(
+            SCRIPT_MODE,
+            Setup {
+                files: &[("script.json", SCRIPT)],
+                timeout_s: 60,
+                budget_aic: Some(1.0),
+                count_requests,
+                ..Setup::default()
+            },
+        );
+        assert_result(&r, 1, "failure");
+        assert!(
+            r.result["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot be metered against the run's AIC budget"),
+            "{}",
+            r.result
+        );
+        assert!(
+            !r.records
+                .iter()
+                .any(|r| r["msg"]["method"] == "session/prompt")
+        );
+    }
+}
+
 /// A process the agent leaves in its group does not outlive the session;
 /// one that left its session and process group does, since the agent is
 /// this user and nothing kills every process of it (agentic-job#2989).

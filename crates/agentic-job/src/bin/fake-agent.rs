@@ -90,7 +90,7 @@ use std::time::{Duration, Instant};
 
 use agentic_job::run::agent::{FAKE_LOG_DIR, GITHUB_TOKEN_VAR};
 use agentic_job::run::launch::github_token;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -134,6 +134,8 @@ const INTERNAL_ERROR: i32 = -32603;
 const RATE_LIMIT_ERROR: i32 = -31001;
 const END_TURN: &str = "end_turn";
 const CANCELLED: &str = "cancelled";
+/// How long after a child's status its parent writes its output.
+const PARENT_REACTION_DELAY: Duration = Duration::from_millis(750);
 /// How often a `sleep` step looks for a cancel.
 const SLEEP_SLICE: Duration = Duration::from_millis(50);
 /// What a later prompt turn says without a script of its own.
@@ -168,6 +170,16 @@ enum Step {
     TaskPending(String),
     /// Replay native ACP tool-call transitions, including streamed arguments.
     Update(Value),
+    ChildUpdate(Value),
+    /// A child session's status, sent `delay_ms` later in the background
+    /// if given; the parent then reacts to its report outside the turn,
+    /// writing `parent_output`.
+    ChildStatus {
+        id: String,
+        status: String,
+        delay_ms: Option<u64>,
+        parent_output: Option<String>,
+    },
     Compact,
     Context {
         used: u64,
@@ -316,6 +328,10 @@ impl Conn {
     }
 
     fn send(&self, msg: Value) {
+        Self::write_message(msg);
+    }
+
+    fn write_message(msg: Value) {
         let mut out = std::io::stdout().lock();
         // The client closing the pipe ends the run anyway.
         let _ = writeln!(out, "{msg}").and_then(|()| out.flush());
@@ -410,10 +426,20 @@ fn serve(conn: &mut Conn, mode: &Mode) -> Result<()> {
                     continue;
                 }
                 let http = !matches!(mode, Mode::NoMcp(_));
+                let child_updates = matches!(mode, Mode::Script(first, later) if first.iter().chain(later).any(|step| {
+                    matches!(step, Step::ChildStatus { .. } | Step::ChildUpdate(_))
+                }));
+                ensure!(
+                    !child_updates
+                        || msg["params"]["clientCapabilities"]["_meta"]["opencode/child-session-updates"]
+                            == true,
+                    "client did not request child updates"
+                );
                 conn.respond(
                     &id,
                     json!({"protocolVersion": 1,
-                        "agentCapabilities": {"mcpCapabilities": {"http": http}},
+                        "agentCapabilities": {"mcpCapabilities": {"http": http},
+                            "_meta": {"opencode/child-session-updates": child_updates}},
                         "agentInfo": {"name": NAME, "version": env!("CARGO_PKG_VERSION")}}),
                 );
             }
@@ -592,6 +618,48 @@ fn play(
             conn.update(update.clone());
             return Ok(());
         }
+        Step::ChildUpdate(update) => {
+            conn.send(
+                json!({"jsonrpc": "2.0", "method": "opencode/session/child_update",
+                "params": {"rootSessionId": SESSION, "childSessionId": "child",
+                    "parentSessionId": SESSION, "depth": 1, "type": "update", "update": update}}),
+            );
+            return Ok(());
+        }
+        Step::ChildStatus {
+            id,
+            status,
+            delay_ms,
+            parent_output,
+        } => {
+            let message = json!({"jsonrpc": "2.0", "method": "opencode/session/child_update",
+                "params": {"rootSessionId": SESSION, "childSessionId": id,
+                    "parentSessionId": SESSION, "depth": 1, "type": "status", "status": status}});
+            let late = match delay_ms {
+                Some(delay) => Some((Duration::from_millis(*delay), message)),
+                None => {
+                    conn.send(message);
+                    None
+                }
+            };
+            let output = parent_output.as_ref().map(|path| cwd.join(path));
+            if late.is_some() || output.is_some() {
+                std::thread::spawn(move || {
+                    if let Some((delay, message)) = late {
+                        std::thread::sleep(delay);
+                        Conn::write_message(message);
+                    }
+                    if let Some(path) = output {
+                        std::thread::sleep(PARENT_REACTION_DELAY);
+                        Conn::write_message(json!({"jsonrpc": "2.0", "method": "session/update",
+                            "params": {"sessionId": SESSION, "update": {"sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": "parent received the child report"}}}}));
+                        let _ = std::fs::write(path, "parent output\n");
+                    }
+                });
+            }
+            return Ok(());
+        }
         Step::Cost { usd } => {
             conn.update(cost_update(*usd));
             return Ok(());
@@ -738,6 +806,8 @@ fn play(
         | Step::Cost { .. }
         | Step::Task(_)
         | Step::TaskPending(_)
+        | Step::ChildStatus { .. }
+        | Step::ChildUpdate(_)
         | Step::Update(_)
         | Step::Compact
         | Step::Context { .. }

@@ -5,7 +5,7 @@
 //! `acp.jsonl`.
 
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::budget::Repeats;
 use super::permission::{self, PATH_KEYS};
@@ -18,6 +18,9 @@ pub const EDIT_KINDS: &[&str] = &["edit", "delete", "move"];
 /// The tools that start a subagent, lowercase: opencode's `task`, and
 /// Claude Code's `Task`, since renamed `Agent`.
 const TASK_TOOLS: &[&str] = &["task", "agent"];
+const OPENCODE_SUBAGENT: &str = "subagent";
+pub(super) const CHILD_UPDATES_CAPABILITY: &str = "opencode/child-session-updates";
+const CHILD_UPDATE: &str = "opencode/session/child_update";
 /// The kinds both report one as; a shell command that happens to be
 /// titled "task" is not one.
 const TASK_KINDS: &[&str] = &["think", "other", ""];
@@ -55,8 +58,12 @@ pub struct ToolCall {
     /// The title the call started with: some agents (opencode) put the
     /// tool's name there.
     first_title: String,
-    /// It starts a subagent (TASK_TOOLS), as it was when first seen.
+    /// It starts a subagent.
     task: bool,
+    /// OpenCode 2.x may publish an in-progress update before its arguments
+    /// arrive. Keep the target across updates that omit it.
+    opencode_subagent: bool,
+    subagent_target: Option<String>,
     pending: bool,
     raw_input: Value,
     raw_output: Value,
@@ -71,17 +78,17 @@ pub struct Denial {
 }
 
 impl Digest {
-    /// With workers enabled, a pending task's streamed arguments do not yet
-    /// say which allowance it spends. Charge it once it starts or finishes,
-    /// including failed calls with absent/unknown targets. Legacy runs retain
-    /// their original immediate counting behavior.
+    /// With workers enabled, don't charge streamed arguments against the
+    /// wrong allowance while the target is still arriving. Charge a terminal
+    /// call with no target to the review/other allowance. Legacy task starts
+    /// without a worker split retain their immediate accounting.
     pub fn task_counts(&self, names: &[String]) -> (usize, usize) {
         let tasks = if names.is_empty() {
             self.tasks
         } else {
             self.calls
                 .iter()
-                .filter(|call| call.task && !call.pending)
+                .filter(|call| call.chargeable_task())
                 .count()
         };
         (tasks, self.worker_tasks(names))
@@ -91,13 +98,18 @@ impl Digest {
         self.calls
             .iter()
             .filter(|call| {
-                call.task
-                    && !call.pending
-                    && ["subagent_type", "agent", "agent_name"].iter().any(|key| {
-                        call.raw_input[*key]
-                            .as_str()
-                            .is_some_and(|name| names.iter().any(|n| n == name))
-                    })
+                call.chargeable_task()
+                    && if call.opencode_subagent {
+                        call.subagent_target
+                            .as_ref()
+                            .is_some_and(|name| names.contains(name))
+                    } else {
+                        ["subagent_type", "agent", "agent_name"].iter().any(|key| {
+                            call.raw_input[*key]
+                                .as_str()
+                                .is_some_and(|name| names.iter().any(|n| n == name))
+                        })
+                    }
             })
             .count()
     }
@@ -130,6 +142,16 @@ pub struct Digest {
     pub denied: Vec<Denial>,
     /// The subagent tasks the agent started (TASK_TOOLS).
     pub tasks: usize,
+    child_updates_requested: bool,
+    pub(super) child_updates_enabled: bool,
+    /// OpenCode 2.x's tool call can finish before the child itself does.
+    active_children: HashSet<String>,
+    /// A child has reported a status. Its report reaches the parent after
+    /// its terminal status, possibly after the explicit prompt has answered.
+    children_seen: bool,
+    /// The explicit prompt has answered, but ACP does not report the end
+    /// of the implicit parent turn that processes the child's report.
+    pub(super) detached_turn: bool,
     /// The latest run of finished tool calls that were the same call
     /// with the same result, for `limits.max-repeats`.
     pub repeats: Repeats,
@@ -243,6 +265,8 @@ impl ToolCall {
             title: String::new(),
             first_title: String::new(),
             task: false,
+            opencode_subagent: false,
+            subagent_target: None,
             pending: false,
             raw_input: Value::Null,
             raw_output: Value::Null,
@@ -281,6 +305,12 @@ impl ToolCall {
         {
             self.name = n.to_owned();
         }
+    }
+
+    fn chargeable_task(&self) -> bool {
+        self.task
+            && (self.end.is_some()
+                || (!self.pending && (!self.opencode_subagent || self.subagent_target.is_some())))
     }
 
     fn finish_summary(&mut self, cwd: &str) {
@@ -338,6 +368,11 @@ impl Digest {
                     self.sent.insert(id_key(id), m.to_owned());
                 }
                 match m {
+                    "initialize" => {
+                        self.child_updates_requested = msg["params"]["clientCapabilities"]["_meta"]
+                            [CHILD_UPDATES_CAPABILITY]
+                            == true;
+                    }
                     "session/new" => {
                         if let Some(cwd) = msg["params"]["cwd"].as_str() {
                             self.cwd = cwd.to_owned();
@@ -383,6 +418,8 @@ impl Digest {
                 }
                 if m == "session/update" {
                     self.update(ts, &msg["params"]["update"], &mut out);
+                } else if m == CHILD_UPDATE && id.is_none() {
+                    self.child_update(ts, &msg["params"], &mut out);
                 }
             }
             // The agent's response to a request of the harness's.
@@ -394,6 +431,56 @@ impl Digest {
             _ => {}
         }
         out
+    }
+
+    fn child_update(&mut self, ts: f64, params: &Value, out: &mut Vec<String>) {
+        if !self.child_updates_enabled
+            || !self
+                .session_id
+                .as_deref()
+                .is_some_and(|id| params["rootSessionId"] == id)
+        {
+            return;
+        }
+        let Some(child) = params["childSessionId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        if params["type"] == "update" {
+            let update = &params["update"];
+            // Native projects child tool IDs into the root's namespace.
+            // Do not treat child text or usage as the parent's.
+            if matches!(
+                update["sessionUpdate"].as_str(),
+                Some("tool_call" | "tool_call_update")
+            ) && update["toolCallId"].as_str().is_some_and(|id| {
+                id.strip_prefix(child)
+                    .is_some_and(|suffix| suffix.starts_with(':'))
+            }) {
+                self.tool_update(ts, update, update["sessionUpdate"] == "tool_call", out);
+            }
+            return;
+        }
+        if params["type"] != "status" {
+            return;
+        }
+        // Any status, even one not known here, means a child exists.
+        self.children_seen = true;
+        match params["status"].as_str() {
+            Some("created" | "running") => {
+                self.active_children.insert(child.to_owned());
+            }
+            Some("completed" | "failed" | "interrupted") => {
+                self.active_children.remove(child);
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn children_running(&self) -> bool {
+        !self.active_children.is_empty()
     }
 
     /// Logs what's left at the end of the session.
@@ -458,6 +545,17 @@ impl Digest {
             }
             return;
         }
+        // A child that finished before this answer can still have its
+        // report processed after it, so either order detaches the turn. A
+        // child's first status can also follow the answer: the parent's
+        // `subagent` call says one was started.
+        if method == "session/prompt"
+            && (self.children_seen
+                || (self.child_updates_enabled
+                    && self.calls.iter().any(|call| call.opencode_subagent)))
+        {
+            self.detached_turn = true;
+        }
         if let Some(e) = msg.get("error") {
             let text = e["message"].as_str().unwrap_or("unknown error");
             let line = cut(&format!("{method} failed: {text}"));
@@ -468,6 +566,8 @@ impl Digest {
         let result = &msg["result"];
         match method {
             "initialize" => {
+                self.child_updates_enabled = self.child_updates_requested
+                    && result["agentCapabilities"]["_meta"][CHILD_UPDATES_CAPABILITY] == true;
                 self.protocol_version = result["protocolVersion"].as_u64();
                 let info = &result["agentInfo"];
                 self.agent = info["name"]
@@ -533,30 +633,10 @@ impl Digest {
             }
             "tool_call" => {
                 self.new_message();
-                let id = update["toolCallId"].as_str().unwrap_or_default().to_owned();
-                // A repeated tool_call updates the one already seen.
-                let new = !self.index.contains_key(&id);
-                let i = *self.index.entry(id.clone()).or_insert_with(|| {
-                    self.calls.push(ToolCall::new(id, ts));
-                    self.calls.len() - 1
-                });
-                self.calls[i].merge(update);
-                let call = &mut self.calls[i];
-                if new
-                    && TASK_TOOLS.contains(&call.display_name().to_ascii_lowercase().as_str())
-                    && TASK_KINDS.contains(&call.kind.as_str())
-                {
-                    call.task = true;
-                    self.tasks += 1;
-                }
-                self.tool_status(i, ts, update, out);
+                self.tool_update(ts, update, true, out);
             }
             "tool_call_update" => {
-                let id = update["toolCallId"].as_str().unwrap_or_default();
-                if let Some(&i) = self.index.get(id) {
-                    self.calls[i].merge(update);
-                    self.tool_status(i, ts, update, out);
-                }
+                self.tool_update(ts, update, false, out);
             }
             "usage_update" => {
                 // The budget is in AIC, so only a cost in USD counts.
@@ -574,6 +654,44 @@ impl Digest {
                 out.push(format!("plan: {n} entries"));
             }
             _ => {}
+        }
+    }
+
+    fn tool_update(&mut self, ts: f64, update: &Value, start: bool, out: &mut Vec<String>) {
+        let id = update["toolCallId"].as_str().unwrap_or_default();
+        let (i, new) = match self.index.get(id) {
+            Some(&i) => (i, false),
+            None if start => {
+                let i = self.calls.len();
+                self.index.insert(id.to_owned(), i);
+                self.calls.push(ToolCall::new(id.to_owned(), ts));
+                (i, true)
+            }
+            None => return,
+        };
+        self.merge_tool(i, update, new);
+        self.tool_status(i, ts, update, out);
+    }
+
+    fn merge_tool(&mut self, i: usize, update: &Value, new: bool) {
+        let call = &mut self.calls[i];
+        call.merge(update);
+        let name = call.display_name().to_ascii_lowercase();
+        if TASK_KINDS.contains(&call.kind.as_str()) {
+            call.opencode_subagent |= name == OPENCODE_SUBAGENT;
+            if !call.task
+                && (call.opencode_subagent || (new && TASK_TOOLS.contains(&name.as_str())))
+            {
+                call.task = true;
+                self.tasks += 1;
+            }
+        }
+        if call.opencode_subagent
+            && let Some(target) = update["rawInput"]["agent"]
+                .as_str()
+                .filter(|target| !target.is_empty())
+        {
+            call.subagent_target = Some(target.to_owned());
         }
     }
 
