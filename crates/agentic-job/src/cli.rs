@@ -90,8 +90,6 @@ pub enum Command {
     ExternalFetch(crate::external::Args),
     /// Refuse external apply unless this caller's trusted check and detection succeeded
     ExternalRelease(crate::external::ReleaseArgs),
-    /// Refuse an external upload whose staged files are not the receipted bytes check verified
-    ExternalStaged(crate::external::StagedArgs),
     /// Run one Testing Farm request and fetch its bounded hand-back, the token kept out of the request
     TestingFarmLaunch(crate::testing_farm::Args),
     /// Cancel the request a stopped testing-farm-launch left live, from its ID file
@@ -149,7 +147,6 @@ impl Command {
             Self::Dispatch(args) => crate::dispatch::run(args),
             Self::ExternalFetch(args) => crate::external::run(args),
             Self::ExternalRelease(args) => crate::external::release(args),
-            Self::ExternalStaged(args) => crate::external::staged(args),
             Self::TestingFarmLaunch(args) => crate::testing_farm::run(args),
             Self::TestingFarmCancel(args) => crate::testing_farm::cancel(args),
             Self::Review(command) => command.run(),

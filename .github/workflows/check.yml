@@ -291,7 +291,8 @@ jobs:
           set +e
           "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
             --base-secret-evidence "$JOB_DIR/public-base.json" \
-            --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" --run-id "$GITHUB_RUN_ID" "${destination[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+            --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" --run-id "$GITHUB_RUN_ID" \
+            --stage "$GH_AW_TMP" "${destination[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
           statuses=("${PIPESTATUS[@]}")
           set -e
           test "${statuses[1]}" = 0
@@ -320,27 +321,18 @@ jobs:
       # reads it from the report, with the policy beside it. Test evidence
       # check accepted goes too, every log of it (check refused any other):
       # the draft links this upload for it, and apply binds its tree.
-      # Copied by path after check read them, an external hand-back's files
-      # are held to the receipt again: apply's artifact digest vouches for
-      # what is uploaded, not for what check verified.
+      # check wrote the patches and evidence here itself (`--stage`), from
+      # the bytes it verified, an external hand-back's against its receipt:
+      # nothing is copied from the outputs by path after check read them,
+      # so apply's artifact digest vouches for what check verified.
       - name: Put the patch beside the ingested outputs
         if: ${{ success() && fromJSON(inputs.policy).expect-check-refusal != 'true' }}
-        env:
-          EXTERNAL_RUN: ${{ fromJSON(inputs.policy).external-run-id }}
         run: |
           jq --slurpfile policy "$JOB_DIR/policy.json" '($policy[0].secondary_pull_request.repo // null) as $repo |
             {items: [.items[] | select($repo == null or .type != "create_pull_request" or .repo != $repo)], errors: []}' \
             "$GH_AW_TMP/report.json" > "$RUNNER_TEMP/accepted.json"
           mv "$RUNNER_TEMP/accepted.json" "$GH_AW_TMP/agent_output.json"
           cp "$JOB_DIR/policy.json" "$GH_AW_TMP"
-          mkdir "$GH_AW_TMP/secondary"
-          patch=$(jq -r '.patch.file // empty' "$GH_AW_TMP/report.json")
-          [ -z "$patch" ] || cp "$JOB_DIR/safe-outputs/$patch" "$GH_AW_TMP"
-          secondary=$(jq -r '.secondary_patch.file // empty' "$GH_AW_TMP/report.json")
-          [ -z "$secondary" ] || cp "$JOB_DIR/safe-outputs/$secondary" "$GH_AW_TMP/secondary"
-          jq -e '.test_evidence == null' "$GH_AW_TMP/report.json" > /dev/null ||
-            cp "$JOB_DIR/safe-outputs/test-evidence.json" "$JOB_DIR"/safe-outputs/test-evidence-*.log "$GH_AW_TMP"
-          [ -z "$EXTERNAL_RUN" ] || "$JOB_DIR/agentic-job" external-staged --policy "$JOB_DIR/policy.json" --dir "$GH_AW_TMP"
       # A review's inline findings, for when apply posts its verdict as the
       # comment (review.yml submitted no review): in that comment's body
       # after the verdict line, not as a second review without a verdict

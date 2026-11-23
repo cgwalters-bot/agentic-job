@@ -75,85 +75,6 @@ pub struct ReleaseArgs {
     pub detection_result: String,
 }
 
-#[derive(Debug, clap::Args)]
-pub struct StagedArgs {
-    #[arg(long)]
-    pub policy: PathBuf,
-    /// check.yml's staging directory, as it uploads it: patches, replacement
-    /// and test evidence at the top, the secondary patch in `secondary/`
-    #[arg(long)]
-    pub dir: PathBuf,
-}
-
-/// Refuses an external upload whose staged hand-back files are not the bytes
-/// check verified. check.yml stages them by path after check read them, so a
-/// file replaced on the check runner in between would otherwise be uploaded
-/// with apply's artifact digest vouching for it. The names are held to the
-/// receipt before any file is opened, as check holds the outputs'.
-pub fn staged(args: &StagedArgs) -> Result<Exit> {
-    use crate::policy::Load;
-    let policy = Policy::load(&args.policy)?;
-    let external = policy
-        .external
-        .as_ref()
-        .context("external-staged requires an external policy")?;
-    // The upload's own patterns, not check's stricter names: whatever the
-    // upload would take is held to the receipt.
-    let staged = |name: &str| {
-        (name.starts_with("aw-") && name.ends_with(".patch"))
-            || (name.starts_with("test-evidence-") && name.ends_with(".log"))
-            || name == crate::check::replacement::REPLACEMENT_FILE
-            || name == crate::check::test_evidence::TEST_EVIDENCE_FILE
-    };
-    let mut files = Vec::new();
-    for name in list(&args.dir)? {
-        if staged(&name) {
-            files.push(args.dir.join(&name));
-        }
-    }
-    let secondary = args.dir.join("secondary");
-    if secondary.try_exists()? {
-        files.extend(list(&secondary)?.iter().map(|name| secondary.join(name)));
-    }
-    let name = |path: &Path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_owned()
-    };
-    for path in &files {
-        ensure!(
-            external.files.contains_key(&name(path)),
-            "staged {} is not in the external receipt",
-            path.display()
-        );
-    }
-    for path in &files {
-        let name = name(path);
-        let bytes = crate::files::read_regular(path, crate::check::max_bytes_of(&name, &policy))
-            .with_context(|| format!("staged {}", path.display()))?;
-        ensure!(
-            external.files.get(&name) == Some(&sha256(&bytes)),
-            "staged {} differs from the external receipt's digest",
-            path.display()
-        );
-    }
-    Ok(Exit::Success)
-}
-
-/// The names in DIR, each UTF-8.
-fn list(dir: &Path) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let name = entry?.file_name();
-        names.push(
-            name.into_string()
-                .map_err(|name| anyhow::anyhow!("staged file name {name:?} is not UTF-8"))?,
-        );
-    }
-    Ok(names)
-}
-
 /// Apply-only retries keep their original record and idempotency names, but
 /// another run or an earlier attempt cannot reuse the caller's policy.
 pub fn caller_policy(policy: &Policy) -> Result<()> {
@@ -428,7 +349,7 @@ fn hex(text: &str, len: usize) -> bool {
 }
 
 /// BYTES' digest as the Actions API and the receipt write one.
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     let hex: String = digest(&SHA256, bytes)
         .as_ref()
         .iter()

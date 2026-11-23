@@ -106,6 +106,23 @@ pub struct Args {
     /// `run`'s summary.md, checked into the report for apply to post
     #[arg(long, value_name = "FILE")]
     pub run_summary: Option<PathBuf>,
+    /// Write an accepted hand-back's patch, its secondary patch (in
+    /// `secondary/`) and its test evidence into DIR, for upload: the bytes
+    /// check verified, each a new file
+    #[arg(long, value_name = "DIR")]
+    pub stage: Option<PathBuf>,
+}
+
+/// Where [`stage`] puts the secondary pull request's patch, apart from
+/// the run's own: apply's trial of that one never takes it.
+const SECONDARY_DIR: &str = "secondary";
+
+#[cfg(test)]
+thread_local! {
+    /// Run once after check has read the hand-back: a test's change to the
+    /// outputs directory between check's read and its use of the bytes.
+    pub(crate) static AFTER_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The most of a run summary [`checked_run_summary`] keeps, in UTF-16
@@ -385,7 +402,7 @@ pub(crate) fn is_handback_file(name: &str) -> bool {
 /// The most a file of a hand-back may hold. Which patch is which is
 /// known only from the requests, so each is read within the larger
 /// budget and held to its own once it is.
-pub(crate) fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
+fn max_bytes_of(name: &str, policy: &Policy) -> u64 {
     match name {
         unchanged::FILE => unchanged::MAX_BYTES,
         HOST_ISOLATION_FILE => MAX_HOST_ISOLATION_BYTES,
@@ -515,6 +532,9 @@ fn verdict_of(
     continuation: Option<&crate::policy::Continuation>,
     public: &PublicAddresses,
 ) -> Result<(Verdict, BTreeMap<String, Vec<u8>>)> {
+    // Taken now, so that a check that stops early leaves none for the next.
+    #[cfg(test)]
+    let after_read = AFTER_READ.with_borrow_mut(Option::take);
     let mut errors = Vec::new();
     let mut names = std::fs::read_dir(dir)
         .and_then(|entries| {
@@ -606,6 +626,10 @@ fn verdict_of(
         }
     }
     warnings.truncate(redact::MAX_SHAPE_WARNINGS);
+    #[cfg(test)]
+    if let Some(hook) = after_read {
+        hook();
+    }
     // And each is the bytes it receipted: these, which check goes on to use.
     if let Some(external) = &policy.external
         && let Err(error) = crate::external::bound(&contents, &external.files)
@@ -956,6 +980,9 @@ pub fn run(args: &Args) -> Result<Exit> {
         std::fs::write(report, json)
             .with_context(|| format!("writing the report {}", report.display()))?;
     }
+    if let Some(dir) = args.stage.as_deref().filter(|_| verdict.ok) {
+        stage(dir, &verdict, &contents)?;
+    }
     for error in &verdict.errors {
         eprintln!("error: {}", one_line(error));
     }
@@ -968,6 +995,49 @@ pub fn run(args: &Args) -> Result<Exit> {
     } else {
         Exit::Failure
     })
+}
+
+/// Writes into DIR what apply takes of an accepted VERDICT: its patch, its
+/// secondary patch in [`SECONDARY_DIR`], and its test evidence with every
+/// log. Each is written from CONTENTS, the bytes check read and verified
+/// (an external hand-back's against its receipt), never copied from the
+/// outputs directory: a file replaced or removed there since is not what
+/// check vouched for, nor what apply's artifact digest should. A file check
+/// did not read refuses the staging, and none is written over.
+fn stage(dir: &Path, verdict: &Verdict, contents: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    use std::io::Write;
+    let secondary = dir.join(SECONDARY_DIR);
+    std::fs::create_dir(&secondary).with_context(|| format!("creating {}", secondary.display()))?;
+    let mut staged: Vec<(&Path, &str)> = Vec::new();
+    staged.extend(verdict.patch.iter().map(|info| (dir, info.file.as_str())));
+    staged.extend(
+        verdict
+            .secondary_patch
+            .iter()
+            .map(|info| (secondary.as_path(), info.file.as_str())),
+    );
+    if verdict.test_evidence.is_some() {
+        staged.push((dir, test_evidence::TEST_EVIDENCE_FILE));
+        staged.extend(
+            contents
+                .keys()
+                .filter(|name| test_evidence::is_log_name(name))
+                .map(|name| (dir, name.as_str())),
+        );
+    }
+    for (to, name) in staged {
+        let bytes = contents
+            .get(name)
+            .with_context(|| format!("staging {name}: not read by check"))?;
+        let path = to.join(name);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(bytes))
+            .with_context(|| format!("staging {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Refuse a checked result apply could not read, without uploading its
@@ -1239,7 +1309,18 @@ mod tests {
 
         fn check_against(&self, policy: &Policy) -> Verdict {
             let dir = tempfile::tempdir().unwrap();
-            let out = dir.path().join("out");
+            let (out, collected) = self.write(dir.path());
+            if self.no_run_id {
+                check_outputs(&out, &collected, policy).unwrap()
+            } else {
+                check_run_outputs(&out, &collected, policy, RUN_ID).unwrap()
+            }
+        }
+
+        /// Writes the hand-back into `out` in ROOT and the collector's
+        /// result beside it, and returns their paths.
+        fn write(&self, root: &Path) -> (PathBuf, PathBuf) {
+            let out = root.join("out");
             std::fs::create_dir(&out).unwrap();
             if !self.no_outputs {
                 let lines: String = self.items.iter().map(|item| format!("{item}\n")).collect();
@@ -1248,16 +1329,12 @@ mod tests {
             for (name, content) in &self.files {
                 std::fs::write(out.join(name), content).unwrap();
             }
-            let collected = dir.path().join("agent_output.json");
+            let collected = root.join("agent_output.json");
             let mut items = self.items.clone();
             items.extend(self.incomplete.then(incomplete));
             let result = json!({"items": items, "errors": self.refused});
             std::fs::write(&collected, result.to_string()).unwrap();
-            if self.no_run_id {
-                check_outputs(&out, &collected, policy).unwrap()
-            } else {
-                check_run_outputs(&out, &collected, policy, RUN_ID).unwrap()
-            }
+            (out, collected)
         }
     }
 
@@ -3843,6 +3920,200 @@ mod tests {
                 said
             );
         }
+    }
+
+    /// check.yml uploads what `check --stage` wrote from the bytes check
+    /// verified, and its staging step copies nothing of the outputs: a
+    /// patch swapped or a log removed there after check's read changes
+    /// nothing uploaded, for a hosted policy or one with an external
+    /// receipt, whether or not the workflow's envelope names an external run.
+    #[test]
+    fn the_upload_is_staged_from_the_bytes_check_verified() {
+        use test_evidence::tests::{manifest, rules};
+        const LOG: &str = "test-evidence-2.log";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let workflow = std::fs::read_to_string(root.join(".github/workflows/check.yml")).unwrap();
+        let doc = &yaml_rust2::YamlLoader::load_from_str(&workflow).unwrap()[0];
+        let script = doc["jobs"]["check"]["steps"]
+            .as_vec()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Put the patch beside the ingested outputs"))
+            .unwrap()["run"]
+            .as_str()
+            .unwrap();
+        let tested = Handback::pull_request()
+            .with(
+                test_evidence::TEST_EVIDENCE_FILE,
+                Some(manifest().to_string()),
+            )
+            .with("test-evidence-1.log", Some("1".into()))
+            .with(LOG, Some("22".into()))
+            .with("test-evidence-3.log", Some("333".into()));
+        let mut hosted = policy();
+        hosted.test_evidence = Some(rules());
+        let receipted = |handback: &Handback| {
+            let mut policy = hosted.clone();
+            let mut files: BTreeMap<_, _> = handback
+                .files
+                .iter()
+                .map(|(name, content)| {
+                    (
+                        (*name).to_owned(),
+                        crate::external::sha256(content.as_bytes()),
+                    )
+                })
+                .collect();
+            let outputs: String = handback
+                .items
+                .iter()
+                .map(|item| format!("{item}\n"))
+                .collect();
+            files.insert(
+                OUTPUTS_FILE.to_owned(),
+                crate::external::sha256(outputs.as_bytes()),
+            );
+            policy.external = Some(crate::policy::ExternalRun {
+                caller_repository: "example-org/caller".into(),
+                caller_run_id: 90,
+                caller_attempt: 1,
+                repository: "example-org/external".into(),
+                run_id: RUN_ID.parse().unwrap(),
+                base_commit: BASE.into(),
+                raw_digest: format!("sha256:{}", "a".repeat(64)),
+                files,
+                gitlab: None,
+            });
+            policy
+        };
+        // (the case, the hand-back, the policy)
+        let cases = [
+            ("hosted", tested.clone(), hosted.clone()),
+            ("receipted", tested.clone(), receipted(&tested)),
+            ("secondary", both(), secondary_policy()),
+        ];
+        for (case, handback, policy) in &cases {
+            for envelope in ["", RUN_ID] {
+                let what = format!("{case}, envelope run {envelope:?}");
+                let dir = tempfile::tempdir().unwrap();
+                let (out, collected) = handback.write(dir.path());
+                if policy.external.is_some() {
+                    let outputs = std::fs::read_to_string(out.join(OUTPUTS_FILE)).unwrap();
+                    let result = crate::collect::collect_text(&outputs, policy).unwrap();
+                    std::fs::write(&collected, serde_json::to_vec(&result).unwrap()).unwrap();
+                }
+                let original = |name: &str| {
+                    let (_, content) = handback
+                        .files
+                        .iter()
+                        .find(|(file, _)| *file == name)
+                        .unwrap();
+                    content.clone()
+                };
+                AFTER_READ.set(Some(Box::new({
+                    let out = out.clone();
+                    move || {
+                        std::fs::write(out.join(PATCH_NAME), patch_of("src/swapped.rs")).unwrap();
+                        std::fs::remove_file(out.join(LOG)).ok();
+                    }
+                })));
+                let public = PublicAddresses::default();
+                let (verdict, contents) =
+                    verdict_of(&out, &collected, policy, None, Some(RUN_ID), None, &public)
+                        .unwrap();
+                assert!(verdict.ok, "{what}: {:?}", verdict.errors);
+                let job = dir.path().join("job");
+                let tmp = dir.path().join("gh-aw");
+                std::fs::create_dir(&job).unwrap();
+                std::fs::create_dir(&tmp).unwrap();
+                stage(&tmp, &verdict, &contents).unwrap();
+                std::fs::write(job.join("policy.json"), serde_json::to_vec(policy).unwrap())
+                    .unwrap();
+                std::fs::write(
+                    tmp.join("report.json"),
+                    serde_json::to_vec(&verdict).unwrap(),
+                )
+                .unwrap();
+                // The step once held the files to the receipt only where
+                // the envelope named an external run; now it reads neither.
+                let output = std::process::Command::new("bash")
+                    .args(["-e", "-c", script])
+                    .env("JOB_DIR", &job)
+                    .env("GH_AW_TMP", &tmp)
+                    .env("RUNNER_TEMP", dir.path())
+                    .env("EXTERNAL_RUN", envelope)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{what}: {output:?}");
+                let read = |path: &Path| std::fs::read_to_string(path).unwrap();
+                assert_eq!(read(&tmp.join(PATCH_NAME)), original(PATCH_NAME), "{what}");
+                if *case == "secondary" {
+                    let staged = tmp.join(SECONDARY_DIR).join(TOOL_PATCH);
+                    assert_eq!(read(&staged), original(TOOL_PATCH), "{what}");
+                    assert!(!tmp.join(TOOL_PATCH).exists(), "{what}");
+                    assert!(
+                        !tmp.join(test_evidence::TEST_EVIDENCE_FILE).exists(),
+                        "{what}"
+                    );
+                } else {
+                    for name in [test_evidence::TEST_EVIDENCE_FILE, LOG] {
+                        assert_eq!(read(&tmp.join(name)), original(name), "{what}: {name}");
+                    }
+                }
+                // Nothing is written over, and nothing check did not read
+                // is staged.
+                let again = dir.path().join("again");
+                std::fs::create_dir(&again).unwrap();
+                std::fs::write(again.join(PATCH_NAME), "").unwrap();
+                assert!(stage(&again, &verdict, &contents).is_err(), "{what}");
+                let mut unread = contents.clone();
+                unread.remove(PATCH_NAME);
+                let error = stage(&dir.path().join("job"), &verdict, &unread).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("not read by check"),
+                    "{what}: {error:#}"
+                );
+            }
+        }
+        // A log already missing when check reads is refused, so nothing is
+        // staged without it.
+        let missing = tested.clone().with(LOG, None);
+        for policy in [&hosted, &receipted(&tested)] {
+            let verdict = missing.check_against(policy);
+            assert!(!verdict.ok);
+        }
+        // A replacement series is reported, staged and read by apply as
+        // `replacement.json`.
+        let mut push = crate::policy::tests::push_policy();
+        let config = push
+            .safe_outputs
+            .push_to_pull_request_branch
+            .as_mut()
+            .unwrap();
+        config.replacement_max_commits = 1;
+        config.replacement_base = Some(BASE.into());
+        let mail = patch_of("src/a.rs").replace(&format!("{BASE_COMMIT_HEADER}: {BASE}\n"), "");
+        let series = json!({"base_commit": BASE, "commits": [mail]}).to_string();
+        let replacing = Handback {
+            items: vec![
+                json!({"type": PUSH_TO_PULL_REQUEST_BRANCH, "message": "Fix\n\nWhy.", "branch": "agent-run-12"}),
+            ],
+            files: vec![(replacement::REPLACEMENT_FILE, series.clone())],
+            ..Handback::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (out, collected) = replacing.write(dir.path());
+        let public = PublicAddresses::default();
+        let (verdict, contents) =
+            verdict_of(&out, &collected, &push, None, Some(RUN_ID), None, &public).unwrap();
+        assert!(verdict.ok, "{:?}", verdict.errors);
+        let tmp = dir.path().join("gh-aw");
+        std::fs::create_dir(&tmp).unwrap();
+        stage(&tmp, &verdict, &contents).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(replacement::REPLACEMENT_FILE)).unwrap(),
+            series
+        );
     }
 
     #[test]

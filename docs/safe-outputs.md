@@ -2391,7 +2391,7 @@ exist, how many of each, the fields of each, and the sanitizing of their
 text. Then
 
 ```text
-agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE] [--run-id ID]
+agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE] [--run-id ID] [--stage DIR]
 ```
 
 takes the collector's result and does none of it again, except to

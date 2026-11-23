@@ -369,12 +369,7 @@ mod tests {
             assert!(patch.contains(INFERENCE_PLACEHOLDER) && !patch.contains(ADDRESS));
             let mut verdict = f.verdict();
             let literals = [Literal::new(ADDRESS).unwrap()];
-            // Replay takes the bytes check read, not a patch swapped in since.
-            let contents = f.contents();
-            let staged = f.staging.safe_outputs().join(NAME);
-            std::fs::write(&staged, patch.replace("before", "swapped")).unwrap();
-            check(&mut verdict, &contents, &f.policy, Some(&literals)).unwrap();
-            std::fs::write(&staged, &patch).unwrap();
+            check(&mut verdict, &f.contents(), &f.policy, Some(&literals)).unwrap();
             let info = verdict.patch.as_ref().unwrap();
             let receipt = info.replay.as_ref().unwrap();
             assert_eq!(
@@ -610,7 +605,7 @@ mod tests {
     fn endpoint_replay_trusted_capture_check_report_and_apply_cli() {
         use crate::policy::Load;
         let f = Fixture::new(true, true);
-        f.redact_and_collect();
+        let patch = f.redact_and_collect();
         let config = f._dir.path().join("config.toml");
         std::fs::write(&config, format!("[commit]\nreplay-redacted-endpoints = true\n[inference]\nurl = 'http://{ADDRESS}'\nregister = 'plain'\n")).unwrap();
         let policy = f._dir.path().join("policy.json");
@@ -641,12 +636,30 @@ mod tests {
             comment_target: None,
             review_head: None,
             run_summary: None,
+            stage: Some(checked.clone()),
         };
+        // Replay and staging take the bytes check read, not a patch
+        // swapped in on disk once it has read them.
+        let outputs = f.staging.safe_outputs();
+        let swapped = patch.replace("before", "swapped");
+        super::super::AFTER_READ.set(Some(Box::new({
+            let swapped = swapped.clone();
+            move || std::fs::write(outputs.join(NAME), swapped).unwrap()
+        })));
         assert_eq!(super::super::run(&args).unwrap(), Exit::Success);
+        assert_eq!(
+            std::fs::read_to_string(f.staging.safe_outputs().join(NAME)).unwrap(),
+            swapped
+        );
         let report_text = std::fs::read_to_string(&report).unwrap();
         assert!(!report_text.contains(ADDRESS));
+        let reported: serde_json::Value = serde_json::from_str(&report_text).unwrap();
+        assert_eq!(
+            reported["patch"]["replay"]["patch_sha256"],
+            json!(safe_outputs::replay::digest(patch.as_bytes()))
+        );
+        assert_eq!(std::fs::read_to_string(checked.join(NAME)).unwrap(), patch);
         std::fs::copy(&policy, checked.join("policy.json")).unwrap();
-        std::fs::copy(f.staging.safe_outputs().join(NAME), checked.join(NAME)).unwrap();
         assert_eq!(
             run(&Args {
                 checked: checked.clone()

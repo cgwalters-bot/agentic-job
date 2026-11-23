@@ -1137,7 +1137,10 @@ fn run_action_forwards_summary_cost_without_inventing_unknown_cost() {
 /// the secondary pull request's apart, in `secondary/`, so that apply's
 /// trial of the run's own patch, which takes the one `check` reported,
 /// never applies it. Its request is left to `secondary-pull-request`, out
-/// of the handlers' file, which would otherwise fail it.
+/// of the handlers' file, which would otherwise fail it. check writes the
+/// patches itself (`--stage`), whatever the policy, and the staging step
+/// copies none from the outputs: `check`'s own tests swap and remove files
+/// there after its read and run this step.
 #[test]
 fn the_secondary_patch_is_handed_on_apart() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -1162,62 +1165,44 @@ fn the_secondary_patch_is_handed_on_apart() {
     for file in ["secondary/aw-*.patch", "replacement.json", "policy.json"] {
         assert!(uploaded.contains(&format!("${{{{ env.GH_AW_TMP }}}}/{file}\n")));
     }
-    const OWN: &str = "aw-agent-run-7.patch";
-    const TOOL: &str = "aw-o-tool-agentic-job-agent-run-7.patch";
-    // A replacement series is reported, and read by apply, by this name.
-    const SERIES: &str = "replacement.json";
+    let checked = step("Check the outputs against the policy");
+    assert!(
+        checked["run"]
+            .as_str()
+            .unwrap()
+            .contains(r#"--stage "$GH_AW_TMP""#)
+    );
+    assert!(checked["if"].is_badvalue());
+    let staging = step("Put the patch beside the ingested outputs");
+    assert!(staging["env"].is_badvalue());
+    assert!(!script.contains("safe-outputs") && !script.contains("agentic-job"));
     let own_request = serde_json::json!({"type": "create_pull_request", "title": "T"});
     let tool_request = serde_json::json!({"type": "create_pull_request", "repo": "o/tool"});
     let items = serde_json::json!([own_request, tool_request]);
     let secondary = serde_json::json!({"secondary_pull_request": {"repo": "o/tool"}});
-    // (report, policy, the patch reported for the run's own request, whether
-    // the secondary's is handed on, the requests the handlers get)
-    for (report, policy, own, tool, handled) in [
+    // (report, policy, the requests the handlers get)
+    for (report, policy, handled) in [
         (
-            serde_json::json!({"items": items, "patch": {"file": OWN},
-                "secondary_patch": {"file": TOOL}}),
+            serde_json::json!({"items": items}),
             &secondary,
-            Some(OWN),
-            true,
             serde_json::json!([own_request]),
         ),
         (
-            serde_json::json!({"items": [tool_request], "secondary_patch": {"file": TOOL}}),
+            serde_json::json!({"items": [tool_request]}),
             &secondary,
-            None,
-            true,
-            serde_json::json!([]),
-        ),
-        (
-            serde_json::json!({"items": [own_request], "patch": {"file": OWN}}),
-            &secondary,
-            Some(OWN),
-            false,
-            serde_json::json!([own_request]),
-        ),
-        (
-            serde_json::json!({"items": [], "patch": {"file": SERIES}}),
-            &serde_json::json!({}),
-            Some(SERIES),
-            false,
             serde_json::json!([]),
         ),
         // Without a secondary in the policy, every request is the handlers'.
         (
-            serde_json::json!({"items": items, "patch": {"file": OWN}}),
+            serde_json::json!({"items": items}),
             &serde_json::json!({}),
-            Some(OWN),
-            false,
             items.clone(),
         ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let (job, tmp) = (dir.path().join("job"), dir.path().join("gh-aw"));
-        std::fs::create_dir_all(job.join("safe-outputs")).unwrap();
+        std::fs::create_dir_all(&job).unwrap();
         std::fs::create_dir(&tmp).unwrap();
-        for name in [OWN, TOOL, SERIES] {
-            std::fs::write(job.join("safe-outputs").join(name), name).unwrap();
-        }
         std::fs::write(job.join("policy.json"), policy.to_string()).unwrap();
         std::fs::write(tmp.join("report.json"), report.to_string()).unwrap();
         let output = Command::new("bash")
@@ -1232,11 +1217,6 @@ fn the_secondary_patch_is_handed_on_apart() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        for name in [OWN, SERIES] {
-            assert_eq!(tmp.join(name).exists(), own == Some(name), "{report}");
-        }
-        assert!(!tmp.join(TOOL).exists(), "{report}");
-        assert_eq!(tmp.join("secondary").join(TOOL).exists(), tool, "{report}");
         let output: serde_json::Value =
             serde_json::from_slice(&std::fs::read(tmp.join("agent_output.json")).unwrap()).unwrap();
         assert_eq!(output, serde_json::json!({"items": handled, "errors": []}));
