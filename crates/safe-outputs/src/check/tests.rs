@@ -129,6 +129,7 @@ struct Case {
     base: Option<String>,
     replacement: Option<String>,
     patches: Vec<(String, String)>,
+    commit_trailers: Vec<String>,
 }
 
 impl Case {
@@ -140,6 +141,7 @@ impl Case {
             base: Some(base(REPO, "main", BASE)),
             replacement: None,
             patches: vec![(PATCH.into(), patch(path, BASE))],
+            commit_trailers: Vec::new(),
         }
     }
 
@@ -183,6 +185,7 @@ impl Case {
             continuation: None,
             comment: Some((REPO, 7)),
             run_id: Some("7"),
+            commit_trailers: Some(&self.commit_trailers),
         };
         check(&handback, collected, policy, trusted, publishers, lifecycle)
     }
@@ -219,6 +222,80 @@ fn a_pull_request_with_its_patch_is_accepted() {
     );
     assert_eq!(patch.files, ["src/lib.rs"]);
     assert_eq!(checked.items.len(), 1);
+}
+
+#[test]
+fn commit_body_is_checked_in_the_mail_not_the_change() {
+    for (pr, body, problem) in [
+        (
+            "Description.",
+            "Description.",
+            Some("equals the pull request body"),
+        ),
+        (
+            "# A change\n\nDescription.\n\nSee https://example.com/run.",
+            "Description.\n\nSee https://example.com/run.\n\nRefs: example",
+            Some("equals the pull request body"),
+        ),
+        (
+            "Description.",
+            "Description.\n\nRefs: example",
+            Some("equals the pull request body"),
+        ),
+        (
+            "Description.",
+            "Description.\n\nRationale: More context.",
+            None,
+        ),
+        (
+            "Description.",
+            "Description.\n\nHere's why: this is additional prose.",
+            None,
+        ),
+        (
+            "Description.",
+            "Why.\n\n  ## Verification",
+            Some("contains a Markdown heading"),
+        ),
+        (
+            "Description.",
+            "Verification\n============",
+            Some("contains a Markdown heading"),
+        ),
+        (
+            "Description.",
+            "<https://example.com> results\n====",
+            Some("contains a Markdown heading"),
+        ),
+        (
+            "Description.",
+            "> ## A nested heading",
+            Some("contains a Markdown heading"),
+        ),
+        (
+            "Description.",
+            "Why.\n\n```sh\n# Example comment\n```",
+            None,
+        ),
+        ("Description.", "", None),
+    ] {
+        let mut case = Case::pull_request("src/lib.rs");
+        case.items[0]["title"] = json!("A change");
+        case.items[0]["body"] = json!(pr);
+        case.commit_trailers = vec!["Refs: example".into()];
+        case.patches[0].1 = case.patches[0]
+            .1
+            .replace("Why it changes.", body)
+            .replace("+fn main() { 1 }", "+## A heading in the changed file");
+        let checked = case.check(&policy());
+        match problem {
+            Some(problem) => assert!(
+                checked.errors.iter().any(|e| e.contains(problem)),
+                "{checked:?}"
+            ),
+            None => assert!(checked.errors.is_empty(), "{checked:?}"),
+        }
+    }
 }
 
 #[test]
@@ -265,6 +342,7 @@ fn document_check_bounds_and_mixed_writes() {
         base: None,
         replacement: None,
         patches: Vec::new(),
+        commit_trailers: Vec::new(),
     };
     assert!(case.check(&policy).errors.is_empty());
     case.items[0]["gist_id"] = json!("abc123");

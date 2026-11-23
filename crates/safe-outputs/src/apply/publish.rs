@@ -2066,7 +2066,7 @@ fn apply_title_prefix(title: &str, prefix: &str) -> String {
 
 /// `removeDuplicateTitleFromDescription`: BODY without a first heading
 /// that is TITLE.
-fn without_title_heading(title: &str, body: &str) -> Result<String> {
+pub(crate) fn without_title_heading(title: &str, body: &str) -> Result<String> {
     if title.is_empty() {
         return Ok(body.to_owned());
     }

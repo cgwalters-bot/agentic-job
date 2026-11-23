@@ -78,6 +78,9 @@ pub struct Args {
     /// The policy.json that `policy` printed for this run
     #[arg(long, value_name = "FILE")]
     pub policy: PathBuf,
+    /// Trusted run config, for identifying its configured commit trailers
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
     /// The directory holding the handed-back outputs
     #[arg(long, value_name = "DIR")]
     pub outputs: PathBuf,
@@ -444,9 +447,11 @@ fn check_outputs_to(
         dir,
         collected,
         policy,
-        comment,
-        run_id,
-        None,
+        Trusted {
+            comment,
+            run_id,
+            ..Default::default()
+        },
         &PublicAddresses::default(),
     )
 }
@@ -457,6 +462,7 @@ pub(crate) fn check_run_outputs_with_public(
     policy: &Policy,
     run_id: &str,
     public: &PublicAddresses,
+    commit_trailers: &[String],
 ) -> Result<Verdict> {
     // Producer-side feedback uses the policy's destination: an advisory
     // run's, or the pull request an own_author run pushes to, the only one
@@ -475,9 +481,12 @@ pub(crate) fn check_run_outputs_with_public(
         dir,
         collected,
         policy,
-        comment,
-        Some(run_id),
-        policy.continuation.as_ref(),
+        Trusted {
+            comment,
+            run_id: Some(run_id),
+            continuation: policy.continuation.as_ref(),
+            commit_trailers: Some(commit_trailers),
+        },
         public,
     )
 }
@@ -486,20 +495,10 @@ fn check_outputs_with_public(
     dir: &Path,
     collected: &Path,
     policy: &Policy,
-    comment: Option<(&str, u64)>,
-    run_id: Option<&str>,
-    continuation: Option<&crate::policy::Continuation>,
+    trusted: Trusted<'_>,
     public: &PublicAddresses,
 ) -> Result<Verdict> {
-    let (mut verdict, _) = verdict_of(
-        dir,
-        collected,
-        policy,
-        comment,
-        run_id,
-        continuation,
-        public,
-    )?;
+    let (mut verdict, _) = verdict_of(dir, collected, policy, trusted, public)?;
     report_json(&mut verdict)?;
     Ok(verdict)
 }
@@ -510,9 +509,7 @@ fn verdict_of(
     dir: &Path,
     collected: &Path,
     policy: &Policy,
-    comment: Option<(&str, u64)>,
-    run_id: Option<&str>,
-    continuation: Option<&crate::policy::Continuation>,
+    trusted: Trusted<'_>,
     public: &PublicAddresses,
 ) -> Result<(Verdict, BTreeMap<String, Vec<u8>>)> {
     let mut errors = Vec::new();
@@ -713,11 +710,6 @@ fn verdict_of(
         }
         errors
     };
-    let trusted = Trusted {
-        comment,
-        run_id,
-        continuation,
-    };
     let mut checked =
         safe_outputs::check::check(&handback, collected, policy, trusted, &Apply, lifecycle);
     if let Some(bytes) = contents.get(unchanged::FILE) {
@@ -825,6 +817,13 @@ fn checked_test_evidence(
 
 pub fn run(args: &Args) -> Result<Exit> {
     let policy = Policy::load(&args.policy)?;
+    let commit_trailers = if let Some(path) = &args.config {
+        let trailers = crate::config::Config::load(path)?.commit.trailers;
+        crate::run::handback::check_trailers(&trailers)?;
+        Some(trailers)
+    } else {
+        None
+    };
     anyhow::ensure!(
         args.continuation_context
             .as_ref()
@@ -860,9 +859,12 @@ pub fn run(args: &Args) -> Result<Exit> {
         &args.outputs,
         &args.collected,
         &policy,
-        comment,
-        args.run_id.as_deref(),
-        continuation.as_ref(),
+        Trusted {
+            comment,
+            run_id: args.run_id.as_deref(),
+            continuation: continuation.as_ref(),
+            commit_trailers: commit_trailers.as_deref(),
+        },
         &public,
     )?;
     if verdict.ok

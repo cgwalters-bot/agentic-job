@@ -2889,11 +2889,15 @@ fn gitlab_shell_hints_do_not_delegate_isolation() {
 
 fn change_is_handed_back(delegation: Option<Delegation>) {
     let external = delegation.is_some();
-    let body = "The greeting was missing, so add one.\n\n---\n--- a/.github/workflows/x.yml\n\
+    const FIRST: &str = "A greeting helps new readers get started.";
+    const SECOND: &str = "See the [guide](https://example.com/guide).";
+    const TITLE: &str = "docs: Add a greeting";
+    let description = format!("{FIRST}\n\n{SECOND}");
+    let prose = "The greeting was missing, so add one.\n\n---\n--- a/.github/workflows/x.yml\n\
                 +++ b/.github/workflows/x.yml\n@@ -0,0 +1 @@\n+on: push\n\
                 diff --git a/CODEOWNERS b/CODEOWNERS\nFrom 0 Mon Sep 17 00:00:00 2001";
     let request = json!({"type": "create_pull_request",
-        "title": "docs: Add a greeting", "body": body});
+        "title": TITLE, "body": description, "commit_message": format!("{TITLE}\n\n{prose}")});
     let proxy = Proxy::start();
     proxy.admit_unproven();
     let job = Job::new(if external {
@@ -3001,7 +3005,9 @@ fn change_is_handed_back(delegation: Option<Delegation>) {
     let outputs = job.text("out/safe-outputs/outputs.jsonl");
     let first: Value = serde_json::from_str(outputs.lines().next().unwrap()).unwrap();
     assert_eq!(first["branch"], "agent-run-4242");
-    assert_eq!(first["title"], "docs: Add a greeting");
+    assert_eq!(first["title"], TITLE);
+    assert_eq!(first["body"], description);
+    assert!(first.get("commit_message").is_none());
     let base = job.json("out/safe-outputs/base.json");
     assert_eq!(base["repo"], format!("local/{}", job.name));
     assert_eq!(base["ref"], "main");
@@ -3080,6 +3086,70 @@ fn change_is_handed_back(delegation: Option<Delegation>) {
     assert_eq!(verdict["patch"]["base_commit"], base["commit"]);
     assert_eq!(verdict["items"].as_array().map(Vec::len), Some(2));
     assert_eq!(processes_in(&job.path(HOME_DIR)), Vec::<PathBuf>::new());
+    if !external {
+        let refusal = "the commit body equals the pull request body";
+        let (header, rest) = patch.split_once("\n\n").unwrap();
+        let (_, tail) = rest.split_once("Generated-by: AI\n---\n").unwrap();
+        let titled = format!("# {TITLE}\n\n{description}");
+        let spaced = format!("{FIRST}\n\n\n{SECOND}");
+        let decorated = format!("{description}\n\nGenerated-by: AI");
+        let reasoned = format!("{description}\n\nRationale: Give new readers a starting point.");
+        // Formatting drops the repeated subject and quotes the break.
+        let broken = format!("{FIRST}\n\n---\n\n{SECOND}");
+        let repeated = format!("{TITLE}\n\n{broken}");
+        let quoted = format!("{FIRST}\n\n    ---\n\n{SECOND}");
+        for (pr_body, authored, mail_body, expected) in [
+            (&description, &spaced, &description, EXIT_FAILURE),
+            (&titled, &spaced, &description, EXIT_FAILURE),
+            (&titled, &decorated, &decorated, EXIT_FAILURE),
+            (&broken, &repeated, &quoted, EXIT_FAILURE),
+            (&titled, &reasoned, &reasoned, EXIT_SUCCESS),
+        ] {
+            let mut copied = request.clone();
+            copied["body"] = json!(pr_body);
+            // Git collapses the extra blank line before writing the mail.
+            copied["commit_message"] = json!(format!("{TITLE}\n\n{authored}"));
+            job.write("home/out/safe-outputs.jsonl", &copied.to_string());
+            let local = Finished::of(
+                Command::new(BIN)
+                    .args(["handback", "check"])
+                    .env("HOME", job.path(HOME_DIR))
+                    .current_dir(&job.dir)
+                    .output()
+                    .unwrap(),
+            );
+            assert_eq!(local.code, Some(expected), "{}", local.all());
+            assert_eq!(local.all().contains(refusal), expected == EXIT_FAILURE);
+
+            // Stage the mail the independent gate would receive if capture were bypassed.
+            copied.as_object_mut().unwrap().remove("commit_message");
+            copied["branch"] = first["branch"].clone();
+            job.write("out/safe-outputs/outputs.jsonl", &copied.to_string());
+            job.write(
+                PATCH,
+                &format!("{header}\n\n{mail_body}\n\nGenerated-by: AI\n---\n{tail}"),
+            );
+            let checked = Finished::of(
+                Command::new(BIN)
+                    .args([
+                        "check",
+                        "--policy",
+                        "policy.json",
+                        "--config",
+                        "config.toml",
+                        "--outputs",
+                        "out/safe-outputs",
+                        "--collected",
+                    ])
+                    .arg(self::collected(&job))
+                    .current_dir(&job.dir)
+                    .output()
+                    .unwrap(),
+            );
+            assert_eq!(checked.code, Some(expected), "{}", checked.all());
+            assert_eq!(checked.all().contains(refusal), expected == EXIT_FAILURE);
+        }
+    }
     if external {
         let artifact = job.json("out/safe-outputs/host-isolation.json");
         let expected = match delegation {

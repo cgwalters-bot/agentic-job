@@ -4895,6 +4895,8 @@ noop = {{ max = 1 }}
     for file in ["policy.json", "public-base.json"] {
         fs::copy(job.join(file), check_job.join(file)).unwrap();
     }
+    // The policy upload carries the run's configuration too.
+    fs::write(check_job.join("config.toml"), "").unwrap();
     fs::write(raw.join("outputs.jsonl"), format!("{}\n", result[0])).unwrap();
     let summary = check_root.join("summary");
     let env = [
@@ -5325,6 +5327,7 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
             r"name: \$\{\{ fromJSON\(inputs.policy\).proposals-artifact \}\}",
             r"artifact-ids: \$\{\{ inputs.safe-outputs-artifact-id \}\}",
             r#"agentic-job" check --policy"#,
+            r#"(?m)destination\+=\(--config "\$JOB_DIR/config\.toml"\).*\n.*destination\+=\(--comment-repo "\$COMMENT_REPO" --comment-target "\$COMMENT_TARGET"\)"#,
             r"permissions:\n  contents: read",
             r"repository: \$\{\{ job.workflow_repository \}\}",
             r"ref: \$\{\{ job.workflow_sha \}\}",

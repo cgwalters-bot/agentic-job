@@ -467,6 +467,9 @@ What a producer leaves for `run` to take
 - `out/safe-outputs.jsonl` under the agent's home: the requests above,
   at most 1 MiB and 1000 nonblank lines. Capture refuses an over-limit file
   whole, with its change or replacement series; it does not retain a prefix.
+  A `create_pull_request` request can include `commit_message` (a subject
+  and optional body); `run` consumes it, not the safe-output handler.
+  Omission falls back to a subject only, plus configured trailers.
   See [capture limits](safe-outputs.md#what-the-agent-does).
 - `out/outcome.json`, at most 64 KiB: `summary`, `tests` (each a
   `command`, `exit_code` and `duration_s`), `stopped_early` (null or why),

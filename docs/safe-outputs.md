@@ -2374,14 +2374,28 @@ collector, so a missing or malformed field is refused in the session in
 the words the check job would use. `handback guide` lists each
 allowed type's fields from the same table.
 
-For a `push_to_pull_request_branch` request without `message`, `run` fills
-that field from the outcome summary (or its default run description), the
-same fallback it uses for the patch's commit message. Where the outcome
-has no summary, the default description says the change is partial: an
-agent that wrote none may have been cut off before it could. An explicit `message`
-is preserved, including an invalid value for the collector to refuse. This
-does not validate requests while the producer runs or replace the separate
-check job.
+Write the commit message in `commit_message` on a `create_pull_request`
+request, separate from its `title` and `body`. This optional string has a
+subject on the first line and an optional body after a blank line. Follow
+the deployment's commit-message skill if available. `run` consumes the field
+when making the patch; it is not sent to gh-aw. For
+`push_to_pull_request_branch`, the existing `message` field supplies the
+commit message. If no commit message was supplied, `run` uses only the first
+line of the PR title (or, for an implicit title or a push, the first line of
+the outcome summary, with a run-based default). Configured trailers still
+apply. Checkpoints stay in the PR description or push request. An automatically
+appended checkpoint or a valid trailing checkpoint on a push request does not
+enter the commit.
+
+The risk is copying a publication report, including run links and review notes,
+into permanent commit history. Capture and the independent check refuse an
+ordinary patch whose commit body copies the PR body or contains a Markdown
+heading. The comparison normalizes Git whitespace and also checks the PR prose
+after publication removes a leading title heading. Capture checks the supplied
+and formatted bodies before appending trailers. Both compare the whole body
+and the prose before any repeated copies of the configured trailer block.
+Without trusted run configuration, check treats a final paragraph of valid
+trailers as metadata. A replacement series preserves its existing messages.
 
 ## The check, in two halves
 
@@ -2391,10 +2405,11 @@ exist, how many of each, the fields of each, and the sanitizing of their
 text. Then
 
 ```text
-agentic-job check --policy FILE --outputs DIR --collected FILE [--report FILE] [--run-id ID]
+agentic-job check --policy FILE --outputs DIR --collected FILE [--config FILE] [--report FILE] [--run-id ID]
 ```
 
-takes the collector's result and does none of it again, except to
+takes the collector's result (and the trusted run config when the producer
+appends trailers) and does none of the collector's work again, except to
 count. It refuses a hand-back holding any other file, a file over its
 size or a private key, and reports any other string shaped like a
 credential as a warning; a request naming another

@@ -71,9 +71,24 @@ impl Checkpoint {
 /// the fence counts as one, so that a near miss (`~~~` aside) is refused
 /// rather than ignored.
 pub fn find(text: &str) -> Result<Option<Checkpoint>> {
-    let mut lines = text.lines();
+    Ok(locate(text)?.map(|(checkpoint, _, _)| checkpoint))
+}
+
+/// The message before a single valid trailing checkpoint, if present.
+pub fn without_trailing(text: &str) -> Option<&str> {
+    let (_, start, end) = locate(text).ok()??;
+    text[end..].trim().is_empty().then(|| &text[..start])
+}
+
+fn locate(text: &str) -> Result<Option<(Checkpoint, usize, usize)>> {
+    let mut offset = 0;
+    let mut lines = text.split_inclusive('\n').map(|line| {
+        let start = offset;
+        offset += line.len();
+        (start, offset, line)
+    });
     let mut found = None;
-    while let Some(line) = lines.next() {
+    while let Some((start, _, line)) = lines.next() {
         let line = line.trim();
         if !line.starts_with(FENCE) {
             continue;
@@ -81,26 +96,26 @@ pub fn find(text: &str) -> Result<Option<Checkpoint>> {
         ensure!(found.is_none(), "more than one checkpoint");
         ensure!(line == FENCE, "a checkpoint fence with more on its line");
         let mut json = String::new();
-        let mut closed = false;
-        for line in lines.by_ref() {
+        let mut closed = None;
+        for (_, end, line) in lines.by_ref() {
             if line.trim() == CLOSE {
-                closed = true;
+                closed = Some(end);
                 break;
             }
-            json.push_str(line);
+            json.push_str(line.lines().next().unwrap_or_default());
             json.push('\n');
             if json.len() > MAX_BYTES {
                 bail!("a checkpoint over {MAX_BYTES} bytes");
             }
         }
-        ensure!(closed, "a checkpoint without its closing fence");
+        let end = closed.context("a checkpoint without its closing fence")?;
         let checkpoint: Checkpoint = serde_json::from_str(&json).context(
             "a checkpoint that is not a JSON object of reason, done, left and next, all strings",
         )?;
         checkpoint
             .validate()
             .context("a checkpoint that does not say why the work stopped and what is left")?;
-        found = Some(checkpoint);
+        found = Some((checkpoint, start, end));
     }
     Ok(found)
 }
@@ -186,6 +201,23 @@ mod tests {
                 }
                 (got, want) => panic!("{name}: {got:?}, wanted {want:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn only_a_valid_trailing_checkpoint_is_detached() {
+        let message = "Subject\n\nWhy.\n\n";
+        let fence = format!(" {FENCE}\r\n{GOOD}\r\n ```\r\n");
+        assert_eq!(
+            without_trailing(&format!("{message}{fence} \n")),
+            Some(message)
+        );
+        for suffix in [
+            format!("{fence}More prose."),
+            format!("{fence}{fence}"),
+            format!("{FENCE}\ninvalid\n```"),
+        ] {
+            assert_eq!(without_trailing(&format!("{message}{suffix}")), None);
         }
     }
 }

@@ -174,7 +174,7 @@ fn validate(context: &ContextFile, bytes: &[u8]) -> Result<Vec<Map<String, Value
         Trusted {
             continuation: None,
             comment: Some((&context.repo, context.item)),
-            run_id: None,
+            ..Default::default()
         },
         &Native,
         |_| Vec::new(),

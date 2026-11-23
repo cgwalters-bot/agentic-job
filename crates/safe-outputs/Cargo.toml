@@ -37,6 +37,7 @@ base64 = "0.23"
 # A replacement commit's Date header (check::replacement).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"], optional = true }
+pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
 # GitHub's publishing: the temporary IDs and the digests gh-aw's handlers
 # make (apply::publish).

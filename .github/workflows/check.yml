@@ -282,15 +282,17 @@ jobs:
           COMMENT_TARGET: ${{ fromJSON(inputs.policy).comment-target }}
           EXPECT_REFUSAL: ${{ fromJSON(inputs.policy).expect-check-refusal }}
           CONTINUATION: ${{ fromJSON(inputs.policy).continuation-context }}
+          PROPOSALS: ${{ fromJSON(inputs.policy).proposals-artifact }}
         run: |
           destination=()
-          case "$COMMENT_TARGET" in ''|'*') ;; *) destination=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
+          if [ -z "$PROPOSALS" ]; then destination+=(--config "$JOB_DIR/config.toml"); fi
+          case "$COMMENT_TARGET" in ''|'*') ;; *) destination+=(--comment-repo "$COMMENT_REPO" --comment-target "$COMMENT_TARGET") ;; esac
           if [ -n "$CONTINUATION" ]; then
             destination+=(--continuation-context "$CONTINUATION" --run-attempt "$GITHUB_RUN_ATTEMPT")
           fi
           set +e
           "$JOB_DIR/agentic-job" check --policy "$JOB_DIR/policy.json" --outputs "$JOB_DIR/safe-outputs" \
-            --base-secret-evidence "$JOB_DIR/public-base.json" \
+             --base-secret-evidence "$JOB_DIR/public-base.json" \
             --collected "$GH_AW_TMP/agent_output.json" --report "$GH_AW_TMP/report.json" --run-id "$GITHUB_RUN_ID" "${destination[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
           statuses=("${PIPESTATUS[@]}")
           set -e

@@ -35,7 +35,11 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-pub use self::patch::{BASE_COMMIT_HEADER, PatchReading, read_patch};
+use self::patch::read_proposal_patch;
+pub use self::patch::{
+    BASE_COMMIT_HEADER, PatchReading, commit_body_problem, is_commit_trailer, mail_safe_line,
+    read_patch,
+};
 use crate::apply::ADD_COMMENT;
 use crate::contract::{COMMIT_RE, PatchRules, Policy, Secondary, update_fields};
 use crate::{
@@ -115,6 +119,8 @@ pub struct Trusted<'a> {
     /// The run's identifier: the only run whose branch a secondary pull
     /// request may be on.
     pub run_id: Option<&'a str>,
+    /// The producer's configured commit trailers, from trusted configuration.
+    pub commit_trailers: Option<&'a [String]>,
 }
 
 /// What the caller's own publishers refuse, which only it knows: this
@@ -150,6 +156,14 @@ pub const ISSUE_LINKS: &[&str] = &["parent", "blocked_by"];
 /// A request's type.
 pub fn item_type(item: &Map<String, Value>) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or_default()
+}
+
+fn pr_description(item: &Map<String, Value>) -> Option<(&str, &str)> {
+    let title = item
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Some((title, item.get("body")?.as_str()?))
 }
 
 /// What gh-aw's collector appends, of its own, to a result holding no
@@ -950,6 +964,7 @@ pub fn check(
         comment,
         run_id,
         continuation,
+        commit_trailers,
     } = trusted;
     // Only patches: the caller decides which files a hand-back may hold,
     // and one it misnames is refused here too.
@@ -1205,13 +1220,38 @@ pub fn check(
                 target.repo, target.branch_prefix
             ));
         }
-        Some((target, patch_file_name_in(&target.repo, branch)))
+        Some((target, patch_file_name_in(&target.repo, branch), item))
     });
     // The run's own patch is any other: a second one is refused below.
     let patch_names: Vec<&str> = patch_names
         .into_iter()
-        .filter(|name| secondary.as_ref().is_none_or(|(_, want)| name != want))
+        .filter(|name| secondary.as_ref().is_none_or(|(_, want, _)| name != want))
         .collect();
+    // Compare before and after sanitizing: the collector may rewrite URLs
+    // or markup in the description without changing the mail patch.
+    let raw_requests = handback
+        .outputs
+        .filter(|_| !patch_names.is_empty() || secondary.is_some())
+        .and_then(|bytes| crate::decode::decode(bytes).ok())
+        .unwrap_or_default();
+    let raw_pr_description = |item: &Map<String, Value>| {
+        let is_secondary = secondary_target(item, policy).is_some();
+        let raw = raw_requests.iter().find(|raw| {
+            raw.kind.replace('-', "_") == CREATE_PULL_REQUEST
+                && raw.object.get("branch") == item.get("branch")
+                && policy
+                    .secondary_pull_request
+                    .as_ref()
+                    .is_some_and(|target| {
+                        raw.object
+                            .get("repo")
+                            .and_then(Value::as_str)
+                            .is_some_and(|repo| target.names(repo))
+                    })
+                    == is_secondary
+        });
+        raw.and_then(|raw| pr_description(&raw.object))
+    };
     // Before the replacement's early return: the caller's checks go with
     // either.
     errors.extend(lifecycle(request));
@@ -1220,7 +1260,7 @@ pub fn check(
     // bounds pin for every commit of the run.
     let mut secondary_patch = None;
     match &secondary {
-        Some((target, want)) => {
+        Some((target, want, item)) => {
             let base = handback
                 .secondary_base
                 .and_then(|content| serde_json::from_slice::<Base>(content).ok())
@@ -1247,7 +1287,9 @@ pub fn check(
                         ..target.rules()
                     };
                     let text = String::from_utf8_lossy(content);
-                    let PatchReading { problems, files } = read_patch(&text, &rules, &base.commit);
+                    let bodies = [raw_pr_description(item), pr_description(item)];
+                    let PatchReading { problems, files } =
+                        read_proposal_patch(&text, &rules, &base.commit, bodies, commit_trailers);
                     errors.extend(problems.iter().map(|problem| format!("{want}: {problem}")));
                     secondary_patch = Some(PatchInfo {
                         replay: None,
@@ -1337,7 +1379,13 @@ pub fn check(
                     // What is not UTF-8 in it is in a file's content, where
                     // the rules look only at the first byte of a line.
                     let text = String::from_utf8_lossy(content);
-                    let PatchReading { problems, files } = read_patch(&text, &rules, &base.commit);
+                    let bodies = if output == CREATE_PULL_REQUEST {
+                        [raw_pr_description(request), pr_description(request)]
+                    } else {
+                        [None; 2]
+                    };
+                    let PatchReading { problems, files } =
+                        read_proposal_patch(&text, &rules, &base.commit, bodies, commit_trailers);
                     errors.extend(problems.iter().map(|problem| format!("{want}: {problem}")));
                     patch = Some(PatchInfo {
                         replay: None,

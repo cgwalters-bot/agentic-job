@@ -233,6 +233,173 @@ struct Reader {
     /// Whether a line of the commit message's body was read, and whether
     /// its first paragraph is over.
     body: (bool, bool),
+    /// `None` when reading a patch outside an ordinary handback.
+    commit_body: Option<String>,
+    message_ended: bool,
+}
+
+/// The whitespace cleanup Git applies with `commit --cleanup=whitespace`:
+/// trim trailing whitespace, discard outer blank lines and collapse runs of
+/// blank lines. Do not change indentation within paragraphs.
+fn canonical_prose(text: &str) -> String {
+    let mut prose = String::new();
+    let mut blank = false;
+    for line in text.lines() {
+        let line = line.trim_end_matches([' ', '\t', '\r', '\x0b', '\x0c']);
+        if line.is_empty() {
+            blank = true;
+        } else {
+            if !prose.is_empty() {
+                prose.push('\n');
+                if blank {
+                    prose.push('\n');
+                }
+            }
+            prose.push_str(line);
+            blank = false;
+        }
+    }
+    prose
+}
+
+/// The one-line `Key: value` syntax allowed for configured commit trailers.
+pub fn is_commit_trailer(line: &str) -> bool {
+    line.split_once(": ").is_some_and(|(key, value)| {
+        !key.is_empty()
+            && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            && !value.trim().is_empty()
+    }) && !line.chars().any(char::is_control)
+}
+
+/// Put before a line of a commit message that git or `check` would take for
+/// the start of a patch or of a mail.
+const MAIL_QUOTE: &str = "    ";
+
+/// What starts a line that git reads as a subject in the body of a mail.
+const IN_BODY_SUBJECT: &str = "[PATCH";
+
+/// The headers of a mail that git reads from the start of its body as
+/// well, and takes over the mail's own: who the commit is by, when, and
+/// its subject.
+const IN_BODY_HEADERS: [&str; 3] = ["from", "subject", "date"];
+
+/// A line of the agent's that would read as somebody's sign-off of the
+/// commit. Nobody signed off what an agent wrote.
+const SIGN_OFF: &str = "signed-off-by:";
+
+/// Whether LINE of the agent's text may not stand in a commit's message
+/// as it is, because of what git makes of it when it reads the patch as
+/// a mail (`git am`):
+///
+/// - the end of the message, the start of a change or the start of
+///   another mail. `check` refuses most of these; a line of dashes it
+///   cannot tell from the one `format-patch` ends the message with, and
+///   git would drop the rest of the message there;
+/// - a header in the body, or a `[PATCH]` line, which git takes over the
+///   mail's own: the agent's text would choose the commit's author and
+///   date, and a subject other than the title;
+/// - a scissors line, above which git drops everything when told to
+///   look for one;
+/// - a sign-off.
+fn needs_quoting(line: &str) -> bool {
+    let starts_patch = ["---", "@@ -", "Index: ", "diff -"]
+        .iter()
+        .any(|start| line.starts_with(start));
+    // What starts a mail: `From `, and further on a time.
+    let starts_mail = line.starts_with("From ")
+        && line
+            .as_bytes()
+            .windows(3)
+            .any(|w| w[0].is_ascii_digit() && w[1] == b':' && w[2].is_ascii_digit());
+    let lower = line.trim_start_matches('>').trim_start().to_lowercase();
+    let header = IN_BODY_HEADERS.iter().any(|name| {
+        lower
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.trim_start().starts_with(':'))
+    });
+    let scissors = (line.contains(">8") || line.contains("8<"))
+        && line.chars().all(|c| "-<>8 \u{2702}".contains(c));
+    starts_patch
+        || starts_mail
+        || header
+        || scissors
+        || lower.starts_with(SIGN_OFF)
+        || line.trim_start().starts_with(IN_BODY_SUBJECT)
+}
+
+/// LINE of an agent's commit body as `run` writes it into the mail: tabs
+/// expanded, control characters blanked, trailing whitespace trimmed and
+/// a line git would misread indented by [`MAIL_QUOTE`].
+pub fn mail_safe_line(line: &str) -> String {
+    let line: String = line
+        .replace('\t', "    ")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let line = line.trim_end();
+    if needs_quoting(line) {
+        format!("{MAIL_QUOTE}{line}")
+    } else {
+        line.to_owned()
+    }
+}
+
+/// Reject report prose in a commit, without printing any of it. Compare both
+/// the request as written and the description after publication drops a title
+/// heading, each also in the form [`mail_safe_line`] gives a copy of it. With
+/// trusted configuration, only strip exact copies of its trailer block.
+/// Without it, retain the legacy check of a final trailer paragraph in mail
+/// from a producer without a run config.
+pub fn commit_body_problem<'a>(
+    body: &str,
+    descriptions: impl IntoIterator<Item = (&'a str, &'a str)>,
+    trailers: Option<&[String]>,
+) -> Option<&'static str> {
+    let prose = canonical_prose(body);
+    let trailer_block = trailers.map(|lines| canonical_prose(&lines.join("\n")));
+    let matches = |description: &str| {
+        let mailed: Vec<String> = description.lines().map(mail_safe_line).collect();
+        copies(&prose, description, trailer_block.as_deref())
+            || copies(&prose, &mailed.join("\n"), trailer_block.as_deref())
+    };
+    if descriptions.into_iter().any(|(title, description)| {
+        matches(description)
+            || crate::apply::publish::without_title_heading(title, description)
+                .is_ok_and(|published| matches(&published))
+    }) {
+        return Some("the commit body equals the pull request body");
+    }
+    use pulldown_cmark::{Event, Parser, Tag};
+    if Parser::new(body.trim_matches(['\r', '\n']))
+        .any(|event| matches!(event, Event::Start(Tag::Heading { .. })))
+    {
+        return Some("the commit body contains a Markdown heading");
+    }
+    None
+}
+
+/// Whether canonical PROSE is DESCRIPTION followed only by trailers.
+fn copies(prose: &str, description: &str, trailer_block: Option<&str>) -> bool {
+    let description = canonical_prose(description);
+    let description = description.trim();
+    if description.is_empty() {
+        return false;
+    }
+    let mut remaining = prose;
+    while remaining.trim() != description {
+        let Some((before, tail)) = remaining.rsplit_once("\n\n") else {
+            return false;
+        };
+        if let Some(block) = trailer_block {
+            if tail != block {
+                return false;
+            }
+        } else {
+            return before.trim() == description && tail.lines().all(is_commit_trailer);
+        }
+        remaining = before;
+    }
+    true
 }
 
 /// The fields `git mailinfo` takes from the start of a message's body
@@ -335,6 +502,15 @@ impl Reader {
 
     /// A line of the commit message.
     fn message(&mut self, line: &str) -> State {
+        if line == "---" {
+            self.message_ended = true;
+        }
+        if !self.message_ended
+            && let Some(body) = &mut self.commit_body
+        {
+            body.push_str(line);
+            body.push('\n');
+        }
         let (started, over) = &mut self.body;
         if line.is_empty() {
             // git skips empty lines before the body.
@@ -627,7 +803,29 @@ pub struct PatchReading {
 
 /// Reads a patch against `base_commit` under `rules`.
 pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> PatchReading {
+    read(patch, rules, base_commit, None)
+}
+
+pub(super) fn read_proposal_patch(
+    patch: &str,
+    rules: &PatchRules<'_>,
+    base_commit: &str,
+    descriptions: [Option<(&str, &str)>; 2],
+    trailers: Option<&[String]>,
+) -> PatchReading {
+    read(patch, rules, base_commit, Some((descriptions, trailers)))
+}
+
+type ProposalMessage<'a> = ([Option<(&'a str, &'a str)>; 2], Option<&'a [String]>);
+
+fn read(
+    patch: &str,
+    rules: &PatchRules<'_>,
+    base_commit: &str,
+    proposal: Option<ProposalMessage<'_>>,
+) -> PatchReading {
     let mut reader = Reader {
+        commit_body: proposal.map(|_| String::new()),
         github_exempt: rules
             .unprotected_dot_folders
             .iter()
@@ -675,11 +873,18 @@ pub fn read_patch(patch: &str, rules: &PatchRules<'_>, base_commit: &str) -> Pat
 
     let Reader {
         mut problems,
+        commit_body,
         files,
         base_commit: found,
         from,
         ..
     } = reader;
+    if let (Some(body), Some((descriptions, trailers))) = (commit_body, proposal)
+        && let Some(problem) =
+            commit_body_problem(&body, descriptions.into_iter().flatten(), trailers)
+    {
+        problems.push(problem.to_owned());
+    }
     if files.is_empty() {
         problems.push("the patch holds no change".to_owned());
     }
@@ -730,6 +935,46 @@ mod tests {
     use crate::contract::PullRequest;
 
     const BASE: &str = "1111111111111111111111111111111111111111";
+
+    #[test]
+    fn compares_canonical_prose_before_a_complete_trailer_block() {
+        let description = "Why it changes.\r\n\r\nDetails.\r\n";
+        let prose = "\nWhy it changes. \n\t\n\nDetails.\t\n";
+        let trailers = ["Generated-by: Example".into(), "Refs: issue".into()];
+        for (tail, copied) in [
+            ("", true),
+            ("\nGenerated-by: Example\nRefs: issue\n", true),
+            (
+                "\nGenerated-by: Example\nRefs: issue\n\nGenerated-by: Example\nRefs: issue\n",
+                true,
+            ),
+            ("\nRefs: issue\n", false),
+            ("\nRationale: this is an authored paragraph\n", false),
+            ("\nGenerated-by: Example\nMore prose.\n", false),
+            ("\nNot a trailer: more prose.\n", false),
+            ("\nEmpty: \n", false),
+        ] {
+            let body = format!("{prose}{tail}");
+            assert_eq!(
+                commit_body_problem(&body, [("", description)], Some(&trailers)).is_some(),
+                copied,
+                "{body:?}"
+            );
+            assert!(commit_body_problem(&body, [("", body.as_str())], Some(&trailers)).is_some());
+        }
+    }
+
+    #[test]
+    fn compares_descriptions_as_the_mail_quotes_them() {
+        let description = "Why.\n\n---\n\nFrom: someone\n\n\tCode.";
+        let mailed: Vec<String> = description.lines().map(mail_safe_line).collect();
+        let mailed = mailed.join("\n");
+        assert_eq!(mailed, "Why.\n\n    ---\n\n    From: someone\n\n    Code.");
+        assert!(commit_body_problem(&mailed, [("", description)], Some(&[])).is_some());
+        // Indentation is not stripped: a deeper code line stays distinct.
+        let code = "Why.\n\n    ---";
+        assert!(commit_body_problem("Why.\n\n        ---", [("", code)], Some(&[])).is_none());
+    }
 
     fn patch_problems(patch: &str, rules: &PullRequest, base_commit: &str) -> Vec<String> {
         read_patch(patch, &rules.rules(), base_commit).problems

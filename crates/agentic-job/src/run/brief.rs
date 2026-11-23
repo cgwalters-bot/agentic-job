@@ -494,7 +494,12 @@ pub fn guide(
         for name in allowed {
             let fields = collect::field_guide(name, policy.forge)
                 .unwrap_or_else(|| "as gh-aw's safe outputs define them".to_owned());
-            let _ = writeln!(text, "  - `{name}`: {fields}");
+            let extra = if name == CREATE_PULL_REQUEST {
+                ", `commit_message` (optional string, consumed when making the patch)"
+            } else {
+                ""
+            };
+            let _ = writeln!(text, "  - `{name}`: {fields}{extra}");
         }
     }
     if push.is_some() {
@@ -514,13 +519,19 @@ pub fn guide(
              \"message\": \"...\"}`: the message's first line is the commit's subject and the \
              rest its body. Put no line in it that credits a tool or a model (\"Generated with \
              ...\", `Co-Authored-By:`): the run's own configuration adds the commit's trailers. \
-             Without one, the message is made from the `summary` below.\n",
+             Follow the deployment's commit-message skill if available. For an ordinary patch, \
+             the commit body must not contain a Markdown heading. Without a message, \
+             only the first line of the `summary` below supplies a commit subject.\n",
         );
     } else if carrier.is_some() {
         text.push_str(
             "  To word the pull request yourself, write `{\"type\": \"create_pull_request\", \
-             \"title\": \"...\", \"body\": \"...\"}`: the title and the body are also the \
-             message of the commit. Put no line in either that credits a tool or a model \
+             \"title\": \"...\", \"body\": \"...\", \"commit_message\": \"subject\\n\\nwhy\"}`. \
+             Write `commit_message` separately, following the deployment's commit-message skill \
+             if available: an imperative subject, then an optional short body explaining why. \
+             A commit body that copies the pull request body or contains a Markdown heading \
+             is refused. With no `commit_message`, only the first line of the title becomes the \
+             commit subject. Put no line in the request that credits a tool or a model \
              (\"Generated with ...\", `Co-Authored-By:`): the run's own configuration adds the \
              commit's trailers. Without one, a pull request is made from the `summary` \
              below. A run for issue N gets `Closes #N` added to the body; if your change \
@@ -532,9 +543,9 @@ pub fn guide(
         let _ = writeln!(
             text,
             "  For the second working tree's change, write `{{\"type\": \"create_pull_request\", \
-             \"repo\": \"{}\", \"title\": \"...\", \"body\": \"...\"}}` as well: its title and \
-             body are that pull request's and its commit's, under the same rules, and nothing is \
-             made up for it. It is always a draft, and counts toward the requests in all.",
+             \"repo\": \"{}\", \"title\": \"...\", \"body\": \"...\", \"commit_message\": \"...\"}}` \
+             as well, under the same rules. No request is made up for it. It is always a draft, \
+             and counts toward the requests in all.",
             target.repo
         );
     }
@@ -801,8 +812,8 @@ mod tests {
             "`/home/agent/out/safe-outputs.jsonl` (optional)",
             "At most 1024 KiB, 1000 lines and 3 requests in all",
             "This run allows: `create_pull_request` (at most 1), `noop` (at most 1).",
-            "{\"type\": \"create_pull_request\", \"title\": \"...\", \"body\": \"...\"}",
-            "the message of the commit",
+            "{\"type\": \"create_pull_request\", \"title\": \"...\", \"body\": \"...\", \"commit_message\": \"subject\\n\\nwhy\"}",
+            "only the first line of the title becomes the commit subject",
             "start a line of the body with `Part of #N`",
             "`/home/agent/out/outcome.json`: your report",
             "one JSON object of at most 64 KiB",

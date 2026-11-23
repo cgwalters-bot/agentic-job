@@ -319,6 +319,10 @@ const FIXES: &[(&str, &str)] = &[
         "write at most one checkpoint, exactly as `agentic-job handback guide` shows",
     ),
     (
+        "the commit body",
+        "write a short commit body explaining why, without the pull request body or Markdown headings",
+    ),
+    (
         "which the policy does not allow",
         "remove that request: only the types the brief lists are allowed",
     ),
@@ -454,8 +458,8 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
         if let Some(why) = change.dropped {
             report.problems.push(Problem {
                 at: "the change".to_owned(),
+                fix: fix_for(&why, false).to_owned(),
                 what: why,
-                fix: GUIDE_FIX.to_owned(),
             });
         }
         if let (Some(why), Some(tree)) = (change.secondary_dropped, &checkout.secondary) {
@@ -515,6 +519,7 @@ fn validate(home: &Path, run: &RunFile) -> Result<Report> {
                 policy,
                 &run.run_id,
                 &run.public_base,
+                &run.commit.trailers,
             )?;
             base_shapes_checked = verdict.ok && verdict.patch.is_some();
             if let Some(patch) = &verdict.patch

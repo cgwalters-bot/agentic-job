@@ -630,6 +630,7 @@ mod tests {
         let report = checked.join("report.json");
         let args = super::super::Args {
             policy: policy.clone(),
+            config: None,
             outputs: f.staging.safe_outputs(),
             collected: f.collected.clone(),
             report: Some(report.clone()),

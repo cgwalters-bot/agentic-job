@@ -1301,6 +1301,7 @@ mod tests {
                 &policy,
                 "1",
                 &public,
+                &[],
             )
             .unwrap();
             assert_eq!(verdict.ok, passes, "check {case}: {:?}", verdict.errors);
