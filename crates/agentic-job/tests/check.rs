@@ -267,9 +267,9 @@ fn analysis_comments_use_the_callers_destination_without_a_checkout() {
         .args([
             "policy",
             "--repo",
-            "bootc-dev/bootc",
+            "example-org/example-repo",
             "--clone-url",
-            "https://github.com/bootc-dev/bootc",
+            "https://github.com/example-org/example-repo",
             "--base",
             "bot/topic",
             "--kind",
@@ -297,7 +297,7 @@ fn analysis_comments_use_the_callers_destination_without_a_checkout() {
             0,
         ),
         (
-            serde_json::json!({"repo": "bootc-dev/bootc", "item_number": 170}),
+            serde_json::json!({"repo": "example-org/example-repo", "item_number": 170}),
             1,
         ),
         (
@@ -509,13 +509,13 @@ impl Run {
             .args([
                 "policy",
                 "--repo",
-                "bootc-dev/bootc",
+                "example-org/example-repo",
                 "--base",
                 "main",
                 "--kind",
                 "branch",
             ])
-            .args(["--clone-url", "https://github.com/bootc-dev/bootc"])
+            .args(["--clone-url", "https://github.com/example-org/example-repo"])
             .args([
                 "--outputs",
                 "create_pull_request",
@@ -1338,7 +1338,8 @@ fn public_base_evidence_cannot_complete_an_incomplete_key() {
     );
     std::fs::write(
         run.path("out/base.json"),
-        serde_json::json!({"repo": "bootc-dev/bootc", "ref": "main", "commit": base}).to_string(),
+        serde_json::json!({"repo": "example-org/example-repo", "ref": "main", "commit": base})
+            .to_string(),
     )
     .unwrap();
     for (case, diff) in [("added body", added), ("invented removed body", removed)] {

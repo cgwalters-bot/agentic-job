@@ -304,8 +304,8 @@ fn context_admission() {
 /// A request within the bounds of `data/policy/allow.toml`, as pairs of a
 /// flag and its value.
 const REQUEST: &[(&str, &str)] = &[
-    ("--repo", "bootc-dev/bootc"),
-    ("--clone-url", "https://github.com/bootc-dev/bootc"),
+    ("--repo", "example-org/example-repo"),
+    ("--clone-url", "https://github.com/example-org/example-repo"),
     ("--base", "main"),
     ("--kind", "branch"),
     ("--outputs", "create_pull_request,noop"),
@@ -486,7 +486,7 @@ fn a_private_request_needs_every_bounds_file_to_opt_in() {
                     },
                 ]
             }))
-            .args(["--private", "--output-repo", "bootc-dev/bootc"])
+            .args(["--private", "--output-repo", "example-org/example-repo"])
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -515,8 +515,11 @@ fn a_request_within_the_bounds_prints_its_policy() {
         String::from_utf8_lossy(&output.stderr)
     );
     let policy: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(policy["repo"], "bootc-dev/bootc");
-    assert_eq!(policy["clone_url"], "https://github.com/bootc-dev/bootc");
+    assert_eq!(policy["repo"], "example-org/example-repo");
+    assert_eq!(
+        policy["clone_url"],
+        "https://github.com/example-org/example-repo"
+    );
     assert_eq!(policy["base"], "main");
     assert_eq!(policy["kind"], "branch");
     assert_eq!(policy["max_outputs"], 2);
@@ -1115,15 +1118,18 @@ fn a_request_outside_the_bounds_prints_no_policy() {
     let cases: &[(&[(&str, &str)], &str)] = &[
         (
             &[
-                ("--repo", "evil/bootc"),
-                ("--clone-url", "https://github.com/evil/bootc"),
+                ("--repo", "evil/example-repo"),
+                ("--clone-url", "https://github.com/evil/example-repo"),
             ],
-            "repo \"evil/bootc\"",
+            "repo \"evil/example-repo\"",
         ),
         (&[("--base", "release")], "base \"release\""),
         (&[("--base", "-main")], "base \"-main\""),
         (
-            &[("--clone-url", "https://evil.example/bootc-dev/bootc")],
+            &[(
+                "--clone-url",
+                "https://evil.example/example-org/example-repo",
+            )],
             "host",
         ),
         (&[("--outputs", "delete_repo")], "delete_repo"),
@@ -1132,7 +1138,10 @@ fn a_request_outside_the_bounds_prints_no_policy() {
         // The concern of tracker#281: text that would be structure if a
         // policy were put together as text.
         (
-            &[("--repo", "bootc-dev/bootc\",\"max_outputs\":99,\"x\":\"")],
+            &[(
+                "--repo",
+                "example-org/example-repo\",\"max_outputs\":99,\"x\":\"",
+            )],
             "repo ",
         ),
         (&[("--base", "main\n\"max_outputs\": 99")], "base "),
@@ -1171,7 +1180,7 @@ fn a_secondary_pull_request_is_admitted_beside_the_runs_own() {
     std::fs::write(
         &allow,
         format!(
-            "{text}\n[github.secondary_pull_request]\nrepo = \"cgwalters-forge/misctool\"\n\
+            "{text}\n[github.secondary_pull_request]\nrepo = \"example-org/example-tool\"\n\
              base = \"main\"\nbranch_prefix = \"agentic-job/\"\nmax = 1\n\
              max_patch_bytes = 65536\nmax_patch_files = 10\n"
         ),
@@ -1182,7 +1191,7 @@ fn a_secondary_pull_request_is_admitted_beside_the_runs_own() {
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        printed["secondary_pull_request"]["repo"], "cgwalters-forge/misctool",
+        printed["secondary_pull_request"]["repo"], "example-org/example-tool",
         "{printed}"
     );
     let output = policy(&allow, &[("--outputs", "add_comment,noop")]);

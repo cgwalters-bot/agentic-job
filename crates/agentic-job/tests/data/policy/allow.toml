@@ -4,7 +4,9 @@
 # The hosts a clone URL may name, exactly.
 hosts = ["github.com"]
 # Globs, ignoring case: `*` is anything but a slash, `**` anything.
-repos = ["bootc-dev/*", "cgwalters-bot/*"]
+# The second admits the recorded hand-backs of real runs in
+# safe-outputs/fixtures, which check.rs checks under these bounds.
+repos = ["example-org/*", "cgwalters-bot/*"]
 bases = ["main", "bot/**"]
 
 # The most outputs a run may hand back in all.

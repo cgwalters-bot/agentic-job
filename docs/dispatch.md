@@ -562,7 +562,7 @@ operator's decision:
 - the credential with which tracker starts a workflow in bootc-dev, and
   who holds it;
 - broker admission for the external repository and workflow identity;
-- whether ostree or any other fork joins the midstream bounds.
+- which forks the caller's midstream bounds admit.
 
 ### Implementation slices
 
@@ -571,8 +571,8 @@ pull request under
 [tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
 Slices 3, 4 and 5 are built and off by default; none has run on an
 external runner, and no caller enables them. No slice enables a profile,
-changes credentials, broker admission or bounds, or adds ostree or any
-other target. Repositories without an owner are under `cgwalters-forge`.
+changes credentials, broker admission or bounds, or adds a target.
+Repositories without an owner are under `cgwalters-forge`.
 
 1. **tracker — Closed runner profile map, all disabled.**
    `.github/agentic-job/runner-profiles.json` with the format and
@@ -694,7 +694,7 @@ Dispatch resolves the plan's `runner` before it starts any workflow:
    fallback to `hosted`: that would run a VM test without KVM and hide that
    it never ran.
 5. An external profile is refused for any kind but `implement`, and for
-   any target that `midstream.toml` does not list. A profile chooses where
+   any target that `midstream.toml` does not admit. A profile chooses where
    a job runs, never what it may change. `fix` waits for a later design:
    it needs the pull request's head pinned from dispatch to apply, which
    policy does not do today outside review, and the devspace workflow has
@@ -1087,12 +1087,11 @@ this contract does not authorize a new same-repository push path.
 
 For the bootc example, the trusted target is `cgwalters-forge/bootc` on
 `main`, with its exact base commit recorded, not the devspace repository
-or `bootc-dev/bootc`. As read on 7 November 2026, tracker's
-[midstream bounds](https://github.com/cgwalters-forge/tracker/blob/main/.github/agentic-job/midstream.toml)
-list bootc, composefs-rs, bcvk, rpm-ostree and gh-agentic-workflows under
-`cgwalters-forge`; the effective implement/fix bounds at admission remain
-authoritative. Ostree is **not** in that list: adding it or any other fork
-requires a separate operator bounds decision. A runner profile grants no
+or `bootc-dev/bootc`. Which forks may be targets is the caller's
+decision: its implement/fix bounds, as in effect at admission, select them
+by repository metadata ([organization rules](safe-outputs.md#the-bounds-and-the-policy)),
+and policy refuses a repository whose metadata does not match. Admitting
+another fork is an operator bounds decision. A runner profile grants no
 target authority. A draft links the external run; VM logs and RESULTS-style
 evidence stay in that run's bounded artifacts, not pasted into the PR.
 
@@ -1121,7 +1120,7 @@ Runtime acceptance remains outstanding: demonstrate an admitted external
 run and its hand-back applied as one draft on an allowed midstream fork.
 Negative tests must refuse unknown and disabled profiles, a malformed map,
 a `fix`, `pool`, `effort` or non-hosted `config` with an external profile,
-unavailable KVM/libvirt, unauthorized targets (including ostree today), a
+unavailable KVM/libvirt, targets the bounds do not admit, a
 download that does not match its digest, a wrong
 repository/workflow/commit/wrapper/triggering actor/run, a second attempt,
 no match or two matches for a `dispatch-id`, a replayed or late run, a

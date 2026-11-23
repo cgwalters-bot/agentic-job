@@ -622,18 +622,10 @@ mod tests {
             (with("GET", "GitHub.com.", "/"), true),
             // writes only where policy.toml lists them
             (
-                with("POST", "github.com", "/bootc-dev/bootc/git-upload-pack"),
-                true,
-            ),
-            (
-                with("POST", "github.com", "/bootc-dev/bootc.git/git-upload-pack"),
-                true,
-            ),
-            (
                 with(
                     "POST",
                     "github.com",
-                    "/bootc-dev/bootc.git/git-upload-pack?x=1",
+                    "/example-org/example-repo/git-upload-pack",
                 ),
                 true,
             ),
@@ -641,7 +633,23 @@ mod tests {
                 with(
                     "POST",
                     "github.com",
-                    "/bootc-dev/bootc.git/git-receive-pack",
+                    "/example-org/example-repo.git/git-upload-pack",
+                ),
+                true,
+            ),
+            (
+                with(
+                    "POST",
+                    "github.com",
+                    "/example-org/example-repo.git/git-upload-pack?x=1",
+                ),
+                true,
+            ),
+            (
+                with(
+                    "POST",
+                    "github.com",
+                    "/example-org/example-repo.git/git-receive-pack",
                 ),
                 false,
             ),
