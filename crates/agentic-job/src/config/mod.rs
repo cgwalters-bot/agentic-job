@@ -580,6 +580,9 @@ mod tests {
             "[setup]\nnpm = [\"@scope/name\"]",
             "[setup]\nagents = [\"opencode-ai@1.18.34\"]",
             "[setup]\nagents = [\"opencode-linux-x64@1.18.35\"]",
+            // Keep 2.x out of the managed allow-list until its credential
+            // stores and ACP delegation are covered by the run gates.
+            "[setup]\nagents = [\"@opencode/cli@2.3.0\"]",
         ];
         for text in bad {
             let config = Config::parse(text).unwrap_or_else(|err| panic!("{text:?}: {err:#}"));

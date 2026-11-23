@@ -1215,6 +1215,15 @@ not define, and opts into `apply-partial`, which inference does not need.
   composition accepts a zero for a brokered agent with a budget, and the
   run then has no request cap.
 
+    OpenCode 2.x (`@opencode/cli`) is not a pinned agent, and installing it
+    through `npm` is not covered by the run's checks: gate admission does
+    not refuse a reused home holding its database (`opencode.db` or
+    `opencode.db-wal`), its ACP `subagent` calls are not counted against
+    `max-tasks` and `max-worker-tasks`, and the run kills the agent's process
+    group when the session ends, before a delayed child can return. The
+    migration is tracked in
+    [#4292](https://github.com/cgwalters-forge/agentic-job/issues/4292).
+
     `agent: vibe` installs `mistral-vibe==2.26.1` into a root-owned Python
     virtual environment before hardening; it does not use the `npm` input.
     Set `model` to the broker's bare Mistral model name (for example
