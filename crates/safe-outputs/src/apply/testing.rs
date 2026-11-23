@@ -230,6 +230,7 @@ pub fn repository_with(eol: &str) -> (tempfile::TempDir, PullRequest) {
     sh(&fork, &["init", "-q", "--bare"]);
     let pr = PullRequest {
         replay: None,
+        base_repo: None,
         base: "main".into(),
         base_commit: base,
         push_repo: "fork/name".into(),

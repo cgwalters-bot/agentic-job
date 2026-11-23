@@ -45,6 +45,9 @@ on:
       kind:
         type: string
         required: true
+      base:
+        type: string
+        default: ""
       status-comment:
         type: string
         default: ""
@@ -85,6 +88,10 @@ on:
         type: choice
         options: [implement, triage, research, review, fix]
         required: true
+      base:
+        description: "Implement only: optional pr:N for an open agent PR, subject to caller bounds"
+        type: string
+        default: ""
       status-comment:
         description: >-
           The id of the dispatcher's own comment on the item for the run's status, instead of a
@@ -161,6 +168,7 @@ jobs:
           TARGET_ITEM: ${{ inputs.item }}
           ITEM_REPO: ${{ inputs.item-repo }}
           PROFILE: ${{ inputs.kind }}
+          BASE: ${{ inputs.base }}
           TASK: ${{ inputs.task }}
           SESSION: ${{ inputs.session }}
           SCRIPTED: ${{ inputs.scripted }}
@@ -176,7 +184,10 @@ jobs:
           INFERENCE_PROVIDER: ${{ vars.INFERENCE_PROVIDER }}
           APPLY_ENVIRONMENT: ${{ !inputs.scripted && vars.APPLY_ENVIRONMENT || '' }}
           GH_TOKEN: ${{ github.token }}
-        run: '"$RUNNER_TEMP/agentic-job-bin/agentic-job" dispatch --output "$GITHUB_OUTPUT"'
+        run: |
+          [ -z "$BASE" ] || { [ "$PROFILE" = implement ] && [[ "$BASE" == pr:* ]]; } ||
+            { echo '::error::base expects pr:N and kind implement'; exit 1; }
+          "$RUNNER_TEMP/agentic-job-bin/agentic-job" dispatch --output "$GITHUB_OUTPUT"
 
   run:
     needs: target
@@ -209,6 +220,7 @@ jobs:
     with:
       id: ${{ inputs.item-repo || inputs.repo }}#${{ inputs.item }}
       repo: ${{ inputs.repo }}
+      base: ${{ inputs.base || 'main' }}
       task: ${{ needs.target.outputs.task }}
       kind: ${{ (inputs.kind == 'implement' || inputs.kind == 'fix') && 'branch' || 'analysis' }}
       # A triage run may close issues of `repo` it finds done, each with

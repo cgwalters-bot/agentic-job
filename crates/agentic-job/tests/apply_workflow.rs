@@ -1181,8 +1181,14 @@ fn fork_routing_is_decided_before_fetching_the_patch_base() {
     );
     assert!(steps.iter().any(|step| step["with"]["ref"].as_str()
         == Some(
-            "${{ fromJSON(inputs.policy).push-item == '' && fromJSON(inputs.policy).base || '' }}"
+            "${{ fromJSON(inputs.policy).push-item == '' && env.STACK_REPO == '' && fromJSON(inputs.policy).base || '' }}"
         )));
+    assert!(
+        fork_step["run"]
+            .as_str()
+            .unwrap()
+            .contains("--policy \"$GH_AW_TMP/policy.json\"")
+    );
     let policy = definition("policy.yml");
     assert_eq!(
         policy["on"]["workflow_call"]["outputs"]["push-item"]["value"].as_str(),
@@ -1191,6 +1197,10 @@ fn fork_routing_is_decided_before_fetching_the_patch_base() {
     assert_eq!(
         policy["jobs"]["policy"]["outputs"]["push-item"].as_str(),
         Some("${{ inputs.push-item }}")
+    );
+    assert_eq!(
+        policy["on"]["workflow_call"]["outputs"]["stack-base-repo"]["value"].as_str(),
+        Some("${{ jobs.policy.outputs.stack-base-repo }}")
     );
 }
 

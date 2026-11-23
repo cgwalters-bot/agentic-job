@@ -178,6 +178,14 @@ compatibility secrets `INFERENCE_API_KEY` and `MCP_TOKEN`, which are declared
 but forwarded to no job
 ([refused for now](inference.md#a-provider-api-key)).
 
+## Dispatch stacking
+
+For a public implement run, `base: pr:N` selects an open PR in the target
+repository. The caller opts in with `AGENTIC_JOB_STACK_AUTHOR`, permits the
+resolved branch in `bases`, and enables native `create_pull_request` publication;
+the ordinary branch form of `base` is unchanged.
+See [dispatch](dispatch.md) for admission and publication rules.
+
 ## The review workflow's dispatch
 
 Review requests may opt into `add_labels` beside the verdict using the existing

@@ -222,6 +222,27 @@ fn a_pull_request_with_its_patch_is_accepted() {
 }
 
 #[test]
+fn stack_base_pins_the_patch_even_when_handback_and_mail_agree() {
+    let case = Case::pull_request("src/lib.rs");
+    let mut policy = policy();
+    policy.stack_base = Some(crate::contract::StackBase {
+        repo: "example-bot/fork".into(),
+        commit: BASE.into(),
+    });
+    assert!(case.check(&policy).errors.is_empty());
+    policy.stack_base.as_mut().unwrap().commit = HEAD.into();
+    let checked = case.check(&policy);
+    assert!(
+        checked
+            .errors
+            .iter()
+            .any(|e| e.contains("the pull request's head")),
+        "{:?}",
+        checked.errors
+    );
+}
+
+#[test]
 fn document_check_bounds_and_mixed_writes() {
     let mut policy = fixtures::policy();
     policy.safe_outputs.create_pull_request = None;

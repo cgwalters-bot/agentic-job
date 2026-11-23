@@ -1139,6 +1139,7 @@ pub fn check(
         .push_to_pull_request_branch
         .as_ref()
         .map(|push| push.head.as_str())
+        .or_else(|| policy.stack_base.as_ref().map(|base| base.commit.as_str()))
         .or_else(|| {
             policy
                 .external

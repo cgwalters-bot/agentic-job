@@ -633,6 +633,7 @@ mod tests {
         Policy {
             external: None,
             continuation: None,
+            stack_base: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),
@@ -1041,6 +1042,7 @@ mod brief_tests {
         Policy {
             external: None,
             continuation: None,
+            stack_base: None,
             advisory: None,
             context: Vec::new(),
             repo: "o/r".into(),

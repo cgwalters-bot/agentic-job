@@ -349,6 +349,8 @@ pub struct Close {
 pub struct PullRequest {
     pub replay: Option<crate::replay::Receipt>,
     pub base: String,
+    /// When stacking, open the PR in the checked base's repository.
+    pub base_repo: Option<String>,
     /// The commit check read the patch against, on `base`.
     pub base_commit: String,
     /// The fork `branch` is pushed to, never the target repository.
@@ -780,6 +782,7 @@ fn pull_request(
     let draft = pr_rules.draft && !(pr_rules.ready_when_complete && report.checkpoint.is_none());
     Ok(PullRequest {
         replay: None,
+        base_repo: None,
         base: policy.base.clone(),
         base_commit,
         push_repo: push_repo.to_owned(),

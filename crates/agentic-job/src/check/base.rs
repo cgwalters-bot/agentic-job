@@ -94,14 +94,22 @@ pub fn run(args: &Args) -> Result<Exit> {
             .safe_outputs
             .push_to_pull_request_branch
             .as_ref()
-            .map_or(policy.base.as_str(), |push| push.head.as_str());
+            .map_or_else(
+                || {
+                    policy
+                        .stack_base
+                        .as_ref()
+                        .map_or(policy.base.as_str(), |base| base.commit.as_str())
+                },
+                |push| push.head.as_str(),
+            );
         git(&[
             "fetch",
             "--quiet",
             "--depth=1",
             "--no-tags",
             "--",
-            &policy.clone_url,
+            &crate::run::clone::base_url(&policy),
             reference,
         ])?;
         let checkout = Checkout {

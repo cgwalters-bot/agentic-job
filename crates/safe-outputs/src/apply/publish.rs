@@ -1595,6 +1595,15 @@ fn pull_request(
         .patch
         .as_ref()
         .context("a create_pull_request, and check accepted no patch")?;
+    if let Some(stack) = &policy.stack_base {
+        ensure!(
+            base == policy.base
+                && head_repo.eq_ignore_ascii_case(&stack.repo)
+                && patch.base_commit == stack.commit
+                && branch != base,
+            "the stacked PR must start at the admitted head and use a new branch in its repository"
+        );
+    }
     ensure!(
         patch.commit_files.is_none(),
         "a replacement series, which only a push carries"
@@ -1666,6 +1675,7 @@ fn pull_request(
         PullRequest {
             replay: patch.replay.clone(),
             base: base.to_owned(),
+            base_repo: policy.stack_base.as_ref().map(|base| base.repo.clone()),
             base_commit: patch.base_commit.clone(),
             push_repo: head_repo.to_owned(),
             private: policy.private,
@@ -3599,7 +3609,8 @@ fn pull_request_outcome(
     run: &Run,
     log: &mut dyn FnMut(&Annotation),
 ) -> Outcome {
-    let body = match pull_request_body(&pr.body, defaults, publisher, run) {
+    let repo = pr.base_repo.as_deref().unwrap_or(&publisher.repo);
+    let body = match pull_request_body(&pr.body, defaults, repo, run) {
         Ok(body) => body,
         Err(err) => return Outcome::failed(op, format!("{err:#}")),
     };
@@ -3623,7 +3634,7 @@ fn pull_request_outcome(
                     .context("the forge named no number")
                     .and_then(|number| {
                         publisher.github.labels_retrying(
-                            &format!("/repos/{}/issues/{number}/labels", publisher.repo),
+                            &format!("/repos/{repo}/issues/{number}/labels"),
                             &json!({"labels": labels}),
                             &format!("add labels to PR #{number}"),
                         )
@@ -3642,7 +3653,7 @@ fn pull_request_outcome(
                 kind: Kind::Success,
                 result: json!({"success": true, "number": made.number, "url": made.url,
                     "id": made.id, "metadata": {"node_id": made.node_id}, "branch_name": pr.branch,
-                    "temporaryId": temporary_id, "repo": publisher.repo, "head_repo": pr.push_repo,
+                    "temporaryId": temporary_id, "repo": repo, "head_repo": pr.push_repo,
                     "base": pr.base}),
                 error: None,
             }
@@ -3654,12 +3665,7 @@ fn pull_request_outcome(
 /// A pull request's BODY, without a first heading repeating the title, as
 /// gh-aw's handler writes it: sanitized, with the footer, the workflow's
 /// marker and the run's provenance.
-fn pull_request_body(
-    body: &str,
-    defaults: &[String],
-    publisher: &GithubPublisher,
-    run: &Run,
-) -> Result<String> {
+fn pull_request_body(body: &str, defaults: &[String], repo: &str, run: &Run) -> Result<String> {
     let body = sanitize_with(
         body,
         MAX_SANITIZED,
@@ -3670,7 +3676,7 @@ fn pull_request_body(
         &|host| run.keeps_link(host),
     );
     let triggering = run.triggering(CREATE_PULL_REQUEST)?;
-    let history = history_url(run, &publisher.repo, "pullrequests", false);
+    let history = history_url(run, repo, "pullrequests", false);
     let mut lines: Vec<String> = body.split('\n').map(str::to_owned).collect();
     lines.push(String::new());
     lines.push(footer(run, triggering.as_deref(), Some(&history)));
@@ -5209,13 +5215,20 @@ mod tests {
                     });
                     (201, comment.to_string())
                 }
-                "POST" if path == format!("/repos/{REPO}/pulls") => {
+                "POST"
+                    if [REPO, FORK]
+                        .iter()
+                        .any(|repo| path == format!("/repos/{repo}/pulls")) =>
+                {
                     next_id += 1;
+                    let repo = path
+                        .trim_start_matches("/repos/")
+                        .trim_end_matches("/pulls");
                     let pull = json!({
                         "id": next_id,
                         "node_id": format!("N_{next_id}"),
                         "number": 1,
-                        "html_url": format!("{SERVER}/{REPO}/pull/1"),
+                        "html_url": format!("{SERVER}/{repo}/pull/1"),
                     });
                     (201, pull.to_string())
                 }
@@ -6260,6 +6273,15 @@ mod tests {
     /// opened against that branch and not as a cross-repository head.
     #[test]
     fn a_stacked_pull_request_from_the_repository_itself() {
+        stacked_pull_request(REPO, false);
+    }
+
+    #[test]
+    fn stack_base_publishes_a_pull_request_within_the_fork() {
+        stacked_pull_request(FORK, true);
+    }
+
+    fn stacked_pull_request(destination: &str, pinned: bool) {
         const LOWER: &str = "dispatch/implement/agent-run-1";
         const BRANCH: &str = "dispatch/implement/agent-run-4242";
         let (root, dir, mut handlers) = pull_request_case_with(|git| {
@@ -6268,8 +6290,25 @@ mod tests {
         });
         handlers[CREATE_PULL_REQUEST]["base_branch"] = json!(LOWER);
         handlers[CREATE_PULL_REQUEST]["branch_prefix"] = json!("dispatch/implement/");
-        handlers[CREATE_PULL_REQUEST]["head-repo"] = json!(REPO);
-        handlers[CREATE_PULL_REQUEST]["allowed_repos"] = json!([REPO]);
+        handlers[CREATE_PULL_REQUEST]["head-repo"] = json!(destination);
+        handlers[CREATE_PULL_REQUEST]["allowed_repos"] = json!([destination]);
+        let mut policy = policy();
+        if pinned {
+            // The branch exists only in the fork, not in the output repository.
+            git(
+                &root.path().join(format!("{REPO}.git")),
+                &["branch", "-D", LOWER],
+            );
+            policy.base = LOWER.into();
+            policy.stack_base = Some(crate::contract::StackBase {
+                repo: destination.into(),
+                commit: read_report(&upload(&dir))
+                    .unwrap()
+                    .patch
+                    .unwrap()
+                    .base_commit,
+            });
+        }
         let (github, sent) = forge(&json!({}), &[]);
         let run = run(1, github.api_url());
         let publisher = GithubPublisher {
@@ -6285,7 +6324,7 @@ mod tests {
                 items: &[pull_request_item()],
                 handlers: handlers.as_object().unwrap(),
                 upload: upload(&dir),
-                policy: &policy(),
+                policy: &policy,
             },
             &run,
             &publisher,
@@ -6307,22 +6346,22 @@ mod tests {
             .find(|request| {
                 request
                     .line
-                    .starts_with(&format!("POST /repos/{REPO}/pulls "))
+                    .starts_with(&format!("POST /repos/{destination}/pulls "))
             })
             .unwrap();
         assert_eq!(opened.body["head"], BRANCH);
         assert_eq!(opened.body["base"], LOWER);
         assert!(opened.body.get("head_repo").is_none(), "{}", opened.body);
-        // On the lower branch, in the repository itself; nothing in the fork.
+        // On the lower branch, within its own repository and nowhere else.
         let bare = |repo: &str| root.path().join(format!("{repo}.git"));
-        let log = sh(&bare(REPO), &["log", "--format=%s", BRANCH]);
+        let log = sh(&bare(destination), &["log", "--format=%s", BRANCH]);
         assert_eq!(
             log.lines().take(2).collect::<Vec<_>>(),
             ["lib: Check for overflow", "Lower"]
         );
         assert_eq!(
             sh(
-                &bare(FORK),
+                &bare(if destination == REPO { FORK } else { REPO }),
                 &[
                     "for-each-ref",
                     "--format=%(refname)",

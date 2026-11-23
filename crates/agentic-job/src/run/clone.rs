@@ -397,7 +397,7 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
     }
     git_clone_in(
         sandbox,
-        &policy.clone_url,
+        &base_url(policy),
         push.is_none().then_some(policy.base.as_str()),
         DEPTH,
         dir_text,
@@ -521,10 +521,21 @@ pub fn secondary(sandbox: &Sandbox, policy: &Policy) -> Result<Option<Checkout>>
     }))
 }
 
-/// A run that pushes to a pull request starts from the head the policy
-/// pins, or not at all: the patch would be against a commit apply refuses
-/// to push on, and the agent's work lost.
+pub fn base_url(policy: &Policy) -> std::borrow::Cow<'_, str> {
+    match &policy.stack_base {
+        Some(base) => format!("https://github.com/{}", base.repo).into(),
+        None => policy.clone_url.as_str().into(),
+    }
+}
+
+/// A push or a stack starts from the PR head policy pinned, or not at all.
 pub fn check_pinned_head(policy: &Policy, base_commit: &str) -> Result<()> {
+    if let Some(base) = &policy.stack_base {
+        ensure!(
+            base_commit == base.commit,
+            "the stacked base moved since policy resolved it; dispatch again"
+        );
+    }
     if let Some(push) = &policy.safe_outputs.push_to_pull_request_branch {
         ensure!(
             base_commit == push.head,
@@ -669,6 +680,7 @@ mod tests {
         Policy {
             external: None,
             continuation: None,
+            stack_base: None,
             advisory: None,
             context: Vec::new(),
             repo: repo.into(),

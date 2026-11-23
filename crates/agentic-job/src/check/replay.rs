@@ -97,7 +97,7 @@ pub fn trial(policy: &Policy, patch: &[u8], receipt: &Receipt, files: &[String])
             "-q",
             "--no-tags",
             "--",
-            &policy.clone_url,
+            &crate::run::clone::base_url(policy),
             &format!("refs/heads/{}", policy.base),
         ],
         None,

@@ -133,6 +133,7 @@ jobs:
       ITEM_REPO: ${{ fromJSON(inputs.policy).item-repo || fromJSON(inputs.policy).output-repo || github.repository }}
       REPO: ${{ fromJSON(inputs.policy).repo }}
       BASE: ${{ fromJSON(inputs.policy).base }}
+      STACK_REPO: ${{ fromJSON(inputs.policy).stack-base-repo }}
       REPORT: /tmp/gh-aw/report.json
       # What gh-aw's handlers list the things they made in.
       MADE: /tmp/gh-aw/safe-output-items.jsonl
@@ -218,7 +219,7 @@ jobs:
         if: ${{ fromJSON(inputs.check).outputs.has-patch == 'true' && fromJSON(inputs.policy).apply-staged != 'true' }}
         with:
           repository: ${{ env.OUTPUT_REPO }}
-          ref: ${{ fromJSON(inputs.policy).push-item == '' && fromJSON(inputs.policy).base || '' }}
+          ref: ${{ fromJSON(inputs.policy).push-item == '' && env.STACK_REPO == '' && fromJSON(inputs.policy).base || '' }}
           fetch-depth: 0
           # Same selection as the handlers; only apply gets this PAT.
           token: ${{ inputs.role-bindings == '' && (secrets.SAFE_OUTPUTS_PAT || github.token) || secrets.PUSH_TOKEN }}
@@ -346,6 +347,7 @@ jobs:
         run: |
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
           "$RUNNER_TEMP/apply-binary/agentic-job" push target --config "$GH_AW_TMP/config.json" --outputs "$GH_AW_TMP/agent_output.json" \
+            --policy "$GH_AW_TMP/policy.json" \
             --output-repo "$OUTPUT_REPO" --repo "$REPO" --calling-repo "$GITHUB_REPOSITORY" --base "$BASE" \
             --server "$GITHUB_SERVER_URL" --replacement "$REPLACEMENT" --branch-prefix "$BRANCH_PREFIX" >> "$GITHUB_OUTPUT"
       # The target's base branch as this job fetched it, not as anything
@@ -366,7 +368,7 @@ jobs:
             git fetch --no-tags "https://github.com/$FORK" "+refs/heads/$BASE:refs/agentic-job/target-base"
             exit 0
           fi
-          git fetch --no-tags "https://github.com/$REPO" "+refs/heads/$BASE:refs/agentic-job/target-base"
+          git fetch --no-tags "https://github.com/${STACK_REPO:-$REPO}" "+refs/heads/$BASE:refs/agentic-job/target-base"
           [ "${OUTPUT_REPO,,}" = "${REPO,,}" ] || git merge-base --is-ancestor "$(jq -er '.patch.base_commit' "$REPORT")" HEAD ||
             { echo "::error::sync $OUTPUT_REPO's $BASE to contain the patch's base commit before applying"; exit 1; }
       # The branch a pull request is pushed as is named in the hand-back,
@@ -639,7 +641,7 @@ jobs:
           fi
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
           "$RUNNER_TEMP/apply-binary/agentic-job" link-issue --file "$GH_AW_TMP/agent_output.json" \
-            --item-repo "$ITEM_REPO" --output-repo "$OUTPUT_REPO" --issue "$ISSUE"
+            --item-repo "$ITEM_REPO" --output-repo "${STACK_REPO:-$OUTPUT_REPO}" --issue "$ISSUE"
       # Test evidence check accepted describes tests of the tree it names:
       # the trial above made the checked patch's, and any other stops the
       # job before anything is published. The pull request then counts each
@@ -705,6 +707,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/apply-binary/agentic-job"
           "$RUNNER_TEMP/apply-binary/agentic-job" applied --dir "$GH_AW_TMP" --report "$REPORT" --made "$MADE" \
             --output-repo "$OUTPUT_REPO" --repo "$REPO" --item-repo "$ITEM_REPO" --comment-target "$COMMENT_TARGET" \
+            --pull-repo "${STACK_REPO:-$OUTPUT_REPO}" \
             --branch-prefix "$BRANCH_PREFIX" --artifact-prefix "$ARTIFACT_PREFIX" --fork "$FORK" --base "$BASE" \
             --tree "$TREE" --replacement-head "$REPLACEMENT_HEAD" --token-is-pat "$TOKEN_IS_PAT"
       # Every project field is read from the live project before either
@@ -1181,7 +1184,7 @@ jobs:
           PR: ${{ needs.apply.outputs.pull-request }}
           # The status comment is on the item: a pull request of another
           # repository is named with it, or `#N` would link the item's own N.
-          PR_REPO: ${{ fromJSON(inputs.policy).item-repo != '' && (fromJSON(inputs.policy).output-repo || github.repository) || '' }}
+          PR_REPO: ${{ fromJSON(inputs.policy).stack-base-repo || (fromJSON(inputs.policy).item-repo != '' && (fromJSON(inputs.policy).output-repo || github.repository)) || '' }}
           NO_RESULT: ${{ needs.apply.outputs.no-result }}
           NO_RESULT_REASON: ${{ needs.apply.outputs.no-result-reason }}
           MISSING_DATA: ${{ needs.apply.outputs.missing-data }}

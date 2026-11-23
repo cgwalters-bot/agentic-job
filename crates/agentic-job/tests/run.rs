@@ -113,6 +113,7 @@ impl Job {
         let policy = Policy {
             external: None,
             continuation: None,
+            stack_base: None,
             advisory: None,
             context: Vec::new(),
             repo: format!("local/{}", self.name),

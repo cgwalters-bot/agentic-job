@@ -253,7 +253,7 @@ pub fn open(github: &Github, pr: &PullRequest) -> Result<String> {
         .with_context(|| format!("{} is not where git finds {}", pr.clone_url, pr.repo))?;
     let push = github.for_role(super::roles::Role::ForkPush)?;
     let me = push.login()?;
-    let fork = push.fork(&me, &pr.repo, &pr.own_repo, server)?;
+    let fork = push.fork(&me, &pr.repo, &[&pr.own_repo], server, None)?;
     let pushing = || format!("pushing {} to {fork}", pr.branch);
     let commit = push
         .git()

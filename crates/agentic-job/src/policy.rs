@@ -18,6 +18,7 @@ use crate::exit::Exit;
 pub mod attachments;
 mod context;
 mod dispatch;
+mod stack_base;
 use dispatch::admission as dispatch_admission;
 
 // The request vocabulary, the policy's contract, bounds parsing and the
@@ -135,6 +136,9 @@ pub struct Args {
     /// The branch the agent starts from
     #[arg(long, value_name = "BRANCH", allow_hyphen_values = true)]
     pub base: String,
+    /// Caller-configured login allowed to supply a `pr:N` base. Empty disables it.
+    #[arg(long, default_value = "", allow_hyphen_values = true)]
+    pub stack_author: String,
     /// What the run may hand back: a branch, or an analysis only
     #[arg(long, value_enum)]
     pub kind: Kind,
@@ -747,6 +751,7 @@ impl Admit for Bounds {
                 .collect(),
         };
         Ok(Policy {
+            stack_base: None,
             continuation: None,
             external: None,
             advisory: None,
@@ -1060,10 +1065,39 @@ pub fn run(args: &Args) -> Result<Exit> {
             );
         }
     }
+    let stack = if let Some(number) = args.base.strip_prefix("pr:") {
+        ensure!(
+            args.kind == Kind::Branch
+                && !args.private
+                && !args.job_token
+                && args.pull_request.is_none()
+                && args.advisory_item.is_none()
+                && args.external_receipt.is_none()
+                && args
+                    .output_repo
+                    .as_deref()
+                    .is_some_and(|repo| repo.eq_ignore_ascii_case(&args.repo)),
+            "a pr:N base is only for a public implement run publishing to its target with an apply environment"
+        );
+        // The fork clone must use the same approved host, not bypass the
+        // caller's URL bounds by switching from a mirror to GitHub.
+        ensure!(
+            args.clone_url == format!("https://{GITHUB_HOST}/{}", args.repo),
+            "a pr:N base requires the target's github.com HTTPS clone URL"
+        );
+        Some(stack_base::resolve(
+            &args.repo,
+            number,
+            &args.stack_author,
+            &mut |path| metadata.read(path),
+        )?)
+    } else {
+        None
+    };
     let request = Request {
         repo: &args.repo,
         clone_url: &args.clone_url,
-        base: &args.base,
+        base: stack.as_ref().map_or(&args.base, |(branch, _)| branch),
         kind: args.kind,
         outputs: &args.outputs,
         max_outputs: &args.max_outputs,
@@ -1077,6 +1111,10 @@ pub fn run(args: &Args) -> Result<Exit> {
     let compiled = compile_bounds(&bounds, org_bounds.as_ref(), &request, &mut metadata);
     match compiled {
         Ok(mut policy) => {
+            if let Some((_, base)) = stack {
+                policy.stack_base = Some(base);
+                policy.validate()?;
+            }
             if let Some(path) = &args.external_receipt {
                 let external = crate::external::admit(path, &policy)?;
                 // Apply takes an omitted output repository to be the calling

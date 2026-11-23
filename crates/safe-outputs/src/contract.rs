@@ -876,6 +876,9 @@ pub struct Policy {
     /// What `run` clones.
     pub clone_url: String,
     pub base: String,
+    /// A trusted open PR head to build on, not a producer-selected destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_base: Option<StackBase>,
     pub kind: Kind,
     /// The most outputs in all.
     pub max_outputs: u32,
@@ -923,6 +926,13 @@ pub struct Policy {
     /// what apply publishes with `agentic-job publish`, not gh-aw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_handlers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StackBase {
+    pub repo: String,
+    pub commit: String,
 }
 
 /// The most files a raw external hand-back may hold, and so the most
@@ -1454,6 +1464,28 @@ impl Policy {
     pub fn validate(&self) -> Result<()> {
         if let Some(continuation) = &self.continuation {
             continuation.validate(self)?;
+        }
+        if let Some(base) = &self.stack_base {
+            ensure!(
+                self.forge == Forge::Github
+                    && self.kind == Kind::Branch
+                    && !self.private
+                    && self.external.is_none()
+                    && self.advisory.is_none()
+                    && self.safe_outputs.push_to_pull_request_branch.is_none()
+                    && self.safe_outputs.create_pull_request.is_some()
+                    && self
+                        .native_handlers
+                        .iter()
+                        .any(|name| name == crate::CREATE_PULL_REQUEST)
+                    && REPO_RE.is_match(&base.repo)
+                    && !dotted(&base.repo)
+                    && !base.repo.ends_with(".git")
+                    && COMMIT_RE.is_match(&base.commit)
+                    && BASE_RE.is_match(&self.base)
+                    && !self.base.contains(".."),
+                "a stacked base requires a public GitHub branch run with native pull request publication"
+            );
         }
         ensure!(
             self.forge.is_repo(&self.repo) && !dotted(&self.repo),

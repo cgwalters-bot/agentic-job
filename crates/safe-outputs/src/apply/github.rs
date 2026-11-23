@@ -831,18 +831,39 @@ impl Github {
     /// pushed unless the forge says Actions are off there. The repository
     /// itself, or another of its owner's, is never pushed to: there its
     /// CI would run the agent's code with the repository's secrets. Nor
-    /// is OWN_REPO, the run's own, should it be ME's fork of REPO: its
-    /// Actions are its own CI.
-    pub fn fork(&self, me: &str, repo: &str, own_repo: &str, server: &str) -> Result<String> {
+    /// may we disable Actions on any of the run repositories in PROTECTED_REPOS.
+    pub fn fork(
+        &self,
+        me: &str,
+        repo: &str,
+        protected_repos: &[&str],
+        server: &str,
+        existing: Option<&str>,
+    ) -> Result<String> {
         ensure!(
             !me.eq_ignore_ascii_case(owner(repo)),
             "{me} owns {repo} and has no fork of it to push to"
         );
-        let fork = self.send(
-            "POST",
-            &format!("/repos/{repo}/forks"),
-            Some(&json!({"default_branch_only": true})),
-        )?;
+        let fork = if let Some(name) = existing {
+            // Do not create a different fork or disable its Actions when the
+            // apply token isn't the identity that owns the admitted base.
+            ensure!(
+                is_repo(name) && owner(name).eq_ignore_ascii_case(me),
+                "stack base {name} is not owned by the applying account {me}"
+            );
+            let found = self.get(&format!("/repos/{name}"))?;
+            ensure!(
+                same(&found["full_name"], name) && found["private"] == false,
+                "the stack base fork {name} is no longer a public repository at that name"
+            );
+            found
+        } else {
+            self.send(
+                "POST",
+                &format!("/repos/{repo}/forks"),
+                Some(&json!({"default_branch_only": true})),
+            )?
+        };
         let name = fork["full_name"].as_str().unwrap_or_default().to_owned();
         ensure!(
             fork["fork"] == Value::Bool(true)
@@ -863,11 +884,15 @@ impl Github {
                 }),
             "the forge answered a fork of {repo} for {me} with {name:?}, which is not {me}'s own fork of it"
         );
-        ensure!(
-            !name.eq_ignore_ascii_case(own_repo),
-            "{me}'s fork of {repo} is {own_repo}, the run's own repository, which this does not \
-             push to"
-        );
+        if let Some(protected) = protected_repos
+            .iter()
+            .find(|repo| name.eq_ignore_ascii_case(repo))
+        {
+            bail!(
+                "{me}'s fork of {repo} is {protected}, the run's own repository, which this does not \
+                 push to"
+            );
+        }
         let remote = format!("{server}/{name}.git");
         let dir = tempfile::tempdir().context("making a directory for git")?;
         let git = self.git();
@@ -947,13 +972,14 @@ impl Publisher for GithubPublisher {
     fn open_pull_request(&self, pr: &PullRequest) -> Result<Made> {
         // The handler names a branch of the repository itself without its
         // owner, and leaves out `head_repo`.
-        let own = pr.push_repo.eq_ignore_ascii_case(&self.repo);
+        let repo = pr.base_repo.as_deref().unwrap_or(&self.repo);
+        let own = pr.push_repo.eq_ignore_ascii_case(repo);
         self.github
             .for_role(Role::ForkPush)?
             .git()
             .push_replaying(
                 &Push {
-                    from: &format!("{}/{}.git", self.git, self.repo),
+                    from: &format!("{}/{repo}.git", self.git),
                     base: &pr.base,
                     base_commit: &pr.base_commit,
                     to: &format!("{}/{}.git", self.git, pr.push_repo),
@@ -978,8 +1004,8 @@ impl Publisher for GithubPublisher {
         }
         body["base"] = json!(pr.base);
         body["draft"] = json!(pr.draft);
-        let path = format!("/repos/{}/pulls", self.repo);
-        let operation = format!("create pull request in {}", self.repo);
+        let path = format!("/repos/{repo}/pulls");
+        let operation = format!("create pull request in {repo}");
         let answer = self
             .github
             .request_retrying("POST", &path, Some(&body), &operation)?;

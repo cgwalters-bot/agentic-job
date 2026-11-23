@@ -380,6 +380,9 @@ on:
       base:
         description: The branch the run starts from (the input, or an event's pull request's base)
         value: ${{ jobs.policy.outputs.base }}
+      stack-base-repo:
+        description: The admitted base and publication repository for a stacked pull request, or empty
+        value: ${{ jobs.policy.outputs.stack-base-repo }}
       comment-target:
         description: Where an `add_comment` goes, as decided here
         value: ${{ jobs.policy.outputs.comment-target }}
@@ -507,6 +510,7 @@ jobs:
       # The branch the run starts from, and where its comments go, as
       # decided here: the inputs, or the event's pull request and item.
       base: ${{ steps.request.outputs.base }}
+      stack-base-repo: ${{ steps.request.outputs.stack-base-repo }}
       comment-target: ${{ steps.request.outputs.comment-target }}
       issue: ${{ steps.request.outputs.issue }}
       allowed-domains: ${{ steps.request.outputs.allowed-domains }}
@@ -825,6 +829,7 @@ jobs:
           EXTERNAL_RECEIPT: ${{ inputs.external-receipt }}
           PROPOSALS_NAME: ${{ inputs.proposals-artifact }}
           BIND_CONTINUATION: ${{ inputs.bind-continuation }}
+          STACK_AUTHOR: ${{ vars.AGENTIC_JOB_STACK_AUTHOR }}
           GH_TOKEN: ${{ github.token }}
         run: |
           [[ -z "$ISSUE" || "$ISSUE" =~ ^[1-9][0-9]*$ ]] || { echo "::error::issue is not a number: $ISSUE"; exit 1; }
@@ -839,6 +844,10 @@ jobs:
             set -- --item-repo "$ITEM_REPO"
           fi
           base=$BASE target=${TARGET:-*}
+          if [[ "$BASE" == pr:* ]]; then
+            [ "$EVENT" != true ] && [ "$REVIEW" != true ] && [ -z "$REVIEW_ITEM$PUSH_ITEM$PROPOSALS_NAME$EXTERNAL_RECEIPT" ] ||
+              { echo '::error::pr:N bases require a local implement run'; exit 1; }
+          fi
           if [ -n "$PUSH_ITEM" ]; then
             base=$PUSH_BRANCH
             set -- "$@" --pull-request "$PUSH_ITEM" --head "$PUSH_HEAD" --pull-author "$PUSH_AUTHOR" --output-repo "${OUTPUT_REPO:-$GITHUB_REPOSITORY}"
@@ -881,7 +890,7 @@ jobs:
           [ -n "$PUSH_ITEM$EXTERNAL_RECEIPT" ] || [ "$PRIVATE" = true ] || [ "${dest,,}" != "${REPO,,}" ] ||
             set -- "$@" --output-repo "$REPO"
           "$JOB_DIR/bin/agentic-job" policy --allow "$ALLOW" --repo "$REPO" --clone-url "https://github.com/$REPO" --context-request "$CONTEXT_REPOS" \
-            --base "$base" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json" ||
+            --base "$base" --stack-author "$STACK_AUTHOR" --kind "$KIND" --outputs "$OUTPUTS" --max-outputs "$MAX_OUTPUTS" "$@" > "$JOB_DIR/policy.json" ||
             { echo "::error::The request was refused; this step's log says why"; exit 1; }
           if [ -n "$PUSH_ITEM" ]; then
             jq --arg base "$REPLACEMENT_BASE" '.safe_outputs.push_to_pull_request_branch.replacement_base = $base' "$JOB_DIR/policy.json" > "$JOB_DIR/policy-base.json"
@@ -898,7 +907,8 @@ jobs:
           fi
           # The top-level domains by their count: over a thousand.
           jq '.allowed_domains |= length' "$JOB_DIR/policy.json"
-          printf '%s\n' "base=$base" "comment-target=$target" "issue=$ISSUE" | tee -a "$GITHUB_OUTPUT"
+          printf '%s\n' "base=$(jq -er .base "$JOB_DIR/policy.json")" "comment-target=$target" "issue=$ISSUE" | tee -a "$GITHUB_OUTPUT"
+          echo "stack-base-repo=$(jq -r '.stack_base.repo // empty' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
           # The binary wrote and checked these: domain names, no comma.
           echo "allowed-domains=$(jq -r '.allowed_domains // [] | join(",")' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"
           echo "external-run-id=$(jq -r '.external.run_id // empty' "$JOB_DIR/policy.json")" >> "$GITHUB_OUTPUT"

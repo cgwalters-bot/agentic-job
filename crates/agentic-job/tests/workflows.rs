@@ -8595,6 +8595,7 @@ fn dispatch_takes_only_its_named_inputs() {
             "item",
             "item-repo",
             "kind",
+            "base",
             "status-comment",
             "status-comment-mode",
             "session",

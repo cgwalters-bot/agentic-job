@@ -51,7 +51,7 @@ use super::github::{Github, is_repo, same, segment};
 use super::publish::handler_branch;
 use super::{COMMIT_RE, owner};
 use crate::check::is_run_branch;
-use crate::contract::is_login;
+use crate::contract::{StackBase, is_login};
 use crate::{CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH};
 
 /// A repository whose default branch holds this file, naming that
@@ -380,6 +380,7 @@ fn exempts_github(config: &Value) -> bool {
 pub fn target(
     github: &Github,
     args: &TargetArgs,
+    stack: Option<&StackBase>,
     read: &dyn Fn(&Path, u64) -> Result<Vec<u8>>,
 ) -> Result<Target> {
     ensure!(
@@ -402,6 +403,32 @@ pub fn target(
         .context("a pull request is opened from a fork of the identity apply holds")?;
     let config = read_json(read, &args.config)?;
     let output = &args.output_repo;
+    // Both fork routes must protect the workflow repository, which can
+    // differ from the repository the run worked on.
+    let fork = |existing: Option<&str>| {
+        github.fork(
+            &me,
+            output,
+            &[&args.calling_repo, &args.repo],
+            &args.server,
+            existing,
+        )
+    };
+    if let Some(base) = stack {
+        ensure!(
+            !push && output.eq_ignore_ascii_case(&args.repo),
+            "a stacked pull request must publish to its admitted base repository"
+        );
+        if !base.repo.eq_ignore_ascii_case(output) {
+            let name = fork(Some(&base.repo))?;
+            return Ok(Target {
+                repo: Some(name),
+                current_base: None,
+            });
+        }
+        // A stack in the target requires the same consent as any in-repo
+        // publication; it must not silently fall back to a fork.
+    }
     let head = if push {
         let head = head(github, &config, args, &me)?;
         if !head.own {
@@ -457,7 +484,11 @@ pub fn target(
             current_base: None,
         });
     }
-    let name = github.fork(&me, output, &args.repo, &args.server)?;
+    ensure!(
+        stack.is_none(),
+        "stack base is in the target repository but in-repository publication is not allowed"
+    );
+    let name = fork(None)?;
     ensure!(is_repo(&name), "the forge named the fork {name:?}");
     if let Some(head) = &head {
         ensure!(
@@ -857,6 +888,10 @@ mod tests {
         }
 
         fn run(self) -> (Result<Target>, Vec<String>) {
+            self.run_stacked(None)
+        }
+
+        fn run_stacked(self, stack: Option<&StackBase>) -> (Result<Target>, Vec<String>) {
             // git finds `bot/r` there, as the forge's fork with a branch.
             let (root, _) = repository();
             let fork = root.path().join("bot/r.git");
@@ -889,7 +924,7 @@ mod tests {
                 branch_prefix: self.branch_prefix.into(),
             };
             let (github, requests) = forge(self.routes);
-            let target = target(&github, &args, &read);
+            let target = target(&github, &args, stack, &read);
             let asked = requests
                 .try_iter()
                 .map(|request| request.line.trim_end_matches(" HTTP/1.1").to_owned())
@@ -902,6 +937,64 @@ mod tests {
         Target {
             repo: Some(repo.into()),
             current_base: base,
+        }
+    }
+
+    #[test]
+    fn stack_base_requires_the_applying_accounts_existing_fork() {
+        let stack = StackBase {
+            repo: "bot/r".into(),
+            commit: sha('a'),
+        };
+        for login in ["bot", "someone-else"] {
+            let mut case = Case::new();
+            case.new_pull_request();
+            case.me(login);
+            case.edit("GET /repos/bot/r", "owner", json!({"login": "bot"}));
+            case.edit("GET /repos/bot/r", "private", json!(false));
+            let (target, asked) = case.run_stacked(Some(&stack));
+            if login == "bot" {
+                assert_eq!(target.unwrap(), pushed_to("bot/r", None));
+                assert!(asked.iter().any(|path| path == ACTIONS));
+            } else {
+                assert!(
+                    target
+                        .unwrap_err()
+                        .to_string()
+                        .contains("not owned by the applying account")
+                );
+                assert_eq!(asked, ["GET /user"]);
+            }
+            assert!(!asked.iter().any(|path| path == FORK));
+        }
+    }
+
+    #[test]
+    fn push_target_never_disables_actions_on_the_calling_repository() {
+        let stack = StackBase {
+            repo: "bot/r".into(),
+            commit: sha('a'),
+        };
+        for stack in [Some(&stack), None] {
+            let mut case = Case::new();
+            case.calling_repo = "Bot/R";
+            if stack.is_some() {
+                // An ordinary create under this configuration would publish in-repo.
+                case.in_repo();
+                case.edit("GET /repos/bot/r", "owner", json!({"login": "bot"}));
+                case.edit("GET /repos/bot/r", "private", json!(false));
+            } else {
+                case.new_pull_request();
+            }
+            let (result, asked) = case.run_stacked(stack);
+            assert!(!asked.iter().any(|path| path == ACTIONS), "{asked:?}");
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("the run's own repository"),
+                "{asked:?}"
+            );
         }
     }
 

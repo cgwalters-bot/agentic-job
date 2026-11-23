@@ -53,6 +53,22 @@ posts a clearly scripted verdict naming the pinned head. This is not an
 approval or permission to merge. Delete trial comments, and branches in the
 applying account's fork, when finished.
 
+To stack an `implement` run, pass `-f base=pr:12`, where 12 is an open PR
+in `repo` targeting that repository's default branch. This is off unless
+the dispatch caller sets the repository variable `AGENTIC_JOB_STACK_AUTHOR`
+to the applying bot's login. Policy refuses other authors, even if they open
+a PR from a visible bot branch, and refuses heads outside the bot's public
+fork or the target itself. The caller's `bases` must allow the resolved
+head branch (for example, `dispatch/**`), and the effective bounds must
+include `create_pull_request` in `native_handlers` to publish to a fork base.
+
+Check holds the patch to the PR's resolved head commit. Apply opens the new
+PR against the head branch **in the head repository**, not against the
+target's default branch. For a fork this must be the applying account's own
+fork, with Actions disabled before the push. For a head in the target,
+the existing in-repository publication rules still apply. The lower PR
+is not changed, and an issue in another repository is referenced, not closed.
+
 Dispatch review remains opt-in (`kind=review`), analysis-only and bounded to
 one verdict comment or noop on the selected PR. The resolver reads the PR from
 the configured target repository and pins its head SHA. The sandbox fetches

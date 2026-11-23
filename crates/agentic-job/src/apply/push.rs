@@ -23,7 +23,13 @@ pub enum Command {
         allow: Option<std::path::PathBuf>,
     },
     /// For apply: print the repository a run's commit is pushed to, forking for a new pull request
-    Target(TargetArgs),
+    Target {
+        #[command(flatten)]
+        args: TargetArgs,
+        /// The trusted policy packaged by check, for a stacked base.
+        #[arg(long)]
+        policy: Option<std::path::PathBuf>,
+    },
     /// For apply: set draft state after a verified continuation, respecting hold labels
     Finish(super::readiness::Args),
 }
@@ -45,10 +51,19 @@ impl Command {
                 println!("replacement-base={}", pull.base);
                 println!("author={}", pull.author);
             }
-            Self::Target(args) => {
+            Self::Target { args, policy } => {
                 let github =
                     super::github::from_role_env(super::roles::Role::ForkPush, GH_TOKEN_ENV)?;
-                let target = target(&github, args, &super::read_checked)?;
+                let policy = policy
+                    .as_deref()
+                    .map(crate::policy::Policy::load)
+                    .transpose()?;
+                let target = target(
+                    &github,
+                    args,
+                    policy.as_ref().and_then(|p| p.stack_base.as_ref()),
+                    &super::read_checked,
+                )?;
                 if let Some(repo) = target.repo {
                     println!("repo={repo}");
                 }

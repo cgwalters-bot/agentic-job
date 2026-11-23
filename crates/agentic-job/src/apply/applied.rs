@@ -92,6 +92,9 @@ pub struct Args {
     /// The repository pull requests and issues are opened in
     #[arg(long)]
     pub output_repo: String,
+    /// Where a stacked pull request was opened, if different from output_repo
+    #[arg(long)]
+    pub pull_repo: Option<String>,
     /// The repository the run worked on, which closes and pushes go to
     #[arg(long)]
     pub repo: String,
@@ -892,7 +895,10 @@ impl Guard<'_> {
                 };
                 let head = format!("{}:{branch}", owner(&args.fork));
                 let found = github
-                    .pulls(&args.output_repo, &head)?
+                    .pulls(
+                        args.pull_repo.as_deref().unwrap_or(&args.output_repo),
+                        &head,
+                    )?
                     .into_iter()
                     .find(|pull| {
                         self.marked(pull, name, role)
@@ -975,6 +981,10 @@ pub fn run(args: &Args) -> Result<Exit> {
 }
 
 fn guard(args: &Args) -> Result<()> {
+    ensure!(
+        args.pull_repo.as_deref().is_none_or(is_repo),
+        "invalid pull request repository"
+    );
     for repo in [&args.output_repo, &args.repo, &args.item_repo] {
         ensure!(is_repo(repo), "{repo:?} is not a repository name");
     }
@@ -1346,6 +1356,7 @@ mod tests {
             report: dir.path().join("report.json"),
             made: o.made.then(|| dir.path().join("safe-output-items.jsonl")),
             output_repo: "owner/repo".into(),
+            pull_repo: None,
             repo: "owner/source".into(),
             item_repo: o.item_repo.into(),
             comment_target: o.target.into(),
