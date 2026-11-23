@@ -186,11 +186,10 @@ Do not switch to `plain` to bypass an admission
 failure or put a provider key on the runner. The checks below compose this
 change offline; no live broker run of it is shown here.
 
-**GitLab:** follow the [deterministic GitLab CI caller](gitlab.md#minimal-deterministic-pipeline)
-for a policy/produce/check/apply pipeline and its bounds, binary-verification
-and publisher-token setup. It posts a fixed comment, not an agent-generated
-change. GitLab agent inference is not yet supported; do not copy a GitHub
-broker identity or work around that boundary with a provider key.
+**Other forges:** [Get started on GitLab](try-gitlab.md) with a fixed issue
+note, or [get started on Forgejo](try-forgejo.md) with a check-only scripted
+trial. Both guides point to standalone publication fixtures; neither runs a
+model-backed agent pipeline.
 
 ## What CI checks
 

@@ -16,6 +16,8 @@ nav:
   - Getting started:
       - Quickstart: docs/try-it.md
       - docs/workflow.md
+      - docs/try-gitlab.md
+      - docs/try-forgejo.md
   - How it works:
       - docs/harness.md
       - docs/interactive.md

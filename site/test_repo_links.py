@@ -90,7 +90,10 @@ class RepositoryLinksTest(unittest.TestCase):
             for href in re.findall(r'<a href="([^"]*)" class="md-nav__link\b', sidebar)
             if not href.startswith("#")  # In-page table of contents.
         ]
-        self.assertEqual(routes[:3], ["/", "/docs/try-it/", "/docs/workflow/"])
+        self.assertEqual(
+            routes[:5],
+            ["/", "/docs/try-it/", "/docs/workflow/", "/docs/try-gitlab/", "/docs/try-forgejo/"],
+        )
         docs_routes = [
             f"/{file.removesuffix('.md')}/" for file in SOURCES if file.startswith(DOCS)
         ]
