@@ -1,161 +1,121 @@
-# `sandbox check` and the agent
+# Check a hardened runner
 
 > This text is LLM generated.
 
-**Runner-only status, 5 November 2026:** `run --runner-home` does not execute
-the token or container-token probes described below, and the bridge
-probe is gone. `before-agent`
-is refused. The second-user paths were removed in
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991), along with
-the helper's `enter`/`reap` operations. No check record or token
-shape scan proves same-UID process isolation. The
-[hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
-tracks that acceptance.
+`agentic-job sandbox check` verifies selected protections on a CI runner before
+you start an agent. It tests the runner's account, which is also the account
+the agent uses. A pass is not proof that processes running as that account
+are isolated from one another.
 
-`agentic-job sandbox check` runs as the runner's user after `sandbox
-setup`, and probes that user's hardening: since
-[#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989) it is
-the only agent user, and there is no second user to probe as. What each
-probe tries, its control and what stops it are in the action's
-[probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md),
-and where each has been seen to fail in its
-[evidence](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md#where-each-probe-has-been-seen-to-fail).
-This page keeps how `run` uses the check, the token probes `run` no
-longer makes, and the helper. A probe or a control that comes out wrong
-fails the check: exit state 1.
+## Run the check
 
-The [run action](../run/action.yml) calls `sandbox check --unless-passed`
-before the agent starts. The shipped [secure-host forwarder](../secure-host/action.yml)
-pins [actions at 466a490e](https://github.com/cgwalters-forge/actions/blob/466a490e983ff07e6fb076fa4bd8b4d5f918fcd6/secure-host/action.yml),
-whose `Prove it` step calls plain `agentic-job sandbox check`, **without
-`--record`**. It leaves no reusable record: normally the run action probes
-again, even with secure-host's default `check: true`
-([inputs](secure-host.md#inputs-and-outputs)). This is the integration
-mismatch noted in [#2743](https://github.com/cgwalters-forge/agentic-job/pull/2743),
-not evidence of record reuse by the shipped pin.
+After [host setup](sandbox.md), run this on the CI host as the runner's
+user, **not** as root:
 
-Reuse is conditional: an explicit `sandbox check --record` that passes all
-probes can leave `RUNNER_TEMP/agentic-job-sandbox-checked`. The
-[record handling](../crates/secure-host/src/check/record.rs) matches the job's
-run ID, attempt and name, the binary's version and a non-cryptographic
-fingerprint of its bytes, and the exact installed configuration text.
-It requires an absolute `RUNNER_TEMP` and job identifiers; inability to
-fingerprint or write the record leaves the next check to probe normally.
-The [check](../crates/secure-host/src/check/mod.rs) consumes a record before
-probing, whether it matches or not. Only `--record` writes one;
-`--unless-passed` skips probes only on a match and never writes another.
-Changed configuration, another build or job, a missing or consumed record
-therefore causes normal probing. [`run`](../crates/agentic-job/src/run/enter.rs)
-removes it before the agent starts, so it spares at most one check.
+```sh
+agentic-job sandbox check
+```
 
-What the record does not stop is the runner's user itself, which the
-agent now is. Steps of that user between the recorded check and `run`
-run unprobed, and any of them can write a record `run` takes, since
-everything in it is known to that user, or loosen what the probes proved
-without `run` noticing. Such a step already holds the job's credentials,
-so this loses a second look, not a privilege. A caller job that runs
-repository code as the runner's user before `run` (`make check`, say)
-should give secure-host `check: false` and leave no record, so that
-`run` probes after that code. The shipped pin already leaves no record
-even with `check: true`.
+The check assumes that setup locked the runner, which is the default. With
+`host.lock-runner = false` the runner's user keeps `sudo`, and the check
+skips its privilege probes without failing, so exit `0` does not show that
+the runner is locked. Do not start an agent on such a host. The
+[run action](../run/action.yml) refuses an unlocked host. A custom job does
+not inherit that guard: before the agent starts, it must confirm that the
+installed `/etc/agentic-job/config.toml` does not turn the lock off.
+
+In your own CI job, put the check after any intervening repository steps and
+before starting the agent. Do not start the agent if the check fails.
+The run action already checks before starting the agent.
+The shipped [secure-host action](secure-host.md#inputs-and-outputs) also
+checks by default but does not save a passing record, so the run action
+normally probes again. Keep that setup-time check before the first step that
+runs untrusted repository code: a later check cannot protect a step that ran
+on a misconfigured host. Set `check: false` on secure-host only when every
+step between the two actions is trusted, and leave no record across steps
+that run repository code.
+
+| Command | Behavior |
+| --- | --- |
+| `agentic-job sandbox check` | Run the probes. This is the default. |
+| `agentic-job sandbox check --record` | Run the probes and, if they pass and the CI job provides the required environment, save a result for one later check. |
+| `agentic-job sandbox check --unless-passed` | Reuse a matching passing result once; otherwise run the probes. Does not save a new record. |
+
+The flags are mutually exclusive. For a record to be reusable, the job,
+binary build, and installed configuration must match. Recording needs an absolute
+`RUNNER_TEMP` and the job identifiers `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`,
+and `GITHUB_JOB`. An ordinary check works without these, and a passing
+`--record` check can still leave no record if the write fails. The next check
+consumes the record even if it does not match; starting an agent also clears
+it. Reuse a result only between trusted steps:
+the runner's user can write the record or change host state after the check.
+See the [record implementation](../crates/secure-host/src/check/record.rs).
+
+## Read the result
+
+Look for `FAIL` and the probe ID in the job log. Some probes have a positive
+control: an operation that must succeed so the corresponding denial counts
+as evidence that the protection works. An unexpected result from either
+the probe or the control fails the check.
+
+| `agentic-job sandbox check` exit code | Meaning and next step |
+| --- | --- |
+| `0` | The applicable probes passed, or the check reused a matching record. Read any skip notes before relying on a particular probe; a pass does not establish that the runner is locked. |
+| `1` | A probe or control other than external reachability failed. Fix the problem in the log before starting the agent. |
+| `2` | The check could not run or finish: invalid arguments such as two of the mutually exclusive flags, running as root, an unreadable configuration, or a probe that could not be made. Fix the error before starting the agent. |
+| `4` | Only external reachability failed after the check's own retries. The agent did not start. Check the network diagnostics: broken runner networking can look like an external outage. |
+
+For exit `4`, the run action fails the job and reports `exit: 4` and
+`failure-class: control_unreachable` in its outputs. If you automate retries,
+requeue the whole workflow a bounded number of times, not just the agent job.
+The standalone `secure-host` binary returns `1` for this case. See
+[why a run failed](workflow.md#why-a-run-failed).
 
 ## The egress policy and containers
 
-Under `egress.write-policy` the check makes the runner's user, with no
-proxy in its environment, read a host and be refused a POST to it by the
-proxy itself (`write-policy-read`, `write-policy-post`). The host is
-the first of example.com and github.com that the installed policy
-admits a read of and refuses a POST to. Where there is none the read is
-skipped with a note, and a plain-HTTP POST to one of them outside the
-domain allowlist, which the proxy refuses, shows only that the proxy
-holds the runner's user; with no such host the POST is skipped too. The
-check adds no destination of its own. The read, the one control that
-leaves the host, tries three times, 10 seconds each, waiting 5 then 10
-seconds between tries, and notes each failed try's class (`dns`,
-`connect`, `timeout`, `tls`, `http STATUS`, ...) with curl's message, so
-an outage of the host it reads does not fail a run that would have
-worked (#3225). When it still fails and nothing else does, `agentic-job
-sandbox check` says so and exits 4, the retryable not-started state,
-instead of 1; the `secure-host` binary exits 1 either way. A direct path
-out that this host broke fails the same way, so a retrier must bound its
-retries. The run action carries that exit state as its `exit` output, 4,
-with the failure class `control_unreachable`
-([workflow.md](workflow.md#why-a-run-failed)); its job still fails
-before the agent starts, and no check record is left for the next check.
-Images up to secure-host v0.6.9 still read
-example.com, so until the pin moves past them secure-host's own check
-fails under an allowlist without it. The probes of
-the egress policy, the tailnet and containers were the sandbox user's
-and went with it. `[host.check] control-url`, `fetch-repo`,
-`allow-sockets` and `allow-tcp-ports` are read only by images from
-before #2989; this binary accepts them while the pinned image still
-needs them, and the check notes each as ignored. `before-agent` is
-refused. `container-image` and `containers` are left for `run`'s probes
-under `inference.front`, which `run` refuses with no second user.
+With `egress.write-policy` enabled, `write-policy-read` checks that the
+runner can read an allowed destination, and `write-policy-post` checks
+that the proxy itself refuses a write. The check does not change the
+allowlist. If there is no suitable destination for the read, the log says
+it was skipped. A fallback POST to a disallowed destination checks only
+that the proxy blocks that request; if there is no suitable fallback,
+the POST is skipped too. See the [egress probe reference in code](../crates/secure-host/src/check/net.rs).
 
-## A session's bridge
+Older host images, including the one used by the shipped secure-host action,
+check a fixed read destination. If their setup-time check fails under a narrow
+allowlist, check the logged destination against your policy.
 
-The network rules rejected the sandbox's uids at the
-[session bridge](../specs/session.md)'s port, and the check proved it;
-the runner's user was never kept off that port. With no second user
-those rules held no one and are gone, and nothing is probed for the
-bridge. `run` takes `[session] listen` again: the agent, the runner's
-user, can reach the port and attach to its own session ahead of the
-operator. That denies the operator the chat but gives it no credential
-or write, since no message over the bridge authorizes one
-([recommendation](../specs/session.md#recommendation-lift-the-refusal)).
+| `[host.check]` key | Current behavior |
+| --- | --- |
+| `before-agent` | Rejected. Remove it from the configuration. |
+| `control-url`, `fetch-repo`, `allow-sockets`, `allow-tcp-ports` | Accepted for compatibility with older host images and logged as ignored by the current check. |
+| `container-image`, `containers` | Do not enable container probes in `sandbox check`. |
 
 ## `run`'s token probes
 
-`sandbox check` has no run token, so it makes none of these. They were
-`run`'s, once it had written the agent's configuration and before the
-agent started, and only with a sandbox user. The agent is now the
-runner's user, which can read the token in `run`'s own environment, so
-none runs ([sandbox.md](sandbox.md#what-is-tested)). The ids
-(`token-runner-file`, `token-config-mode`, `token-config-dir-mode`,
-`token-files`, `token-processes`, `token-container-*`) stay reserved.
+Neither `sandbox check` nor `run --runner-home` probes whether the agent
+can read the run token, from the host or from a container. `run --runner-home`
+rejects `inference.front`; the container settings do not restore those probes.
+The agent can read the token from `run`'s environment. Do not rely on a passing
+check to protect credentials accessible to the runner's user. See
+[what the sandbox tests](sandbox.md#what-is-tested).
+
+## A session's bridge
+
+The check does not probe the [session bridge](../specs/session.md). An agent
+can reach its own bridge and take the client slot before the operator. That
+can block the operator's chat, but attaching to the bridge does not grant
+credentials or write permissions.
 
 ## The helper
 
-The lock takes root from the runner's user
-([the lock](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-lock)).
-What a run still needs root for is small: read the egress proxy's log,
-tailscaled's status as root, and the session bridge's serve. Entering
-and stopping the sandbox user, and undoing a probe's linger or crontab,
-went with it (#2989). Three ways were weighed. A sudoers rule for fixed
-subcommands of a root-owned binary: the simplest, with sudo's own
-checks that the file is root's, and the binary's own validation as the
-boundary. A root service behind a socket with a peer-credential check:
-sounder in theory (the kernel says who is calling, no sudo involved),
-but a daemon for the job's length and a protocol. polkit rules for
-`run0`: polkit sees the unit and the verb, not the command. The first
-was chosen. `agentic-job helper` is a hidden command of the binary; the
-sudo rule names the copy setup installed at
-`/usr/local/libexec/agentic-job`, and setup makes that path, the
-configuration's and the fixed PATH's directories root's alone (no group
-write but root's, no other write) or refuses. The interface is closed:
-no operation takes a path, a user or a command that root then acts on.
-The log read is of one fixed file from a byte offset; every program
-root runs is looked up once, on a fixed PATH whose directories must be
-root's alone, and runs with none of the caller's environment; the
-configuration must be root's alone too, and the proxy's log is opened
-without following a link and must be the proxy user's plain file. On a
-host where setup never ran (the tests), the same operations go through
-sudo directly (`sandbox::root`).
+After setup locks the runner, later steps cannot use general-purpose `sudo`.
+The installed [privileged helper](../crates/secure-host/src/helper.rs)
+allows only predefined operations, such as reading the proxy log. No manual
+helper call is needed to run the check.
 
-**The steps after setup.** In the reusable workflow every step of the
-agent job after setup is this repository's (in an agent job of the
-caller's own, its later steps follow): `sandbox check`, the setup
-script, `run`, the public-repository check, three uploads and the
-result. None needs root; the uploads read only what `run` moved out
-([the upload gate](layout.md#run)). Of the actions' post steps, `actions/checkout`'s cleans
-its own credentials as the runner's user, the artifact actions have
-none, and a caller's network-join action whose post step logs out with
-`sudo` now fails there: it has to warn and go on, and its node has to
-be one that expires by itself. The hosted runner's own
-completion needs no root. A self-hosted runner that is not ephemeral
-would keep a locked machine: `agent-runner` must be thrown away after
-the job, as [workflow.md](workflow.md) requires. A caller who does not want this
-sets `host.lock-runner = false`, and gives up what the action's
-[R4](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#r4-the-runners-user-loses-root-before-untrusted-steps-run)
-promises.
+Finish trusted provisioning that needs root before the lock. Keep untrusted
+steps after the lock and remove any dependency they have on root. Check
+cleanup hooks too: if a network logout hook needs `sudo`, use a registration
+that expires automatically instead. Discard a self-hosted runner after the
+job rather than reusing the locked host.
