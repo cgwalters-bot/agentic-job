@@ -157,21 +157,79 @@ land the exemption removal first; a stale exemption fails the check.
 ## Installing a caller check
 
 Enforcement is opt-in. To prevent a proposal from replacing the checker or
-exempting itself:
+exempting itself, copy the [ingress helper](../workflow/ingress.py) from the same
+revision as this page to `workflow/ingress.py` on the caller's base branch. The
+separate binary pin below supports the caller's `[identities]` table; it does
+not supply the helper.
+Save this workflow as `.github/workflows/workflow-policy.yml`. It runs only the
+policy checker, not the static analyzers in this repository's [ingress check](workflow-ingress.md).
 
-1. Review and land the CI job and configuration on the base branch, including
-   a trusted checker pin and any exemption for the job's workflow.
-2. Use the base branch's copy of the [ingress helper](../workflow/ingress.py)
-   to check the complete workflow set at the exact proposed head, including
-   unchanged files. Pass the base TOML with the identities and exemptions.
-   The helper reads Git blobs without checking out proposal code, rejects
-   symlinks and submodules in workflow paths, and quotes diagnostics so
-   proposed text cannot issue runner commands. Fail the job if extraction or
-   checking fails. Give it read-only repository access and no secrets.
-3. Require the trusted workflow in a ruleset; a status name alone can be
-   imitated. See [workflow ingress](workflow-ingress.md) for a CI example
-   covering pull requests and merge groups. Require human approval of the
-   current head before merge queue admission.
+```yaml
+name: workflow-policy
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+    types: [checks_requested]
+permissions:
+  contents: read
+jobs:
+  workflow-policy:
+    permissions:
+      contents: read
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.merge_group.base_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: cgwalters-forge/agentic-job
+          ref: 6531014325c39dfa58571053ceed6b2da07edd79
+          path: checker
+          persist-credentials: false
+      - run: cargo build --locked --release -p agentic-job
+        working-directory: checker
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          [[ "$BASE" =~ ^[0-9a-f]{40}$ && "$HEAD" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "$BASE" "$HEAD"
+          PYTHONPATH=workflow python3 -c 'import os; from ingress import check_workflows; raise SystemExit(0 if check_workflows(".", os.environ["HEAD"], "checker/target/release/agentic-job", ".github/agentic-job/workflows.toml") else 1)'
+```
+
+Fetching commits by SHA works for public repositories; for PR heads use
+`refs/pull/$PR/head` if the forge does not allow fetching the head SHA directly.
+The helper checks the complete workflow set at the exact proposed head,
+including unchanged files, using the base TOML. It reads Git blobs without
+checking out proposal code, rejects symlinks and submodules in workflow paths,
+and quotes diagnostics so proposed text cannot issue runner commands. The job
+fails if extraction or checking fails. Keep repository access read-only and
+pass no secrets.
+
+This job does not fit a checked job layout, so use the `workflow-policy.yml`
+entry shown in [Exemptions](#exemptions) in the base branch's policy.
+
+Land this workflow and its policy on a trusted branch through maintainer review.
+In a GitHub organization or enterprise ruleset, use
+[**Require workflows to pass before merging**][required-workflow] to select that
+trusted workflow for the branches you protect. Verify that GitHub blocks merges
+when the workflow fails or does not run, including for fork pull requests and,
+if you use a merge queue, for merge groups.
+
+Without an organization or enterprise ruleset, the check can still inform
+maintainer review, but requiring the `workflow-policy` status by name does not
+prove this workflow ran: a proposed job can report the same name.
+
+Keep human approval of the current head before merge-queue admission; see
+[merge queue limitations](workflow-ingress.md#merge-queue).
+
+[required-workflow]: https://docs.github.com/en/enterprise-cloud@latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-workflows-to-pass-before-merging
 
 ## Bounds and limits
 
