@@ -2,268 +2,126 @@
 
 > This text is LLM generated.
 
-This is the contributor's map.
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed the
-helper entry, second-user setup and view; the token-probe module below is
-legacy implementation, not the runner-only contract. Do not grow or
-reintroduce them. Standalone host extraction stays with
-[#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070), reference draft
-[#2642](https://github.com/cgwalters-forge/agentic-job/pull/2642), and publication
-follow-up [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656).
-The standalone `secure-host` binary target exists in this checkout;
-released-image adoption is separate from the source implementation.
-Commands, configuration and exit states
-are in [interface.md](interface.md); deployment is in [workflow.md](workflow.md).
+This is the contributor's map: which crate and directory owns what, so you
+know where a change goes. Each module's own docs say how it works.
+Commands, configuration and exit states are in [interface.md](interface.md);
+deployment is in [workflow.md](workflow.md); design constraints and checks
+are in [contributing.md](contributing.md).
 
-## Rust workspace
+## Crates
 
-`crates/agentic-job` contains the library and the `agentic-job` binary.
-The same crate builds `fake-agent`, the scripted ACP agent used by tests.
-Releases publish both binaries for the reusable workflow's scripted runs,
-and `secure-host`, the binary of `crates/secure-host` that the image holds.
+The workspace has three crates. Dependencies run one way: agentic-job
+depends on the other two, and neither depends on agentic-job or on each
+other.
 
-`crates/secure-host` is the host's side, for any job that runs code it
-does not trust: it depends on nothing that runs an agent (no ACP,
-inference, safe outputs, sessions or `run`), which `cargo tree -p
-secure-host` shows, and agentic-job depends on it, never the reverse.
-Its manifest declares its own package metadata, registry dependencies and
-lints, without inheriting from this workspace. The boundary test resolves
-that manifest in isolation. This is an extraction prerequisite, not yet a
-standalone source tree: embedded egress assets still live in `egress/`, and
-some tests read `secure-host/` and `.github/actions/confine-probe/` here.
-The split is under way ([#1623](https://github.com/cgwalters-forge/agentic-job/issues/1623)).
-So far it holds bounded file reads (`files.rs`), host users and the
-programs root may run (`host.rs`), the network rules (`network.rs`), the
-egress proxy's setup and the proxy itself (`egress.rs`, `proxy/`) with
-the `[egress]` table (`config.rs`), the platform, apt and
-world-write steps (`platform.rs`, `apt.rs`, `world_write.rs`), the
-Worker-diagnostics rule (`worker_diagnostics.rs`), and the privileged
-seam: the helper's fixed operations (`helper.rs`), how the runner's
-user has root run them (`root.rs`) and the way in as the sandbox user
-(`enter.rs`), with the `[host]` table (`config.rs`, Rust's `Sandbox`;
-`[sandbox]` is its deprecated name, which the binaries read with a
-warning and `host_table_names` refuses beside `[host]`; the workflow's
-Python readers take either), and the host
-setup itself (`setup.rs`): the runner lock, the sandbox user, sudo and
-polkit denials, the privileged-binary allowlist (`setup/`), the
-systemd-resolved closure, the egress proxy and rules in their order,
-with the escaping of the setup script's output (`workflow_commands.rs`),
-and the probes that prove it (`check/`): the host, runner-lock and
-network probes with their embedded scripts, the runner confinement probe
-(`check/confine.rs`, re-exported as `sandbox::probe`) that CI's `confined`
-job runs before and after the lock, and the record of a passing
-check, bound to the binary, configuration and job, that entering the
-sandbox user removes; and the timed stages and `sandbox timed`
-(`timed.rs`). agentic-job re-exports each at its old path (`files`,
-`sandbox::host`, `sandbox::helper`, `sandbox::setup`, `sandbox::check`,
-`sandbox::timed`, `config::Sandbox`, `secure_host::apt`, ...), with
-`check::run` and `timed::run` mapping the results to its exit states.
-Four seams keep agents out: agentic-job's
-`main` hands `host::bare` the agent's variables to leave out too; it
-gives `egress::start` the binary and command that run the proxy; its
-`Config` implements `config::HostFile`, through which the probes read
-the host's tables and the helper and the way in check the run tables,
-unset the run's credentials and serve `session-serve`; and its
-`sandbox/setup.rs` implements `setup::Program`, which reads and checks the file for setup and adds
-the agents, npm, Vibe, caller tools and managed settings at fixed
-points of setup's order. Setup itself writes where a served port is
-published (the session's endpoint).
+| Crate | Owns | Binaries |
+| --- | --- | --- |
+| `crates/agentic-job` | Running an agent: configuration, event admission, the ACP session, `run`, check and apply around the library, `acp-drive` | `agentic-job`, and `fake-agent`, the scripted ACP agent tests and scripted runs use |
+| `crates/secure-host` | Securing a CI host for any untrusted job: host setup, the network rules and egress proxy, the privileged helper, and the probes that prove it. It knows nothing of agents, inference or safe outputs | `secure-host`, which the [secure-host image](secure-host.md#the-secure-host-binary) holds |
+| `crates/safe-outputs` | gh-aw's safe-output contract: request vocabulary, collector, policy and bounds, check of a hand-back, and publishing to GitHub, GitLab and Forgejo | none |
 
-The crate is also the `secure-host` binary (`main.rs`, `cli.rs`): its
-steps, `config` (`compose.rs`, whose settings agentic-job's `config`
-takes too), setup and the probes, reading the host's tables of any file
-as `config::Host`, which leaves a program's tables be once its step ran
-and refuses them otherwise; and the image's
-entrypoint (`image.rs`), which installs it on the host and runs setup
-through `nsenter`. The image holds no agent code, so an agent job runs
-agentic-job's part first (`sandbox prepare`), which installs agentic-job
-as the helper and says so in `[host.prepared]`
-(`config::Prepared`): setup then keeps that helper, and holds the
-egress proxy and the network rules to what the table says the run's
-tables ask. For one release the binary also answers to agentic-job's
-name, in the image and on the host, for what the pinned action calls
-([secure-host.md](secure-host.md#the-secure-host-binary)). agentic-job's
-`secure_host/` keeps its `secure-host` subcommands and the inference
-check, and `run/probe.rs` the run token's probes.
+Releases publish all three binaries. `cargo tree -p secure-host` shows
+that secure-host stays free of agent code; a test resolves its manifest
+on its own. agentic-job re-exports both libraries' items at their old
+module paths, such as `sandbox::setup` or `policy::Policy`.
+[safe-outputs.md](safe-outputs.md#library-boundary) lists what moved into
+the library and what stays.
 
-`crates/safe-outputs` is gh-aw's safe-output contract as a library: the
-request vocabulary and forge profile (`vocabulary.rs`), gh-aw's
-collector and sanitizer, ported (`collect/`), the policy and its
-validation (`contract.rs`), bounds parsing and the intersection of two
-bounds files' policies (`bounds.rs`), the check of a hand-back with
-its patch, link, handler-limit and replacement rules (`check/`), and
-apply's plan, its Forgejo and GitLab publishers, and GitHub's client,
-native publishing, push target, replacement series and secondary pull
-request (`apply/`). It
-depends on neither agentic-job nor secure-host; agentic-job re-exports
-it at its old paths (`policy::Policy`, `check::read_patch`,
-`collect::collect`, `apply::plan`, ...).
-[safe-outputs.md](safe-outputs.md#library-boundary) lists what moved and
-what stays.
+## agentic-job modules
 
-Paths below are relative to `crates/agentic-job/src/`.
+One module per command holds that command's arguments and entry point;
+`cli.rs` only assembles them. Paths are relative to
+`crates/agentic-job/src/`.
 
 | Path | Responsibility |
 | --- | --- |
 | `main.rs`, `cli.rs`, `exit.rs` | Command dispatch and exit states |
 | `config/` | TOML types, validation and composition from workflow inputs |
-| `policy.rs` | Reading bounds and policy files, and compiling a run's request into its policy |
+| `policy.rs`, `policy/` | Reading bounds and policy files, and compiling a run's request into its policy |
 | `event/` | Event admission, run guards and fenced task context |
-| `dispatch.rs` | dispatch.yml's `target` job: its refusals, the item's read and the task |
-| `check/` | The `check` command: reading the hand-back, secret scanning, memory, checkpoints and the report, around the library's check |
-| `collect.rs` | The `collect` command: the safe-outputs collector on a hand-back and policy, for `handback check`, check.yml and callers off GitHub |
-| `apply/` | Publishing checked outputs behind `Publisher`: the adapter of the library's Forgejo, GitLab and GitHub publishers (`publish.rs` for the types the bounds route away from gh-aw's handlers), and of GitHub's push, replacement series and secondary pull request |
-| `audit.rs` | Offline artifact inspection and finding codes |
-| `workflows/` | Workflow job-shape rules and bounded YAML reading |
-| `redact.rs` | Secret redaction |
-| `sandbox/setup.rs`, `sandbox/setup/` | agentic-job's part of secure-host's setup: the agents, tools and managed settings; alone, before the image, `sandbox prepare` |
-| `sandbox/mod.rs`, `sandbox/session.rs` | agentic-job's side of secure-host's helper, way in and probes: its configuration, exit states and `session-serve` |
-| `session/` | ACP transport, permissions, limits, transcript and digest |
+| `activate.rs`, `dispatch.rs`, `external.rs` | Command labels, the dispatch workflow's `target` job, and caller-owned dispatch correlation |
 | `run/` | Clone, inference registration, agent configuration, session orchestration and hand-back |
+| `session/` | ACP transport, permissions, limits, transcript and digest |
 | `acp_drive/` | `acp-drive`: the daemon and commands that drive a run's child agent |
-
-The supervisor runs as the runner's user. With `--runner-home`, the
-reusable workflow's default (`agent-user: runner`), `run` uses no
-sandbox user and the agent shares the supervisor's UID. Same-UID files,
-environment and memory are not a credential boundary. `run` requires
-`--runner-home`; there is no alternative to runner-mode refusals
-([requirements.md](requirements.md#actors-and-trust)).
-After setup, privileged operations go
-through the root-owned helper; tests on hosts without setup can use sudo
-directly. The helper's validation is a security boundary, not a generic
-root command runner.
+| `handback.rs` | `handback check`, the agent's own preview of the checks |
+| `check/`, `collect.rs`, `detect.rs` | The `check` and `collect` commands around the library, plus secret scanning, memory, checkpoints and the detector |
+| `apply/`, `apply_token.rs` | Publishing checked outputs through the library's publishers, and the early token probe |
+| `diagnostics.rs`, `audit.rs` | Why check or apply refused a run, and offline artifact inspection |
+| `review/` | Workflow-side review routing |
+| `sandbox/` | agentic-job's part of host setup (agents, tools, managed settings, `sandbox prepare`) and of the helper and probes |
+| `secure_host/` | The `secure-host` action's steps and the inference check |
+| `workflows/` | `workflows check`: job-shape rules for a repository's workflow files |
+| `testing_farm.rs` | Launching a run on Testing Farm |
+| `redact.rs` | Secret redaction |
+| `bin/` | `fake-agent` and the release and pin tools |
 
 ## The session
 
-`session::run(Options)` drives one task. It receives an agent registry
-entry, launch wrapper, permission policy, limits, request-count channel
-and output paths. It records `acp.jsonl`, `agent-stderr.log` and
-`harness.json`. `run` owns cleanup on signals as well as normal completion.
-
-`session/agents.toml` is the built-in registry. The session's digest is
-also used to summarize recorded transcripts. `session/clients.rs` has a
-notification tap, but no client can attach to a running task yet.
-
-### Why the session stays in agentic-job
-
-The experiment for #2997, in
-[#3129](https://github.com/cgwalters-forge/agentic-job/pull/3129), extracted the
-session core to `acp-session`, depending on secure-host but not agentic-job.
-Reverse edges were configuration tables, credential-variable names, the
-task-size limit, outcome-to-exit mapping, item-text sanitization and the
-host's serve guard. The prototype moved or injected these while leaving the
-CLI and `session connect` in agentic-job. This introduced seams without a
-convincing release-build benefit, so the extraction was not kept;
-configuration, environment filtering, bounds, sanitization and cleanup retain
-their original implementation. No run/acp-drive/config split was attempted.
-
-The benchmark recorded these wall times at baseline `9da5b90` and its
-prototype. These are local measurements, not a reproduction of the reported
-three-hour Kubernetes stall:
-
-| Build or edit | Baseline (s) | Prototype (s) |
-| --- | ---: | ---: |
-| Fresh debug | 134.4 | 130.4 |
-| Debug incremental CLI | 9.7 | 8.9 |
-| Debug incremental run | 10.0 | 8.8 |
-| Debug incremental session | 9.9 | 9.6 |
-| Fresh release | 397.0 | 404.7 |
-| Release incremental CLI | 158.4 | 157.5 |
-| Release incremental run | 159.2 | Not collected |
-| Release incremental session | 160.0 | Not collected |
-
-The runner had 4 vCPUs (AMD EPYC 7763), 15 GiB RAM, no cgroup CPU or memory
-limit, Rust/Cargo 1.93.1, and the x86_64 GNU target. Builds used default jobs,
-default dev/release profiles and default `CARGO_INCREMENTAL`. Fresh builds
-used `cargo build --locked --timings -p agentic-job` (plus `--release` for
-release); incremental builds added `--bin agentic-job` after appending a dead
-function to `cli.rs`, `run/summary.rs` or session `budget.rs`. Incremental
-numbers are means of three samples; fresh builds had one sample each.
-Baseline incremental standard deviations were 0.10/0.24/0.11 seconds in debug
-and 0.4/3.3/1.3 seconds in release (CLI/run/session).
-
-Baseline fresh release spent 220.7 seconds in the final binary; release
-incremental work spent about 45 seconds in the library and 113 in the final
-binary. Per-process peak RSS was about 1.27–1.30 GiB; aggregate peaks were
-2.5 GiB for fresh debug, 2.0 GiB for fresh release and about 1.37 GiB for
-incremental release. The debug gains were modest, release CLI improved by
-less than a second, and fresh release regressed by 7.7 seconds
-(about 2%, one sample each). The incomplete release samples do not establish
-a general incremental win, so this evidence does not justify retaining the
-split.
-
-The original stall remains unconfirmed until the reporter supplies the
-revision, pod CPU/memory limits and pressure, throttling or OOM evidence.
-Published release binaries remain the recommended CI path. Revisit a split
-only with a measured bottleneck and a repeatable improvement.
+`session::run` drives one agent process for one task: it starts the agent
+behind the caller's launch wrapper, answers its permission requests,
+holds it to its limits, and records `acp.jsonl`, `agent-stderr.log` and
+`harness.json`. `session/agents.toml` is the built-in registry of ACP
+agents. The [harness guide](harness.md) describes what a session does from
+the outside.
 
 ## `run`
 
-`run/clone.rs` clones the public target as the runner's user in runner mode before
-`run/inference.rs` registers the run. `run/agent.rs` writes agent settings;
-`run/launch.rs` clears inherited provider settings and starts the agent.
-`run/probe.rs` retains legacy token checks; they do not run with `--runner-home`
-and do not prove same-UID isolation.
-
-`run/brief.rs` tells the agent how to hand back, and `handback.rs`
-lets it check what it would hand back during the session. `run/handback.rs` reads
-the outcome and requests and makes one patch from the uncommitted tree.
-`run/log.rs`, `run/egress.rs` and `run/summary.rs` build redacted evidence;
-`run/upload.rs` gates publication. Failed cleanup or remaining secrets
-leave nothing to upload. The [interface](interface.md#files-written)
-and [artifact guide](workflow.md#what-a-run-leaves) describe the outputs.
+`run` clones the target, registers the run with the inference proxy,
+writes the agent's settings, starts it and drives the session, then
+reads the hand-back: the outcome, the requests and one patch made from
+the uncommitted tree. It builds redacted logs and a summary, and uploads
+nothing if cleanup failed or a secret remains. The supervisor runs as the
+runner's user and the agent shares its UID, so same-UID files,
+environment and memory are not a credential boundary
+([requirements.md](requirements.md#actors-and-trust)).
+[interface.md](interface.md#files-written) and
+[workflow.md](workflow.md#what-a-run-leaves) describe the outputs.
 
 ### Adding an agent
 
-An ACP command in the registry is not enough for `run`. A new agent
-needs configuration and launcher code that pins its provider and keeps
-project settings from redirecting the run token. It also needs a known
-token file, environment filtering, API route, instruction-file handling
-and cost interpretation. See `run/agent.rs`, `run/launch.rs`,
-`session/process.rs` and their table tests.
-
-Task limits depend on recognizing the agent's subagent tool names.
-Spending limits depend on reported ACP usage; request limits depend on
-the inference proxy. Test these against the actual adapter, not only
-generated configuration. The [agent-extension recipe](harness.md#adding-an-acp-agent-to-run)
-lists the files to change, the adapter contract and the security tests.
+An ACP command in the registry is not enough for `run`. A new agent needs
+launcher and configuration code that pins its provider, keeps project
+settings from redirecting the run token, filters its environment, and
+knows its token file, API route, instruction files and cost reporting.
+Limits depend on recognizing its subagent tool names and on its reported
+usage, so test against the real adapter, not only generated
+configuration. The [agent-extension recipe](harness.md#adding-an-acp-agent-to-run)
+lists the files to change and the security tests to add.
 
 ## Other directories
 
-`secure-host/` holds the standalone action, hosted configuration, release
-pin and binary-fetch script. `egress/` holds the mitmproxy addon, policy,
-hashed dependencies and Python tests; the Rust proxy, the default in
-place of mitmproxy, is `crates/secure-host/src/proxy/`. The runtime Python files, default
-policy, ecosystem identifiers and requirements file are embedded in the
-binary; the tests are not. Regenerate the identifiers with
-`python3 egress/ecosystems.py GH_AW_CHECKOUT` when changing gh-aw's pin.
-`skills/` holds the agents' [skills](skills.md) and subagents, also
-embedded.
+| Directory | Holds |
+| --- | --- |
+| `secure-host/` | The standalone action, its image's Containerfile, hosted configuration and binary-fetch script |
+| `prepare/`, `run/` | The composite actions that install the binary and inputs before setup, and run the agent on a locked host |
+| `workflow/` | Scripts and files the reusable workflows read |
+| `egress/` | The mitmproxy addon, its policy, hashed dependencies and Python tests; the default proxy is the Rust one in secure-host |
+| `safe-outputs/` | Validation rules derived from gh-aw, their generator and fixtures |
+| `skills/` | The agents' [skills](skills.md) and subagents, embedded in the binary |
+| `specs/` | TLA+ models and their checker, and the run, session and GitLab-caller specs |
+| `site/` | The documentation site |
 
-`safe-outputs/` holds integration scripts, derived validation rules and
-fixtures. gh-aw's handlers come from its pinned setup action, not a
-vendored copy; `collect` is held to its collector at the same commit. Regenerate the rules with
-`node safe-outputs/validation.mjs GH_AW_CHECKOUT` when changing that pin,
-`collect`'s parity fixtures with `just collect-fixtures GH_AW_JS`, and the
-[publication corpus](safe-outputs.md#the-publication-corpus) with
-`just publication-corpus`, which also follows apply.yml's
-`actions/github-script` pin.
+gh-aw's handlers come from its pinned setup action, not a vendored copy.
+When you change that pin, regenerate what is derived from it with the
+commands below.
+
+| What | Command |
+| --- | --- |
+| Ecosystem identifiers | `python3 egress/ecosystems.py GH_AW_CHECKOUT` |
+| Validation rules | `node safe-outputs/validation.mjs GH_AW_CHECKOUT` |
+| `collect`'s parity fixtures | `just collect-fixtures GH_AW_JS` |
+| [Publication corpus](safe-outputs.md#the-publication-corpus) | `just publication-corpus` |
 
 ## Tests and CI
 
-Unit tests sit beside Rust code. Binary integration tests are in
-`crates/agentic-job/tests/`. Its `corpus/` directory compares policy
-and patch behavior with the old tree at the pin in
-[ci.yml](../.github/workflows/ci.yml)'s `corpus` job, and runs `collect` and `check` against gh-aw's
-pinned handlers with a mocked forge. Those Node tests require separate
-old-tree and gh-aw checkouts; their source files document the
-environment variables.
-
-[ci.yml](../.github/workflows/ci.yml) runs Rust formatting, clippy and tests,
-Markdown linting and offline links, proxy tests and release-pin checks (one
-`lint` job), static builds, sandbox mutation tests and scripted-agent E2E runs. The `ci` job
-gathers their results. Host tests need disposable runners with root and
-systemd 257; they are not safe to run on a workstation.
+Unit tests sit beside the code; binary integration tests are in
+`crates/agentic-job/tests/`. Its `corpus/` tests compare behavior with the
+old tree and gh-aw's pinned handlers and need those checkouts; their
+source files name the variables. [ci.yml](../.github/workflows/ci.yml)
+runs the lints, tests, static builds, sandbox mutation tests and
+scripted-agent runs, and its `ci` job gathers them. Host tests need a
+disposable runner with root and systemd 257; never run them on a
+workstation. The [Justfile](../Justfile) has the local commands.
 
 ## License
 

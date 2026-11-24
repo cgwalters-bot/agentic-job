@@ -30,6 +30,14 @@
 //! `[session] listen`, [`bridge`] is the client-facing half, and the
 //! session goes on after the task's turn to its client's prompts
 //! (specs/session.md).
+//!
+//! The session stays in agentic-job. Extracting it to a crate of its own
+//! (agentic-job#3129) needed new seams for configuration, credential
+//! names, limits, exit states and sanitization, and measured no build-time
+//! gain worth them: a fresh release build got about 2% slower (one
+//! sample) and incremental builds gained at most about a second. The
+//! measurements are in docs/layout.md's history. Revisit only with a
+//! measured bottleneck.
 
 pub mod agents;
 pub mod bridge;
