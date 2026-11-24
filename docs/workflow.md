@@ -682,7 +682,7 @@ configuration's setup script after it with `workflow/runner-setup.py
 setup`, and give `run` a `runner-home`, which it requires, and drop
 `id-token` from the job, as
 [above](#the-pieces-and-an-agent-job-of-your-own)
-([secure-host.md](secure-host.md#the-public-action-forwards-to-cgwalters-forgeactionssecure-host)).
+([secure-host.md](secure-host.md#inputs-and-outputs)).
 
 ### Migrating a direct call of check.yml
 

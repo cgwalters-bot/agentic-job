@@ -1,712 +1,269 @@
-# Securing the CI host: one setup step for any job
+# Securing the CI host
 
 > This text is LLM generated.
 
-Agent security is just CI security. An agent is one more untrusted step
-of a job, like a build script from a pull request or a dependency's
-install hook, and what protects a job from one protects it from the
-others. So the hardening is a step of its own that any job can run
-before untrusted steps, whether or not an agent runs afterwards:
-[`cgwalters-forge/actions/secure-host`](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md),
-which runs the image this repository builds. Later workflow steps run as
-the runner's user, which is also the agent's user. The former second-user
-direction is superseded by [#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989);
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed it.
+An agent is one more untrusted step of a job, like a build script from a
+pull request. secure-host hardens the host before such steps run, agent or
+not. Start with a fresh, disposable runner from a trusted image without
+arbitrary privileged helpers. Setup checks known privileged binaries; it
+does not inventory the filesystem for setuid-root programs. The default
+check fails the step if a probe fails; a pass is evidence for the case
+probed, not proof that the runner image meets that prerequisite.
 
-That action's README and documents are the documentation of record for
-the host: what setup changes, the lock, the world-write policy, the rule
-against reading another runner process, egress and the probes
-([where each section went](#where-the-host-documentation-went)). This
-page keeps what concerns agentic-job alone: the forwarder, how the agent
-job uses the action, and where the binary and image come from. Those
-documents describe the pinned image, which can lag this repository's
-main branch. They cover later host changes when the pin moves.
+On GitHub, the step is the action
+[`cgwalters-forge/actions/secure-host`](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md),
+which runs the attested, digest-pinned image this repository builds. Its
+documents are the reference for what setup does to the host
+([further reading](#further-reading)). This page covers using it, and
+what agentic-job adds on top.
 
 ## Example: harden a deterministic job
 
-Everything that needs root runs before the hardening step. Replace `COMMIT`
-with a reviewed pin:
+Use a fresh runner from a trusted image as described above. Install any
+system packages before the hardening step. Replace `COMMIT` with a reviewed
+commit and `make check` with your repository's test command:
 
 ```yaml
+on: pull_request
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-26.04
     steps:
-      - run: sudo apt-get install -y libfoo-dev   # root: before the step
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: cgwalters-forge/actions/secure-host@COMMIT
-      - run: make check                           # runner's user, no sudo
+        with:
+          egress: write-policy
+      - run: make check
 ```
 
-Losing root does not hide the job's tokens from later steps. The reusable
-workflow keeps write credentials in separate jobs
+The direct action's `egress` input overrides `egress.write-policy` in a
+custom TOML file. Use `egress: write-policy` as shown to enable write
+filtering; the default `off` disables it even if the file sets it to `true`.
+The [forwarder](#inputs-and-outputs) takes that setting from TOML instead.
+
+Later steps run as the runner's user, which is also the agent's user.
+Losing root does not hide the job's tokens from them, so keep write
+credentials in other jobs, as the reusable workflow does
 ([token boundaries](workflow.md#which-tokens-reach-what)).
 
-## The public action forwards to cgwalters-forge/actions/secure-host
+## What a later step can rely on
 
-[`secure-host/action.yml`](../secure-host/action.yml) forwards to
-`cgwalters-forge/actions/secure-host` at a pinned commit, which runs the
-attested, digest-pinned [image](#where-the-binary-and-image-come-from)
-([tracker#674](https://github.com/cgwalters-forge/tracker/issues/674)).
-It passes on `config`, `check` and `image-archive`. A caller that names
-`cgwalters-forge/agentic-job/secure-host` at a commit from before the
-forward keeps the old action. At `@main` or a later commit:
+These controls assume a fresh, trusted runner image without arbitrary
+privileged helpers. A passing check does not establish that prerequisite.
 
-- The new action's contract has no second user to run steps as: every
-  step after it is the runner's user's. The old action's outputs are
-  gone, so a step that reads them gets an empty string.
-- Without a `config`, the forwarder passes this repository's
-  [`hosted.toml`](../secure-host/hosted.toml) for Ubuntu 26.04 or
-  [`rhel-cloud.toml`](../secure-host/rhel-cloud.toml) for RHEL 10 and
-  CentOS Stream 10, selected from `/etc/os-release`, and not the new
-  action's default, which turns egress filtering off: the
-  v0.6 image's binary still creates its second user, and a step that
-  runs code as it keeps writing only through the proxy's rules. A
-  `config` of the caller's own replaces it whole. The new action sets
-  `egress.write-policy` from its own `egress` input, over the file, so
-  the forwarder passes `egress: write-policy` when the file asks for it,
-  and refuses a file with a backslash outside a comment or with a
-  multi-line string, either of which could ask for it in a way the
-  forwarder does not read.
-- The forwarder and `site.yml` pin the same commit of the new action;
-  its comment names the image tag that commit runs, and
-  [tests/workflows.rs](../crates/agentic-job/tests/workflows.rs)'
-  `the_public_secure_host_forwards_to_the_pinned_action_and_refuses_old_inputs`
-  refuses a pin whose two copies differ, whose tag is older than v0.6.9
-  (the required runner storage rules), or newer than the workspace's version.
-- The floor is ubuntu-26.04, the runner the new action is written for;
-  the pinned image admits exactly Ubuntu 26.04 and RHEL 10
-  ([supported hosts](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#supported-hosts)).
-- Setting another input of the old action that chose the host fails the
-  step and names the new action: `lock`, `egress`,
-  `deny-runner-metadata`, `egress-policy`, `stop-services`,
-  `sandbox-user`, `runner-user`, `script`, `binary` or `build`. Each
-  asked for a host the new action would not set up, so the step does
-  not ignore it. A configuration file says the same things.
+| After the step | Unless |
+| --- | --- |
+| No general-purpose sudo, root group membership or access to the container daemon socket. A limited sudo grant to the root-owned probe helper remains | `host.lock-runner = false`, which also turns off the rows below but the world-write one |
+| No connection to the cloud metadata service | `host.deny-runner-metadata = false` |
+| A world-writable file or non-sticky directory on the root filesystem changes only by its owner. Other filesystems, such as a tmpfs, are outside the policy | |
+| A process of the runner's user cannot read the environment of another (`/proc/PID/environ`), the Worker among them, unless it is that process's ancestor or the Worker itself. Command lines and `status` stay readable | `host.deny-runner-reads = false`, or off the image, the loader ran without `--deny-runner-reads` ([below](#on-a-host-without-a-github-actions-runner)). On the pinned image a forced core dump still exposes them ([below](#what-main-has-that-the-pinned-image-does-not-yet)) |
+| The Worker's diagnostic socket is unlinked | `host.unlink-worker-diagnostics = false`; independent of the row above |
+| HTTP(S) requests of the runner's user go through the egress proxy and its write rules | Write filtering is off by default; enable it through the interface you call ([direct action](#example-harden-a-deterministic-job), [forwarder](#inputs-and-outputs)) |
+
+The write policy is not exfiltration prevention. Reads (GET, HEAD,
+OPTIONS) pass to most hosts and can carry data in their URLs, the
+runner's own writes to the Actions service and artifact storage are
+allowed, and DNS to the configured resolvers, connections open before
+setup and configured direct endpoints, such as an inference broker on the
+tailnet, pass outside the proxy
+([`policy.rs`](../crates/secure-host/src/proxy/policy.rs),
+[`network.rs`](../crates/secure-host/src/network.rs)).
+
+Unless `check: false`, `sandbox check` probes these and fails the step if
+a probe fails; it checks the diagnostic socket only when its row is on. It
+does not probe the runner-read rule: the image's loader enables and proves
+that one.
+
+Every later step shares one uid and one trust level, so each can read
+what another left in the workspace, the environment or the job's tokens
+([threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#what-a-later-step-can-count-on-and-what-it-cannot)).
+
+## Inputs and outputs
+
+This repository's own action, [`secure-host/action.yml`](../secure-host/action.yml),
+forwards to a pinned commit of that action with these inputs, all optional.
+Set `egress.write-policy = true` in its TOML configuration to enable write
+filtering. The forwarder translates that setting to the direct action's
+`egress: write-policy` input; it does not expose a separate `egress` input.
+
+| Input | Default | What it sets |
+| --- | --- | --- |
+| `config` | [hosted.toml](../secure-host/hosted.toml) on Ubuntu 26.04, [rhel-cloud.toml](../secure-host/rhel-cloud.toml) on RHEL 10 | A TOML file with the `[host]`, `[egress]` and `[setup]` tables. Your file replaces the default whole. The pinned image reads `[host]` only under its deprecated name `[sandbox]` |
+| `check` | `true` | `false` skips `sandbox check` after setup. The pinned action does not pass `--record`, so either choice leaves no [check record](sandbox-check.md) for a later check to reuse |
+| `image-archive` | none | An image archive, as `podman load` takes it, run unverified in place of the pinned image: for a job that built it |
+
+It has no outputs. The inputs it had before forwarding, such as `lock` or
+`sandbox-user`, now fail the step rather than set up another host than
+the one asked for. The forwarder also refuses a `config` with a backslash
+outside a comment or a multi-line string, which could set
+`egress.write-policy` in a way it does not read.
+
+## Supported hosts
+
+| Host | Pinned image | Current source |
+| --- | --- | --- |
+| Ubuntu 26.04 | yes | yes |
+| RHEL 10, including minor releases | yes | yes |
+| CentOS Stream 10 | no | yes |
+
+Admission reads `ID` and `VERSION_ID` in `/etc/os-release`; `ID_LIKE`
+never admits a host. Ubuntu 26.04 is the only host with runtime
+evidence; RHEL admission is not proof that every control works there.
 
 ### What main has that the pinned image does not yet
 
-The action's documents describe the image it pins (v0.6.9). Main has
-changed the host since, and a forwarder caller gets these only with the
-next image release:
+The forwarder gets these changes only with the next pinned image:
 
-- The Ubuntu `packages` stage shares a 45-second deadline across package
-  downloads and, if needed, one index refresh and download retry. A stuck
-  acquisition gets at most five more seconds for forced cleanup. A failed
-  download names mirror name resolution/DNS and connectivity as things to
-  check; an exceeded deadline names no cause, since apt may have been
-  downloading slowly all along. apt's own output remains in the job log,
-  and `agentic-job sandbox prepare` adds one error annotation naming the
-  failed stage and, for these two, the cause. Installation then uses
-  `--no-download`, so no later acquisition can reintroduce the DNS wait,
-  and the deadline never kills dpkg. This also refuses downloads that take
-  longer than the budget on a slow but working network. Dnf is unchanged.
-- Host admission also accepts CentOS Stream 10, by exact `ID=centos` and
-  `VERSION_ID=10`, with separate privileged-binary allowlist rows. Ubuntu
-  26.04 and RHEL 10 (including minor releases) remain admitted. `ID_LIKE`
-  never grants admission: CentOS 9, AlmaLinux, Rocky, Fedora and other
-  untested distributions stay refused. The forwarder's default selection
-  uses the same match; an unknown host with no explicit config fails
-  before forwarding. Its RHEL-family cloud config stops cockpit,
-  sssd-kcm, gssproxy and sshd (including `sshd-unix-local.socket`) so
-  untrusted code cannot reach those listeners; it adds no socket
-  exceptions. An explicit `config` still replaces the default whole.
-  The pinned image does not yet admit CentOS Stream 10, even with this
-  default; use an image built from this source until the pin moves.
-- Under `host.deny-runner-reads`, setup discards every core dump on the
-  host: it sets `kernel.core_pattern` to `|/bin/false`, and `secure-host
-  check` fails its `core-pattern` probe on a host without it. The
-  runner-read rule and Yama scope 1 refuse a step the environment, `mem`
-  and ptrace of its parent, `run` or the Worker. Without this, the step
-  could still raise that process's core limit with `prlimit`, kill it with
-  `SIGSEGV` and read its environment and memory from `coredumpctl dump`
-  ([#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618)).
-  `prlimit` and `kill` need only the same uid, and the default pattern
-  hands the dump to systemd-coredump, which keeps it readable by that uid.
-  The pattern is the kernel's and applies in every namespace. Only root
-  in the host's user namespace can change it, and the lock that the rule
-  requires keeps the runner's user from becoming root. So every job on
-  such a host loses its core dumps, deterministic CI included; a job that
-  needs them sets `host.deny-runner-reads = false`. CI's `confined` job
-  probes each route in its control before secure-host and requires it to
-  fail after. It forces a dump only of a child of its own that carries a
-  marker, never of the Worker. Until the pin moves, a host the pinned
-  image sets up keeps its dumps, and the check the run action runs is
-  that image's binary, which does not look. `run` still refuses an inference
-  provider's key, an MCP credential, the OIDC request and the rest under
-  `--runner-home` ([sandbox](sandbox.md)). These probes are the evidence
-  a later decision to lift any of them would rest on, and they do not
-  lift them.
+| Change | Effect |
+| --- | --- |
+| CentOS Stream 10 admitted | Uses `rhel-cloud.toml`, which also stops cockpit, sssd-kcm, gssproxy and sshd |
+| Core dumps discarded under `host.deny-runner-reads` | Stops a step forcing a dump of another runner process to read its memory ([#1618](https://github.com/cgwalters-forge/agentic-job/issues/1618)). Every job on the host loses its core dumps; set `host.deny-runner-reads = false` if you need them |
+| Ubuntu package downloads share a 45-second deadline | The failure names the stage that timed out |
 
-### Deployed write-policy diagnostics
+## On a host without a GitHub Actions runner
 
-The forwarder selects actions commit
-`466a490e983ff07e6fb076fa4bd8b4d5f918fcd6`, the reviewed
-[#180](https://github.com/cgwalters-forge/actions/pull/180) deployment,
-whose `Containerfile.pin` names the attested v0.6.9 image, digest
-`sha256:008d34bf9598ef83d7859772200f26637814d2cd105028457208ddc87d69788b`.
-Before pulling it, the action verifies the digest's SLSA provenance against
-its signer, this repository's `release.yml` on `refs/heads/main`, built on a
-GitHub-hosted runner; the provenance it accepts names source revision
-`57119eeffa17ea41b383cfdaf8370b8abeba8868`, which the `v0.6.9` tag points at.
-It includes [#2816](https://github.com/cgwalters-forge/agentic-job/pull/2816):
-write-policy refusal responses name the method and connection host, never
-the path or signed query. The upload step itself prints that response even
-when it cannot upload artifacts; no proxy-log artifact is needed for it.
-Image attestation verification, write-policy selection and token boundaries
-are unchanged by this pin update.
+On a GitLab or Forgejo runner, a self-hosted machine or a VM of your own,
+run the binary directly. Use a fresh, disposable host from a trusted image
+without arbitrary privileged helpers. These commands change users, sudo,
+services and firewall rules, so never run them inside an existing sandbox.
+Follow the [release manifest verification recipe](gitlab.md#pinned-release-binaries),
+then check `secure-host-x86_64-unknown-linux-musl` against `.sha256["secure-host"]`
+and `world_write.bpf.o` against `.sha256["world_write.bpf.o"]` from the same
+verified manifest before installing either asset. Check the
+[loader prerequisites](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/world-write.md#loading).
 
-For [#2811](https://github.com/cgwalters-forge/agentic-job/issues/2811), the
-example workflow has now uploaded an artifact under this deployment on a
-hosted runner. Actions' [#228](https://github.com/cgwalters-forge/actions/pull/228)
-moves `example-plain-ci.yml` to that action commit and asserts the pin in
-its workflow test; the pull request run for its head
-`8c3486ee6006f4baf112b954ffafd3df6088640f`,
-[42487605263](https://github.com/cgwalters-forge/actions/actions/runs/42487605263),
-passed:
+Save this as `host.toml`, replacing `runner` with the existing non-root job user:
 
-- The build job's secure-host step verified the attestation of that digest,
-  set up the host with `egress: write-policy`, and passed the write-policy
-  sandbox checks: the runner reads with no proxy variable set, its POST to
-  `example.com` is refused, and the sandbox cannot reach the runner's listener.
-- `actions/upload-artifact` uploaded the one-file artifact 13620365713
-  (171 bytes, ZIP digest
-  `sha256:9955628b4bbcbd9ccb2c1b2a6ac1b8a3d47a107aae05529480221e12fac60d5e`)
-  with no refusal response.
-- The publish job downloaded it by ID, checked that digest and validated the
-  extracted file as one commit ID. Its download redirect named
-  `productionresultssa18`, one of the admitted accounts below, as the account
-  holding the artifact; the upload step's log names no host. So the run
-  shows one admitted destination, not where a refused upload would have gone.
+```toml
+[host]
+runner-user = "runner"
+deny-runner-reads = false
+```
 
-The following pins and check results are a deployment snapshot, not
-recommended pins or evidence of current default-branch adoption. On 2026-11-09
-actions' `main` (`eef41d3b216c731fda0960d6c9876a6ab3cd159a`) still pins the
-example to `c9a9501729bc306f3efdc188056b51149c1c9398`, whose image is v0.6.4,
-digest `sha256:df9133ce3d7ca05c9de0c5eb7d1f6c662065288191ac857d6c877ab5833e5b49`;
-its latest example run
-[42488914598](https://github.com/cgwalters-forge/actions/actions/runs/42488914598)
-passed with that image and says nothing about the corrected one. #228 is
-approved and conflict-free but behind `main`, and its required `ci` check
-([42487605277](https://github.com/cgwalters-forge/actions/actions/runs/42487605277))
-fails in zizmor: four `ref-version-mismatch` warnings on the `# main`
-comments of wrapper pins in `cgwalters-agent.yml` and
-`cgwalters-agentic-job.yml`, files #228 does not change; `ci` fails the same
-way on `main`
-([42488914465](https://github.com/cgwalters-forge/actions/actions/runs/42488914465)).
-Once that check passes and #228 merges, record here the default branch's
-effective action and image and a post-merge example run's upload and
-consumer result; until then #2811 stays open. The pin is actions' to land;
-this repository does not duplicate it. Tracker and other callers of actions'
-wrappers must select the corrected deployment themselves: neither this
-forwarder update nor #228 moves their pins.
-
-The historical refusals, agentic-job run
-[41476599777](https://github.com/cgwalters-forge/agentic-job/actions/runs/41476599777)
-and actions runs
-[42349245829](https://github.com/cgwalters-forge/actions/actions/runs/42349245829)
-and [42349923436](https://github.com/cgwalters-forge/actions/actions/runs/42349923436),
-still name no upload host: each ends with a PUT the egress proxy refused,
-and a download redirect in the same run names the account holding an
-artifact already uploaded, not the refused PUT's destination. One success
-does not show that every dynamic upload destination is admitted. A future
-refusal is recorded as its query-free method and host with run and step
-links, never a signed URL or header. A further exact-host, PUT-only admission needs verified GitHub
-ownership of that storage account, from a results-service signed-upload
-response or artifact redirect, and positive and negative boundary tests,
-not ranges, suffixes or DNS existence.
-
-Under `egress.write-policy`, the runner's storage writes go only to the
-results service's twenty `productionresultssaN` accounts from gh-aw,
-`productionresultssa30`, `productionresultssa31` and `productionresultssa32`, verified through
-GitHub's artifact service redirects in CI runs
-[40611370113](https://github.com/cgwalters-forge/agentic-job/actions/runs/40611370113),
-[40812985049](https://github.com/cgwalters-forge/agentic-job/actions/runs/40812985049)
-and [41476599777](https://github.com/cgwalters-forge/agentic-job/actions/runs/41476599777)
-(DNS existence alone does not establish ownership;
-[#1422](https://github.com/cgwalters-forge/agentic-job/pull/1422),
-[tracker#974](https://github.com/cgwalters-forge/tracker/issues/974)),
-not to every Azure storage account.
-
-These are the pinned image's built-in runner writes, not rules injected
-by the forwarder into the explicit proxy's policy. The forwarder leaves
-`egress.policy` alone and no longer constructs a combined policy file.
-Artifact uploads run as the runner's uid: public HTTP/HTTPS connections
-are redirected to the transparent listener, whose `runner_policy` adds
-these PUT-only rules. The action exports CA trust variables, not explicit
-proxy variables, for later steps. Removing the override therefore keeps
-runner uploads working while removing those extra PUT permissions from
-the explicit proxy (unless a caller's own policy grants them).
-
-## On a host that is not a GitHub Actions runner
-
-A self-hosted CI job, or a VM of its own, needs the binary **and its matching
-`world_write.bpf.o`**, from a verified release or a trusted source build
-([provenance](#where-the-binary-and-image-come-from)). On a fresh disposable
-[supported host](#what-main-has-that-the-pinned-image-does-not-yet), load the
-object as root before setup, then check as the user the later steps run as:
+Run the setup commands from the job user's shell with sudo, and run the
+check as that same user without sudo. The check reads the installed
+configuration, not `host.toml`:
 
 ```sh
 sudo secure-host world-write /path/to/world_write.bpf.o
-sudo secure-host setup --config FILE
+sudo secure-host setup --config host.toml
 secure-host check
 ```
 
-`agentic-job secure-host world-write`, `agentic-job sandbox setup` and
-`agentic-job sandbox check` do the same, and that setup does the agent's
-part too.
+The loader needs kernel BTF and installs bpftool if missing. It leaves the
+runner-read rule off unless given `--deny-runner-reads` (and
+`--sole-worker` when the Worker did not start it); setup never loads that
+rule itself. `agentic-job secure-host world-write`, `agentic-job sandbox
+setup` and `agentic-job sandbox check` do the same and also prepare the
+agent's part.
+A runner whose jobs run in a container the job does not own cannot be
+hardened this way. `host.isolation = "external"` disables managed setup and
+declares isolation that the runner host must supply itself
+([external host isolation](gitlab.md#explicit-external-host-isolation)).
 
-These are host-changing commands, not commands to run inside an existing
-sandbox. The loader needs kernel BTF, BPF privileges, `runuser` and bpftool
-(which it installs if missing); setup does not activate BPF itself and
-refuses missing policy pins. The loader checks modify-return tracing links,
-enables the root-device map and proves a denied write with writable controls
-([loader](../crates/secure-host/src/world_write.rs)). Host admission alone is
-not runtime evidence: the policy has hosted Ubuntu 26.04 evidence, not a
-RHEL 10 or CentOS Stream 10 runtime proof.
-
-None of these commands needs `RUNNER_TEMP`, the `GITHUB_*` environment or a
-`Runner.Worker` process. What changes without them:
-
-- With no `Runner.Worker`, `host.unlink-worker-diagnostics` has no
-  socket to unlink: setup prints that it skipped the step and why, and
-  `sandbox check` notes the same rather than passing a probe. With one or
-  more Workers, both behave as on a GitHub runner.
-- The runner-read rule exempts exactly one `Runner.Worker`, so where the
-  secure-host image's loader runs, a host without one sets
-  `host.deny-runner-reads = false`; the loader refuses it otherwise
-  and names this key. The standalone loader above leaves the runner-read
-  rule off; `sandbox setup` alone never loads it, even when the key is true.
-  With a Worker and that rule required, pass `--deny-runner-reads` to the
-  loader (`--sole-worker` too if the loader is not its descendant).
-- Started from a root shell or a systemd unit rather than sudo as the
-  runner's user, setup needs `host.runner-user` naming an existing
-  non-root user; otherwise it cannot identify whose job to harden.
-- The check record that lets a later check in the same job skip its
-  probes ([sandbox-check.md](sandbox-check.md)) needs `RUNNER_TEMP` and
-  `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT` and `GITHUB_JOB`. Without them
-  there is no record, and every check runs its probes.
-- `sandbox timed` is the GitHub action's wrapper, which times setup and
-  the probes for the job summary; a plain host does not need it.
+| Without | What changes |
+| --- | --- |
+| A `Runner.Worker` process | The runner-read rule exempts exactly one Worker, so where the image's loader runs, set `host.deny-runner-reads = false`. Setup skips unlinking the Worker's diagnostic socket and says so |
+| sudo from the runner's user | Set `host.runner-user` to the non-root user whose job to harden |
+| `RUNNER_TEMP` and `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, `GITHUB_JOB` | No [check record](sandbox-check.md), so every check runs its probes |
 
 ## The agent job
 
-The agent job (`agent.yml`, which `agentic-job.yml` and `review.yml`
-call) runs the forwarder with the policy job's configuration except for
-`setup.script`, and then the agent as the runner's user
-(`run --runner-home`, the run action's default `agent-user: runner`).
-The image would run `setup.script` as its second user, from the host's
-root, so the job runs it itself, after secure-host, in the agent's home.
-`sandbox setup` refuses a host's `setup.script` since #2991. The image also
-installs its own binary in `/usr/local/bin` over the one `prepare` put
-there, so `run` starts the policy job's binary from the job directory.
-The composed example (`example-compose.yml`) has the same steps, and
-CI's jobs that secure a host run the forwarder with this revision's
-image (`image-archive`).
+The reusable workflow's agent job runs the same step, then the
+configuration's `setup.script`, then the agent, both as the runner's user
+(`run --runner-home`). Nothing stands between the agent and the job's own
+credentials, so the job holds only the broker's run token and, by default,
+a read-only forge token. A separate job registers with the inference
+broker ([the run token](workflow.md#the-run-token)), and another machine
+checks what the agent hands back ([safe outputs](safe-outputs.md)).
 
-An image of this source holds the secure-host binary and no agent code
-([below](#the-secure-host-binary)), so with one the agent job does
-agentic-job's part of setup first, as root: `sudo agentic-job sandbox
-prepare` installs the packages, the agents and Vibe, writes the agent's
-managed settings, and installs the policy job's binary as the helper,
-with the operations `run` needs of root later. The host's file says so,
-`[host.prepared]`, which `agentic-job config --host --prepared`
-writes from the run's tables: the image's setup then keeps that helper
-rather than installing itself (it must be a regular file there, and is
-made root's alone with its directories, or setup refuses), and holds
-the egress proxy and the network rules to what the run's tables ask
-(the broker under `inference.front`), and serves the session bridge's
-port when the tables name one, which
-it does not read itself. agentic-job's readers refuse a table that no
-longer says what the run's tables ask. The pinned image, a release
-whose binary is agentic-job's and does all of setup, refuses that
-table, so until a release is pinned the agent job runs this step only
-with `image-archive`, as CI's end-to-end jobs do; running it before
-every image is
+With an image built from this source (`image-archive`), the job first runs
+`sudo agentic-job sandbox prepare` to install the agents; the pinned image
+rejects the prepared configuration until
 [#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656).
-
-The agent is then a later step like any other: no root, the metadata
-service only where the configuration leaves it open
-([above](#what-main-has-that-the-pinned-image-does-not-yet)), and, as
-the action's
-[threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md#what-a-later-step-can-count-on-and-what-it-cannot)
-says, nothing between it and the job's own tokens. So the agent job
-must not hold credentials it expects to hide from the agent. It still holds
-the run token and, by default, a read-only forge token; credentialless
-admission is future work, not a claim of this setup. It has no `id-token`: a `register` job before
-it registers with the inference broker and passes on only the broker's
-run token, as a secret of the agent's job
-([the run token](workflow.md#the-run-token)); `review.yml` calls the same
-agent job, after a `register` job of its own. The composed example runs
-only the scripted agent, which registers nothing, and holds no
-`id-token` either. What the agent hands back is checked on another
-machine before a job with a write token acts on it
-([workflow](workflow.md)).
 
 ### The egress write policy for an agent job
 
 Without the
 [egress write policy](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#egress-write-policy-opt-in),
-the runner's writes go anywhere but the metadata service. Host setup keeps
-it opt-in, through `egress.write-policy` in its configuration. An agent
-run with the proxy enabled now requires the write policy: `config` turns
-it on when unset and refuses an explicit false value. The workflow's
-`egress-write-policy` input can also request it. It holds the agent, the
-setup script and every later step of the job.
+the runner's user can write anywhere but the metadata service. An agent
+run with the egress proxy on requires it: `agentic-job config` turns it on
+when unset and refuses an explicit `false`. The workflow's
+`egress-write-policy` input requests it too.
 
-It restricts the agent less than it restricts the sandbox user. The agent is the
-runner's uid, so it gets the runner's own write rules: it can write to
-the Actions service with a token of its own, such as another
-repository's runtime token, and upload what it read there, and the
-pinned image's storage rules admit only the exact results accounts
-[listed above](#deployed-write-policy-diagnostics). There is no
-supported second-user escape from that channel. The agent job refuses
-a private caller or target with the write policy on
-([private-repositories.md](private-repositories.md#opting-in)).
+The policy holds the agent, the setup script and every later step. Because
+the agent is the runner's uid, it also gets the runner's own write rules:
+the Actions service, and PUTs to the artifact storage accounts listed in
+[the proxy's policy](../crates/secure-host/src/proxy/policy.rs). The agent
+job refuses a private caller or target with the policy on
+([private repositories](private-repositories.md#opting-in)).
 
-`run`'s own requests are held too. The one built-in exception is
-`egress.direct`, which `agentic-job config` fills with an `inference.url`
-on the tailnet when the file names none, so that the broker is reached
-at its own address; a provider's API under `register = "api-key"`, or a
-broker at a public address, needs a `[[write]]` rule of the caller's.
-The agent trusts the proxy through two sources: the system's store,
-which curl, git and OpenSSL read, and `NODE_EXTRA_CA_CERTS` and
-`REQUESTS_CA_BUNDLE`, which `run --runner-home` adds to the agent's
-otherwise cleared environment. CI's `e2e-write-policy` job runs the
-scripted agent this way: it reads through the proxy with curl and Node,
-is refused a POST, and its hand-back is uploaded and applied.
+`run`'s own requests go through the proxy too. The one built-in exception
+is an inference broker on the tailnet. A provider's API or a broker at a
+public address needs a `[[write]]` rule of yours.
 
 ### The runner-only launch gate
 
-An agent that is the runner's user can do whatever any process of that uid
-can. Clearing its environment does not stop it reading `run`'s
-`/proc/PID/environ`, and `hidepid` separates uids only. The run action's
-`runner-gate` input (`run --runner-gate`) therefore checks the host as that
-uid before the agent starts. It is off by default, in `run` and in the
-reusable workflows' `runner-gate` input; `dispatch.yml` turns it on, and
-gives the agent no read token, for a caller whose `RUNNER_GATE` variable is
-`true`. A refusal is not worth retrying on the same host: `run` exits 2
-before writing any output, so the run action's `exit` is 2 with no
-`failure-class` or summary ([outputs](stable-interfaces.md)). `run`
-refuses to start the agent unless every check passes, and lists each
-missing control in the job log without printing a value:
+Because the agent shares the runner's uid, it can read whatever another
+process of that uid holds. The run action's `runner-gate: true`
+(`run --runner-gate`, off by default) checks the host as that uid before
+starting the agent: credentials in environments, command lines and known
+files, sudo and root-equivalent groups, memory reads, the Worker's
+diagnostic socket and egress around the proxy. It refuses to start the
+agent if any check fails, naming each missing control in the job log
+without printing a value. A refusal is not worth retrying on the same
+host: `run` exits 2 before writing any output, so the run action's `exit`
+is 2 with no `failure-class` or summary ([outputs](stable-interfaces.md)).
 
-- No variable of `run`'s environment is set whose name, in any case, looks
-  like a credential (`*_TOKEN`, `*_KEY`, `*_APIKEY`, `*_SECRET`,
-  `*_PASSWORD`, `*_PAT`, `*_CREDENTIALS`, `*_AUTH_CONFIG`, or plain
-  `TOKEN`, `PASSWORD` or `SECRET`). The agent's own run token is the one
-  exception. This covers `GH_TOKEN`: a gated run gives the agent no GitHub
-  token until one can be supplied from outside its uid, and it refuses
-  `session.watch-item`, which needs that token. `SSH_AUTH_SOCK` is refused
-   too, since an SSH agent signs for any process that connects.
-   Credentials in `[host.env]` (the deprecated `[sandbox.env]` alias too)
-   are refused before that map is merged into the launch environment. Home
-   and agent-configuration relocation through that map is unsupported and
-   refused, including XDG, Git, Claude, opencode and Vibe overrides.
-- If sudo is installed, `sudo -n -l` must succeed and its complete command
-  listing must end with setup's deny-all and exact helper-only grant.
-  The helper executable and all its ancestors must also be root's alone:
-  otherwise that grant lets the uid replace it and become root.
-  Unknown or wrapped output is refused; failure of `sudo -n true` alone
-  does not exclude command-specific root grants. The uid is in no group
-  that is root by another name and gets no answer from a container daemon's socket.
-- No process of the uid that it can read holds a non-empty credential-named
-  variable or SSH agent socket, one of those values, or a
-  string shaped like a credential, in its environment or command line. A
-  process that is not dumpable, such as `sudo`, counts as its real uid's:
-  its environment is refused, but its command line is not. A
-  child holding a canary is the positive control. No process runs as one
-  of the uid's subordinate uids: as root of their user namespace (`podman
-  unshare`), the uid could read their environment and memory.
-- No file in a fixed list holds one either. The list covers credential
-  stores (a non-empty one is enough, including `.docker/config.json`,
-   `.npmrc`, `.pypirc`, `.kube/config`, `.aws/config` and Google's application
-   default credentials, even if used without authentication).
-   Standard gcloud credential/token databases and AWS SSO/CLI cache
-   directories are also refused, not just exported credentials.
-   Default Git credential-cache directories (`.cache/git/credential` and the older
-   `.git-credential-cache`) are refused even without a configured helper:
-   an agent can query the daemon directly with its own Git command line.
-  Any `.ssh` directory is refused, even empty: identity keys and configured
-  `IdentityFile` indirection are not supported by this inventory. It also covers
-  settings in the runner's home (from
-   passwd and `HOME`) and the agent's home; the workspace's `.git/config`
-   and `.git/config.worktree`, where `actions/checkout` can persist the job
-   token as an `extraheader`, and the same in each directory directly in the
-   workspace (checkout's `path:`; a deeper checkout is not found); the
-  files and links at the top of `RUNNER_TEMP`; and the runner's registration
-  (`.credentials`, `.credentials_rsaparams`). If a `Runner.Worker` or
-  `Runner.Listener` runs and its executable's directory can't be found in
-  `/proc`, that is a finding even if a usual install path exists: a stale
-  installation does not locate the running runner. A file holding a canary is
-  the positive control. Permission-denied candidates are refused too: this
-   uid may own the file or an ancestor and make it readable with chmod.
-   Discovered runner directories are scanned even when their marker cannot
-   be inspected, which also counts as a missing control for a stopped runner.
-   Gitfiles (separate Git directories and linked worktrees), symlinked `.git`
-   paths, `commondir` indirection and submodules (`.git/modules`) are explicitly refused: the gate does
-   not yet resolve those layouts' effective credential configuration. Git
-   `include` and `includeIf` directives, credential-helper settings (including
-    credential caches and custom store paths), and SSH-command settings in the
-    scanned home and workspace configurations are also refused, as are proxy
-    settings and URL userinfo (including remote URLs and URL rewrites).
-    Git parses only the bounded input with
-    includes disabled; it never runs repository-configured helpers.
-    Pre-existing Claude, opencode and Vibe settings are refused when nonempty,
-    including Claude's local settings, opencode's JSONC settings and Vibe's
-    default home. Their provider passwords need not resemble tokens, and their
-    helper commands or local proxy endpoints may grant access without exposing
-    a credential value. The gate does not execute those helpers or connect to
-    those endpoints to decide whether they are safe. Even credentialless
-    settings must be removed before gated launch; `run` writes its managed
-    agent settings only after the gate. This fixed-path inventory does not yet
-    cover arbitrary custom configuration paths or discover all credential proxies.
-- A child of `run`, where the agent will be, cannot open the memory of any
-  process of the uid (`/proc/PID/mem`, decided as ptrace and
-  `process_vm_readv` are). As controls, the child opens its own memory and,
-  below Yama scope 2, its own child's. Independently of that probe, the gate
-  requires `kernel.yama.ptrace_scope = 3` (no attach, immutable until reboot)
-  and `kernel.core_pattern = |/bin/false`. A failed sibling-memory open or
-  clean credential scan alone cannot establish isolation, and ptrace denial
-  alone cannot prevent forced core dumps.
-- No `Runner.Worker` .NET diagnostic socket is still linked.
-- `egress.write-policy` is on. As the uid, `run` connects to the metadata
-  service (IPv4 and IPv6) and to a documentation address around the proxy.
-  Each connection must be refused at once; a timeout counts as no rule. The
-  root-owned `/etc/agentic-job/rules.nft` must name the uid and each of its
-  subordinate ranges in the write policy's set and the metadata refusal's
-  set, together with their reject rules. A set that names no uid holds no one.
-  Saved rules are only a configuration cross-check, never live enforcement
-  evidence: the gate additionally requires a successful HTTPS read and the
-  proxy's own POST refusal over both HTTP and HTTPS, separately forcing IPv4
-  and IPv6, using the existing host
-  write-policy probe's control-host selection. No admitted control host,
-  failed read, timeout, origin-only refusal or unreadable/oversized response
-  can pass. Curl gets no inherited environment or user settings; each request
-  has a 30-second timeout (six requests maximum) and response capture stops at
-  64 KiB. A host without working controls for **both** address families is
-   refused, even if IPv6 is believed unavailable. The sole exception requires
-   the root-owned, read-only IPv6 module parameter to show boot-time disable
-   (`ipv6.disable=1`) **and** an AF_INET6 socket creation to fail with
-   `EAFNOSUPPORT`. A missing route, DNS failure or per-interface disable does
-   not qualify. The current firewall redirects only IPv4 HTTP(S), so boot-time
-   IPv6 disable is necessary for a passing host with these installed rules;
-   permitting public IPv6 just to make the read pass would bypass enforcement.
-  Allocated subordinate uid ranges are currently **refused**, even if the
-  saved rules name them, because no live subordinate probe exists.
-
-A process read the kernel refuses, or a file that is not there, holds
-nothing for the agent. Any other failed read, including a permission-denied
-file, counts as a missing control, and so does a failed positive control.
-For other processes, only the exact run token known to `run`, under its own
-variable name, is exempt from the credential-name check. The shapes are only a
-backstop for credentials whose values `run` does not know. The gate also
-refuses whatever `--runner-home` already refuses (`id-token`, `api-key`,
-MCP, a private target).
-
-Findings use PIDs and fixed inventory labels, not process-chosen names or
-discovered filenames: either of those can itself contain a credential.
-
-To pass the gate, a configuration needs `egress.write-policy` (the
-workflow's `egress-write-policy`). It must pass no `github-token`, and it
-must keep the lock's defaults: `deny-runner-metadata`,
-`unlink-worker-diagnostics`, and discarded core dumps. A gated host additionally
-needs Yama scope **3**, not setup's scope 1 default; this cannot be undone
-until reboot, and currently needs IPv6 disabled at boot. It must have no subordinate uid allocations (so rootless
-container configurations with those allocations cannot pass yet), must
-check out with `persist-credentials: false`, and must keep the
-runner's registration out of the uid's reach. With the default
-`github-reads: true`, the reusable workflow gives the agent its job token,
-which the gate refuses: a gated caller also sets `github-reads: false`.
-The default runner-read protection hides a running Worker's executable
-from `run`, so the gate currently refuses that hosted configuration even
-if its registration is isolated. A fallback installation path is not proof
-of which runner is running; this needs a trustworthy discovery mechanism
-before such a host can pass. Do not disable the read protection to make it pass.
-The ignored `runner_gate_starts_an_agent_only_without_credential_exposures`
-CLI test requires a fresh secured host as the locked runner uid. It requires
-a successful agent launch, then separately refuses environment, file and
-process credentials; it does not provision the host or prove individual
-firewall, sudo or memory-control failures. Do not run it in an existing sandbox.
-This remains draft readiness work for #3000: successful fresh-host launch,
-individual missing-control tests and a complete inventory of local credential
-proxies and opaque settings credentials remain acceptance work. The gate is
-off by default; no existing caller is silently enrolled and no supported
-hosted passing configuration is claimed. Turning it on by default waits for
-one hosted configuration that passes, with a caller migration.
-
-## Inputs and outputs
-
-The forwarder exposes these three inputs of the new action; every one is optional.
-
-| Input | What it sets |
-| --- | --- |
-| `config` | A TOML file with the `[sandbox]`, `[egress]` and `[setup]` tables: the lock, egress, the metadata refusal, the daemons to stop. The pinned image reads the host's table only by this name, which an image of this source takes as `[host]`'s deprecated alias (#2071); a file for an image of this source, `image-archive`, may use `[host]`. Default: [hosted.toml](../secure-host/hosted.toml) for Ubuntu 26.04, [rhel-cloud.toml](../secure-host/rhel-cloud.toml) for RHEL 10 or exact CentOS Stream 10, with the egress proxy on. Another image listens on other sockets: `sandbox check` names each one left |
-| `check` | `false` skips `sandbox check`. Default `true`. The pinned action does not pass `--record`, so it leaves no passing record for the run action's `--unless-passed` check; that check probes again ([record mechanism](sandbox-check.md)) |
-| `image-archive` | An image archive, as `podman load` takes it, run in place of the pinned image, unverified: for a job that built it, as CI's do |
-
-It has no outputs. The action knows nothing of inference or sessions: an
-agent job checks its inference proxy before this step, and the run action
-reads a session's endpoint after it ([workflow](workflow.md)).
+To pass, a job needs `egress.write-policy`, no `github-token`,
+`persist-credentials: false` on checkout, the lock's defaults, Yama scope 3
+(irreversible until reboot), IPv6 disabled at boot, no subordinate uid
+allocations and the runner's registration out of the uid's reach. No
+hosted configuration passes yet; do not turn off the runner-read rule to
+make one pass. The reusable workflow's `runner-gate` input turns the gate
+on; a gated caller also sets `github-reads: false`, since the agent's job
+token fails the gate. `dispatch.yml` does both for a non-scripted run of a
+caller whose `RUNNER_GATE` variable is `true`. [`run/gate.rs`](../crates/agentic-job/src/run/gate.rs)
+documents each check.
 
 ## The secure-host binary
 
 `crates/secure-host` builds `secure-host`, the host's side with nothing
 that runs an agent: `supported`, `apt`, `world-write`, `setup`, `check`,
-`config` and `image`, the image's entrypoint, which installs the binary
-on the host and runs the first three steps and setup there through
-`nsenter`. Its hidden commands are what the host runs it for after
-setup: `helper`, the egress proxy's unit and the probes.
-
-`secure-host setup` and `check` read a host's file, or a job's whole
-file as an agent job passes it: `[host]` and `[egress]` are held to
-their keys, `[setup]` to `packages`, and `setup.script` is refused as
-`sandbox setup` refuses it. `[sandbox]` is read as `[host]` with a
-warning, and refused beside it
-([stable interfaces](stable-interfaces.md#configuration-files)); `config`
-writes `[host]`, from either name in the file or in a setting such as
-the pinned action's `--string sandbox.runner-user=`. Any other table or
-`[setup]` key is a program's, and is refused unless `[host.prepared]`
-says the
-program's step ran: it sets nothing here, so setup would leave out what
-it asks of the host. With the table setup names those keys, keeps the
-copy the program's step installed as the helper, and holds the egress
-proxy and the network rules to the table; without it, its own copy is
-the helper.
-
-The pinned cgwalters-forge/actions/secure-host calls the image's binary
-by agentic-job's name: `--entrypoint /agentic-job ... config --host`,
-and `agentic-job sandbox check` on the host. For one release the image
-answers to both: it has the binary at `/secure-host` and
-`/agentic-job`, installs it as `/usr/local/bin/secure-host` and
-`/usr/local/bin/agentic-job`, and takes `config --host` and `sandbox
-check`, `probe` and `egress-proxy`. `agentic-job secure-host image` is
-gone; agentic-job's other `secure-host` subcommands and `sandbox setup`
-stay.
-
-CI proves the image of each revision from its archive: the
-`secure-host-image` job checks that both names on the host are the
-staged secure-host binary and not agentic-job's, and `confined` probes
-a step under it. The split landed in
-[#3124](https://github.com/cgwalters-forge/agentic-job/pull/3124), source
-`b16c6d63e37ff78050c4dd3bf92739dabadf3fa4`; its
-[archive acceptance](https://github.com/cgwalters-forge/agentic-job/actions/runs/42126577776/job/127593880482)
-is not published-path acceptance.
-
-### Published standalone acceptance (#2070)
-
-This section records the November 2026 deployment checks. It is not a
-live status report. On 2026-11-09 the effective action, image digest and
-source were [the v0.6.9 deployment above](#deployed-write-policy-diagnostics).
-The actual Ubuntu
-[`secure-host-published` setup/check](https://github.com/cgwalters-forge/agentic-job/actions/runs/42143295583/job/127648635121)
-verified that image's attestation, completed setup and passed 96 checks.
-It is a **legacy baseline**, not proof of the split or runner-only setup.
-The same run's
-[`e2e-dispatch`](https://github.com/cgwalters-forge/agentic-job/actions/runs/42143295583/job/127648702033)
-was skipped, not agent E2E evidence.
-
-The split shipped in
-[v0.6.12](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.12),
-source `eecc8c434e67a7607264ab3f7d90c88b6d02042a`.
-[Actions#211](https://github.com/cgwalters-forge/actions/pull/211) proposes
-image digest `sha256:d5fd0f3e102c589807df68656d5623f6d6cbc9ecb257bdd3c9af431242d7b73a`
-at reviewed head `502522ad437a469da99120f89e848219434f16a7`, but is still
-open. [Actions#230](https://github.com/cgwalters-forge/actions/issues/230)
-owns adoption using that bump; compatibility/evidence
-[#231](https://github.com/cgwalters-forge/actions/pull/231) and attestation
-regression [#235](https://github.com/cgwalters-forge/actions/pull/235) are
-also open. The exact prerequisite to moving this repository's forwarder
-and site pins is a reviewed immutable action revision selecting a
-compatible, attested published standalone image through that adoption.
-Neither pin moves here; no competing bump or release is needed from this PR.
-[Tracker#1369](https://github.com/cgwalters-forge/tracker/issues/1369)
-still records the release train's single-versioned-actions-pin blocker.
-
-The push-only `secure-host-published` job now binds its expected version
-and action SHA to the forwarder in regression tests. Only the exact reviewed
-legacy deployment gets the legacy baseline branch. Every replacement must
-report `secure-host VERSION` under **both** installed executable names,
-have identical installed bytes, and pass the action's `config --host
---string sandbox.runner-user=…` and `sandbox check` compatibility calls.
-The action itself exercises `/agentic-job` configuration in the image
-before setup; neither an archive override nor `check: false` is used.
-Failures stop the job, not a silently skipped acceptance step. This adds
-acceptance only, not a new host control, permission or credential exception.
-
-Fresh Ubuntu published standalone setup/check and executable acceptance
-are **pending**, as is applicable published-path agent E2E such as
-`e2e-dispatch`. That E2E also depends on
-[#2656](https://github.com/cgwalters-forge/agentic-job/issues/2656)'s
-unconditional `sandbox prepare` and canonical host config adoption after
-image compatibility is established; this slice does not force either
-against the legacy image. v0.6.12 proves the split only: it does not contain
-[#3144](https://github.com/cgwalters-forge/agentic-job/pull/3144) or
-[#3154](https://github.com/cgwalters-forge/agentic-job/pull/3154).
-The later containing numbered release,
-[v0.6.13](https://github.com/cgwalters-forge/agentic-job/releases/tag/v0.6.13),
-was published on 2026-11-10 at source
-`4439980da2aef4db79b40890599ea661daab12b0`; its release notes include both
-changes. Publication is no longer the blocker, but does not prove deployment.
-Their deployment remains pending verification of the exact attested image,
-effective pin adoption and actual `core-pattern`,
-confined run/JavaScript main/post and confined-cleanup evidence. `build-*`
-archives, skipped jobs and green old-image jobs do not satisfy those gates.
-RHEL runtime acceptance is separately **pending**, not inferred from Ubuntu.
-[#2070](https://github.com/cgwalters-forge/agentic-job/issues/2070) stays open
-while these deployment and runtime obligations remain.
+`config`, and `image`, the image's entrypoint. Its
+[command line](../crates/secure-host/src/cli.rs) and
+[configuration](../crates/secure-host/src/config.rs) document the rest.
 
 ## Where the binary and image come from
 
-The host's binary is the image's. A release pushes
-`ghcr.io/cgwalters-forge/secure-host:vVERSION`, an image `FROM scratch`
-with the static secure-host binary and the compiled world-write object
-`world_write.bpf.o` ([`Containerfile`](../secure-host/Containerfile)),
-and attests it by its digest from `release.yml` on main; what the image
-does on the host is in the action's
-[setup](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md#the-image).
-A new package on ghcr.io is private until an owner makes it public.
-Version releases and main's attested workflow artifacts also contain
-`secure-host-x86_64-unknown-linux-musl`, its checksum in the attested
+A release pushes `ghcr.io/cgwalters-forge/secure-host:vVERSION`, a
+`FROM scratch` image with the static binary and `world_write.bpf.o`
+([`Containerfile`](../secure-host/Containerfile)), and attests it by digest
+from `release.yml` on main. The action verifies that attestation before it
+pulls the image. Releases and main's attested build artifacts also carry
+`secure-host-x86_64-unknown-linux-musl`, with its checksum in the attested
 manifest beside agentic-job's.
 
-The policy job gets the binary an agent job runs with
-[`binary.sh`](../secure-host/binary.sh), a shell script since no
-`agentic-job` exists yet, which computes the source digest at the pinned
-commit and, by default, looks for legacy `build-FULL_DIGEST`. It verifies the release
-manifest's GitHub attestation before checking the source digest and the
-checksums of the binaries and the world-write object, whose SHA-256 is
-in the attested `release.json` next to the binaries'; a manifest without
-it is refused whole. A missing release falls back to a source build with
-a notice (installing clang with musl-tools when missing); failed
-verification stops the job. Main now uploads attested run artifacts instead
-of creating build releases. The off-default `SOURCE_BUILD_ARTIFACTS=true`
-reader selects the latest successful main push (or `SOURCE_BUILD_COMMIT` for
-rollback) and verifies against that run's head SHA, not the workflow checkout.
-Missing artifacts and verification failures stop that reader; there is no
-automatic rollback. Existing releases remain intact. See
-[the workflow's binary trust model](workflow.md#things-a-caller-should-know)
-for the verification and publishing boundaries. Fetching needs bash,
-`sha256sum`, jq and `gh` with attestation support, which it installs
-where it is missing. It uses the job's read-only token and retries
-signaled GitHub throttling within two minutes.
-Building needs rustup.
-The policy job's `build-binary: true` builds even when a prebuilt exists.
-The reusable workflow's agent job gets the object with the binary from
-the policy job's upload, and [`prepare`](../prepare/action.yml) installs
-it beside `/usr/local/bin/agentic-job`.
+The reusable workflow fetches the binaries with
+[`binary.sh`](../secure-host/binary.sh), which verifies the manifest's
+attestation and every checksum and stops the job on any mismatch
+([binary trust model](workflow.md#things-a-caller-should-know)).
 
-## Where the host documentation went
+## Further reading
 
-Each topic is a document of `cgwalters-forge/actions/secure-host`:
+The action's documents describe the host in full:
 
-| Topic | There |
+| Topic | Document |
 | --- | --- |
-| The contract, the caveats of running every step as the runner's user, the sandbox user | [README](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md) |
-| What a later step can count on, one trust level for the rest of the job, R4, R10 and R11 | [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md) |
-| The image, supported hosts, what setup does to the host, the lock, what a job has to know, containers, running it without the action | [setup](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md) |
-| The egress write policy, the proxy's policy file and domain allowlist, the network rules | [egress](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md) |
-| The access-time world-write policy, its loader, and what went with the walk | [world-write](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/world-write.md) |
-| Reads between the runner's own processes, the Worker's diagnostic sockets | [runner reads](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/runner-reads.md) |
+| The contract and its caveats | [README](https://github.com/cgwalters-forge/actions/blob/main/secure-host/README.md) |
+| What a later step can count on | [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md) |
+| What setup changes, the lock, containers | [setup](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/setup.md) |
+| The egress proxy and write policy | [egress](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md) |
+| The world-write policy and its loader | [world-write](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/world-write.md) |
+| Reads between the runner's processes | [runner reads](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/runner-reads.md) |
 | What `sandbox check` proves | [probes](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md) |
-| CI's run-time controls, where each probe has been seen to fail, timings, RHEL 10 | [evidence](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md) |
+| Where each probe has been seen to fail, timings | [evidence](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/evidence.md) |

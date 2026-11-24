@@ -45,6 +45,15 @@
 //! opening its own child's. Independently, immutable Yama no-attach
 //! (scope 3) is required; a scan is not process-memory isolation evidence.
 //! Allocated subordinate uids are refused until live probes exist for them.
+//!
+//! The installed rules redirect only IPv4 HTTP(S) to the proxy, so a host
+//! passes the egress checks over IPv6 only with IPv6 disabled at boot
+//! (`ipv6.disable=1`, and an `AF_INET6` socket failing with
+//! `EAFNOSUPPORT`); a missing route or per-interface disable does not
+//! count. The runner-read rule hides a running Worker's executable from
+//! the uid, so the runner's registration cannot be located on a hosted
+//! runner and the gate refuses it there; a usual install path is no proof
+//! of which runner is running.
 
 use std::ffi::OsString;
 use std::io::ErrorKind;

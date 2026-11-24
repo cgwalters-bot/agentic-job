@@ -46,19 +46,26 @@ your tokens. agentic-job gives all three the same defence.
 
 ## Try it in a workflow
 
-Any job can harden its runner with one step, as in the
-[host guide](../docs/secure-host.md#example-harden-a-deterministic-job); pin `COMMIT` to a commit you have
-read. Everything that needs root goes before it.
+Start with a fresh, trusted runner as described in the
+[host guide](../docs/secure-host.md#example-harden-a-deterministic-job).
+Replace `COMMIT` with a reviewed commit and `make check` with your test
+command. Install any system packages before hardening the runner.
 
 ```yaml
+on: pull_request
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-26.04
     steps:
-      - run: sudo apt-get install -y libfoo-dev   # root: before the step
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: cgwalters-forge/actions/secure-host@COMMIT
-      - run: make check                           # runner's user, no sudo
+        with:
+          egress: write-policy
+      - run: make check
 ```
 
 ## Compared with GitHub Agentic Workflows
