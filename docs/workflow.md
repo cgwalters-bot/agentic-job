@@ -386,11 +386,11 @@ input separately; they are not changed here.
 
 ## External execution and trusted midstream publication
 
-The [external VM-runner contract](dispatch.md#external-vm-runner-to-midstream-draft)
+The [external run interface](dispatch.md#external-runs)
 separates execution location from publication target: an external deployment
 using disposable VM runners runs agent and isolated check stages without
 forge-write credentials. The trusted caller
-[correlates](dispatch.md#correlating-a-dispatch-with-its-external-run) its
+[correlates](dispatch.md#match-the-external-run) its
 dispatch with exactly one external run attempt, then hands that run's raw
 hand-back to its own policy, check and apply calls, which open an allowed
 midstream draft. It never executes the hand-back as code. VM evidence
@@ -807,7 +807,7 @@ No caller-specific repository, account or network is required by agentic-job.
   configured the run could open no pull request, nor comment. Neither run
   used the chat session, whose job was skipped. Handing such a run back
   to a midstream fork through a trusted apply job is
-  [specified, not built](dispatch.md#external-vm-runner-to-midstream-draft).
+  [specified, not built](dispatch.md#external-runs).
   Claude Code and opencode have also run through the reusable workflow on
   GitHub-hosted runners using its old built-in `tailscale-*` inputs, including
   agent configuration and analysis runs (the [retest record](https://github.com/cgwalters-forge/agentic-job/issues/186#issuecomment-6081817294)).

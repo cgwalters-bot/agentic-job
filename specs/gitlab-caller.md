@@ -223,8 +223,8 @@ The job listing gives only `artifacts_file.filename` and `size`. So:
 
 - The raw hand-back is the archive of the one `agent_job` job, by its ID.
   The `check_job` and `detect_job` successes are early filters only, as on
-  GitHub ([correlation](../docs/dispatch.md#correlating-a-dispatch-with-its-external-run),
-  step 6). Their archives are never downloaded.
+  GitHub ([external run module](../crates/agentic-job/src/external.rs)).
+  Their archives are never downloaded.
 - The fetch downloads the archive under the existing bounds: at most
   128 MiB, the central-directory and flat-file checks, no restored modes
   ([external.rs](../crates/agentic-job/src/external.rs#L747-L866)). Its
@@ -238,8 +238,8 @@ The job listing gives only `artifacts_file.filename` and `size`. So:
 
 The digest does not prove provenance. On GitHub, the digest comes from the
 same API that serves the bytes, so it protects only the transfer
-([dispatch.md](../docs/dispatch.md#correlating-a-dispatch-with-its-external-run),
-step 5). On GitLab, the fetcher computes it, so it only records what the
+([matching the external run](../docs/dispatch.md#match-the-external-run)).
+On GitLab, the fetcher computes it, so it only records what the
 fetcher received. It lets later caller jobs and the draft name exactly those
 bytes. In both cases the archive was uploaded by the runner that ran the
 agent job, so the agent could have written any content there. Provenance

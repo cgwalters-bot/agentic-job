@@ -1,1241 +1,197 @@
-# Dispatching an operator task
+# Dispatch an operator task
 
 > This text is LLM generated.
 
-The [shipped dispatch caller](../.github/workflows/dispatch.yml) runs the
-scripted agent by default: no model, inference service or secret is needed
-when the target is your own public repository. Its sessions ignore task text;
-they test policy, sandbox, hand-back, check and apply, not agent quality.
+Dispatch a task against an existing issue or code change. The caller's
+[bounds](safe-outputs.md#the-bounds-and-the-policy), not task text, authorize outputs.
 
-## Ten-minute scripted trial
+| Forge | How to start | What to expect |
+| --- | --- | --- |
+| GitHub | [Run the dispatch workflow](#run-the-dispatch-workflow) from Actions or `gh`. | Scripted by default; supports real agents and publication. |
+| GitLab | [Run the deterministic pipeline](try-gitlab.md#run-the-deterministic-caller) on the protected default branch. | Posts a fixed issue note without an agent. |
+| Forgejo | [Run the Actions trial](#forgejo-actions-caller) on the default branch. | Checks a scripted patch; no agent or publication. |
 
-Copy these files to the **same paths** in your repository:
+## Run the dispatch workflow
 
-- [dispatch.yml](../.github/workflows/dispatch.yml)
-- [dispatch.toml](../.github/agentic-job/dispatch.toml)
-
-The runner's configuration, [hosted.toml](../.github/agentic-job/hosted.toml),
-is read from this repository at the pinned commit; there is no copy to keep.
-A caller that kept an edited copy sets `AGENT_CONFIG` to its path.
-
-In `dispatch.yml`, replace `uses: ./.github/workflows/agentic-job.yml` with
-`uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT`,
-where `COMMIT` is the full reviewed SHA of the source you copied, **including
-the `review-item` and `fake-profile` inputs**. In the `target` job's checkout, replace
-`repository` and `ref` with `cgwalters-forge/agentic-job` and the same `COMMIT`: that job
-runs `agentic-job dispatch` from it. A local reusable call here pins the workflow, binary
-and actions to this checkout's commit: it cannot silently run an older release.
-In `dispatch.toml`, replace `repos` with your exact public repository name.
-Commit the files to your protected default branch and allow the pinned actions
-and reusable workflow in Actions settings. `implement` also needs
-`APPLY_ENVIRONMENT` ([below](#switch-to-a-real-agent)): apply opens its
-pull request from a fork owned by the account whose PAT that is (or, for a
-target that account owns and that accepts it, from a branch of the target).
-
-Leave the other repository variables unset for this trial. Start with an existing issue:
+On GitHub, use **Actions → dispatch → Run workflow** on the default
+branch (other refs are refused), or run this from the caller checkout:
 
 ```sh
 gh workflow run dispatch.yml -f repo=OWNER/REPO -f item=1 \
-  -f kind=triage -f task='Test the dispatch wiring without a model'
+  -f kind=triage -f task='Summarize the next step on this issue'
 ```
 
-`triage` and `research` post a canned comment on that issue and leave the tree
-clean. `research` also accepts a pull request number and posts its single
-`add_comment` there, using the same caller bounds and fixed item routing.
-Select it explicitly with `-f kind=research`; it does not enable review mode,
-pin or check out the PR head, post a verdict, or push a change. It remains
-analysis-only, with no new permissions or token access. `implement` writes
-`DISPATCH-TRIAL.md` and proposes one draft PR from
-the applying account's fork. `review` takes an **open pull request number
-targeting the configured base (main by default)**, not an issue number. Both
-same-repository and fork pull requests are accepted. It
-posts a clearly scripted verdict naming the pinned head. This is not an
-approval or permission to merge. Delete trial comments, and branches in the
-applying account's fork, when finished.
+If not installed, copy [dispatch.yml](../.github/workflows/dispatch.yml) and
+[dispatch.toml](../.github/agentic-job/dispatch.toml) to the same paths in
+your caller repository. In the workflow, set `jobs.run.uses` to
+`SOURCE_OWNER/agentic-job/.github/workflows/agentic-job.yml@COMMIT` and set
+the `target` checkout's `repository` and `ref` to `SOURCE_OWNER/agentic-job`
+and that same full, reviewed commit SHA. In the bounds, set `repos` to your
+exact public target repository, with `main` as the base. Commit the files
+to the protected default branch and allow the pinned workflows and actions.
 
-To stack an `implement` run, pass `-f base=pr:12`, where 12 is an open PR
-in `repo` targeting that repository's default branch. This is off unless
-the dispatch caller sets the repository variable `AGENTIC_JOB_STACK_AUTHOR`
-to the applying bot's login. Policy refuses other authors, even if they open
-a PR from a visible bot branch, and refuses heads outside the bot's public
-fork or the target itself. The caller's `bases` must allow the resolved
-head branch (for example, `dispatch/**`), and the effective bounds must
-include `create_pull_request` in `native_handlers` to publish to a fork base.
+For the trial, leave variables unset and choose an issue in the caller
+repository. The script ignores `task` and posts a canned comment, with no
+inference or additional secret.
 
-Check holds the patch to the PR's resolved head commit. Apply opens the new
-PR against the head branch **in the head repository**, not against the
-target's default branch. For a fork this must be the applying account's own
-fork, with Actions disabled before the push. For a head in the target,
-the existing in-repository publication rules still apply. The lower PR
-is not changed, and an issue in another repository is referenced, not closed.
+### Inputs
 
-Dispatch review remains opt-in (`kind=review`), analysis-only and bounded to
-one verdict comment or noop on the selected PR. The resolver reads the PR from
-the configured target repository and pins its head SHA. The sandbox fetches
-that SHA from the target repository without forge credentials, never from an
-author-supplied fork URL or branch name. The base supplies trusted instructions;
-the head remains untrusted data. No job permissions or token access change.
-This does not enable fork end-to-end CI or make a verdict merge authorization.
-The real reviewer first tries the change as a user would, from the docs and
-`--help` alone, and reports what it tried, as in
-[the verdict](review.md#the-verdict). It then reads the diff and surrounding
-code and reports findings; it does not run existing test suites, formatters
-or linters to confirm they pass, or look up or report CI results. It may build and run code to test whether a
-specific concern holds, such as a function failing under a condition no test
-covers, and reports what it ran and what it showed for that concern.
-It omits the `Verification:` paragraph. CI remains a separate required
-check, combined with review by the merge gate, not by the reviewer.
+| Input | Value |
+| --- | --- |
+| `repo`, `item`, `task` | Public `OWNER/REPO`, positive item number, public task text. |
+| `kind` | Profile below. |
+| `item-repo` | Allowlisted `OWNER/TRACKER` for implement, triage or research. Comments follow the item; changes target `repo`. |
+| `base` | Implement only: [stack on `pr:N`](#stack-an-implement-run); otherwise `main`. |
+| `status-comment` | Reuse the status account's comment on this item by ID. |
+| `status-comment-mode` | `edit` (default) reuses one status; `add` posts one per run. |
+| `session`, `idle-minutes`, `runner` | [Session and runner selection](#start-a-session-on-a-chosen-runner). |
 
-`fix` takes the number of an open pull request of the target, whoever
-opened it. Its run starts from that pull request's branch
-at the head it had when dispatched, and its change is pushed there, to the
-pull request's head repository, ordinarily as one commit on top without force. Optional
-[bounded series replacement](safe-outputs.md#replacing-the-complete-series)
-allows a rebase onto the policy snapshot or the base branch's current head
-resolved by trusted apply, using an exact head lease. A pull request whose
-head moved meanwhile is refused, and the run has to be dispatched again.
-Apply refuses, before it pushes, a head repository the applying account
-cannot push to (saying so), one that is neither a fork of the target nor the target, the
-head repository's default branch or a protected branch, and the `.github`
-exemption anywhere but that account's own fork, whose Actions it turns off. A branch
-of any other head repository, the target itself or someone else's fork, is
-refused unless the caller's `own-branch-repos` bounds or the repository's
-default-branch opt-in file accept it; see the
-[acceptance policy and CI trade-off](safe-outputs.md#pushing-to-a-pull-requests-branch). Like
-implement it needs `APPLY_ENVIRONMENT`. It is **off** in the shipped bounds;
-to enable it for a target, add to `dispatch.toml`
+### Choose a profile
 
-```toml
-push_to_pull_request_branch = { max = 1, branches = ["dispatch/**"] }
-```
+| `kind` | Item | Checked result, subject to bounds |
+| --- | --- | --- |
+| `triage` | Issue | One comment; real runs may also close up to 30 target issues with reasons. |
+| `research` | Issue or pull request | One comment; no patch, verdict or pull request head checkout. |
+| `implement` | Issue | One draft pull request, or one comment for a comment-only task. The scripted change adds `DISPATCH-TRIAL.md`. |
+| `review` | Open pull request against the configured base | [Verdict](review.md#the-verdict) on the pinned head (including forks) or no publication; may add one bounded label. Not merge approval. |
+| `fix` | Open pull request | Pushes to the authorized head branch; redispatch if it moves. Off by default; enable `push_to_pull_request_branch` with branch globs in the [bounds](safe-outputs.md#pushing-to-a-pull-requests-branch). |
 
-with globs of the branches a fix may push to; see
-[pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch).
-With `own_author` set to the applying account's login there, a fix of a
-pull request that account opened is admitted in a repository `repos` does
-not list. Such a fix may also comment once on that pull request, after
-its push, but only where the caller opts in: this workflow's fix profile
-requests no `add_comment`, so a caller adds it to the profile's `outputs`
-(`outputs: all` already requests it), lists it in the bounds with both it
-and `push_to_pull_request_branch` in `native_handlers`, passes the pull
-request as the comment target, and leaves `max-outputs` room for both
-requests.
-The scripted session is implement's.
+For implement, fix or a cross-repository dispatch, set `APPLY_ENVIRONMENT`
+to an environment restricted to the protected default branch and store
+[`SAFE_OUTPUTS_PAT`](workflow.md#the-apply-job-and-its-token) there for a
+dedicated publishing account. This includes manual runs using `fake`, not
+CI's `scripted: true`, which supplies neither the environment nor the token.
+Reusable callers forward the secret by name, never with `secrets: inherit`.
+Implement normally uses the account's fork; branches in a target it owns
+need [explicit acceptance](workflow.md#a-repository-the-applying-account-owns).
 
-A target with issues turned off can take its item from another repository:
-`-f item-repo=OWNER/TRACKER` with an issue number there, for `implement`,
-`triage` and `research`. The issue's text, the status comment and a
-triage, research or implement comment are that repository's; a pull request is the
-target's. Policy refuses an item repository the bounds' `repos` do not
-list, and it needs `APPLY_ENVIRONMENT` like any other repository.
-For `research`, `item-repo` may also name a repository containing the selected
-PR: its text and the comment belong there, with the same allowlist and token
-requirements. This grants no posting permission in unlisted repositories.
+### Find the result
 
-Apply refuses a target the applying account owns, as it has no fork of it,
-unless the caller's `own-branch-repos` bounds or the target's default-branch
-opt-in file accept it ([owned repositories](workflow.md#a-repository-the-applying-account-owns)).
-A `fix` to such a pull request uses the same acceptance policy.
+The run summary shows the result link (`result-url`) or no-write reason.
+`missing_data` with no change and at most a `noop` sets `blocked: true`
+without failing; other combinations fail. Ordinary status comments are for
+same-repository non-review runs; blocked reasons can also be posted elsewhere
+with the publication token.
 
-Every run's result can be found from the issue it was dispatched for. A draft
-PR gets a `Closes #N` line for an issue in the output repository, or
-`Refs OWNER/REPO#N` for an item elsewhere. Apply derives the line from the
-repository and item in policy (its `issue` input, which a copy of
-`dispatch.yml` has to keep) and appends it only if absent; cross-repository
-references close nothing on merge. Fix runs leave existing PR bodies alone. Its
-title is the first line of the agent's summary, cut between words to 100
-characters. For non-review runs in the calling repository, notify and conclude
-upsert one status comment there, linking the current run and its result across
-runs and retries. Cross-repository targets receive no job-token notification.
-The result's URL is the
-`result-url` output of `dispatch.yml` (and of `agentic-job.yml` and
-`apply.yml`) and is in the run summary. A run that hands back only `noop`,
-`missing_tool` or `missing_data` has no result. If these are `missing_data`,
-with at most `noop` and no change, the run is blocked: it stays green with a
-notice, and its `blocked` output is `true`. If they include `missing_data`
-beside anything else, apply fails. Either way conclude posts the sanitized
-reason and run link in the bounded status comment even with notifications off
-(cross-repository items need the caller's `SAFE_OUTPUTS_PAT`). Otherwise the
-run stays green and status remains opt-in. The run summary also holds the
-reason. Reviews normally have no status comment, except for missing-data runs.
+A draft adds `Closes #N` for an issue in the receiving repository or
+`Refs OWNER/REPO#N` for an issue elsewhere. For partial work in the same
+repository, start a PR body line with `Part of #N` or `Refs #N` instead.
+To batch issues, put the primary issue in `item` and name the rest in `task`.
 
-Short no-write reasons stay inline (1000 UTF-16 units); longer checked reports
-are collapsed as sanitized literal text in the same status comment, not a
-separate noop publication. The rendered report has a 48,000-byte budget and the
-whole comment a 60,000-byte budget, including escaping and markers. Overflow is
-disclosed and links the retained checked-outputs report artifact; see
-[the outcome contract](workflow.md#what-the-apply-job-does-before-it-writes).
-Ordinary success noops still respect `notify: none` and `notify: reaction`.
+For matching `kind`, `repo`, `item-repo` and `item`, a new dispatch replaces
+the waiting run, not the active one.
 
-An agent whose change does only part of the issue starts a line of the PR
-body with `Part of #N` (or `Refs #N`), and apply then adds no closing line.
-Partial implement results without one still get the primary closing reference,
-but remain drafts: review must resolve the unfinished work before merging, or
-remove the closing line if merging only an incremental part.
+### Stack an implement run
 
-For a batched implement run, put the primary issue in `item` and name the
-small sibling issues and their requested work explicitly in `task`. The
-primary item routes admission, status and the generated reference line; it is
-not an allowlist of issues the PR may address. No extra input is needed:
-`create_pull_request` bounds count requests, not issue references in their
-bodies. One PR may therefore retain several agent-supplied `Closes #N`
-lines for completed siblings (use `Refs OWNER/REPO#N` outside the target).
-Check accepts those lines and apply preserves them while ensuring the primary
-reference is present; that reference does not narrow the batch. Review covers the whole
-PR diff, including the sibling work, rather than only the primary item.
-The batch still shares one run's existing output, patch and budget limits;
-this does not authorize extra comments or issue actions. Closing references
-are agent-authored text, not trusted evidence of scope or permission, and
-take effect only when the draft PR is merged.
-
-Runs of one kind for one item run one at a time, and only one waits: a
-dispatch made while another for the same kind and item is pending cancels the
-pending one. To run several of one kind on one item, start each after the
-last has started. Runs of any kind on one item also share their status jobs,
-one at a time with one waiting, so more than two at once can cancel a waiting
-one and fail its run. CI's reusable call (`scripted: true`, not the trial
-above) is also grouped by the caller's run and posts no status comment, so
-separate CI runs do not cancel each other.
-
-All targets must use `main` and fit the committed bounds. Do not use globs.
-Protected documentation is refused by default; to deliberately permit a file,
-use `[unprotected_files]` in the bounds file as shown in its commented example.
-See [output validation](safe-outputs.md).
+Set `base=pr:N` for an open pull request into the target's default branch.
+Set `AGENTIC_JOB_STACK_AUTHOR` to the bot login to exclude other authors.
+Allow the head branch in `bases`; for the bot's public fork, also include
+`create_pull_request` in `native_handlers`. The draft targets the head in
+its repository (the bot's fork or the target), leaving the lower PR alone.
 
 ## Switch to a real agent
 
-Set operator-controlled repository variables (not dispatch inputs):
+Set these GitHub repository variables on the caller, not in the dispatch:
 
-- `AGENT`: `opencode`, `claude` or `vibe` (`fake` is the default).
-- `AGENT_MODEL`: the model name the selected agent and broker support.
-- `AGENT_RUNNER`: JSON runner labels, for example
-  `["self-hosted","agentic-job"]`, for a disposable proxy-reachable image.
-- `AGENT_RUNNERS`: optional, the runners a dispatch may name
-  ([below](#start-a-session-on-a-chosen-runner)).
-- `INFERENCE_URL`: the reachable broker URL, for example `http://BROKER:PORT`.
-- `INFERENCE_AUDIENCE`: the broker's configured GitHub OIDC audience.
-- Not, for now, a provider's API key: preflight refuses `INFERENCE_REGISTER`
-  `api-key` and `INFERENCE_PROVIDER` `github` (GitHub's billing, which
-  sets `api-key`), and the caller passes no `INFERENCE_API_KEY` on. The
-  reusable workflow's agent job runs the agent as the runner's user,
-  which could read the key from `run`, so it would refuse the run anyway,
-  after policy and a build ([inference](inference.md#a-provider-api-key)).
-- `AGENT_CONFIG`: the caller's runner configuration path if not using hosted
-  Ubuntu 26.04 or giving your targets a toolchain. The default is this
-  repository's `hosted.toml` at the pinned commit; a scripted trial always
-  uses that and ignores `AGENT_CONFIG`. Verify sandbox
-  probes on your own image rather than copying hosted-image socket exceptions.
-- `AGENT_CONFIG_REPO`: optional public `OWNER/NAME` repository holding opencode's
-  or Vibe's configuration; `AGENT_CONFIG_PATH` selects its directory (empty for the root).
-  These are used only with `AGENT=opencode` or `AGENT=vibe`, not in the scripted trial;
-  a directory shared by both agents needs both `opencode.json` and `config.toml`. They
-  select agent configuration, not the runner TOML named by `AGENT_CONFIG`.
+| Variable | Value |
+| --- | --- |
+| `AGENT`, `AGENT_MODEL` | `opencode`, `claude` or `vibe`, and a model supported by the agent and broker. |
+| `AGENT_RUNNER`, `AGENT_CONFIG` | Disposable runner labels as JSON and an optional runner TOML path (defaults to pinned hosted config). |
+| `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | Optional public repository and directory for opencode or Vibe configuration, not runner TOML. |
+| `INFERENCE_URL`, `INFERENCE_AUDIENCE` | Reachable broker URL and its configured GitHub OIDC audience. No provider API key on the runner. |
 
-Preflight names **all** missing model, runner, URL and audience
-variables at once, before policy/build or agent startup. It rejects
-unknown agents, registrations other than `github-oidc`, and the provider
-`github`.
-With `claude`, `opencode` or `vibe`, `implement` installs the [skills](skills.md) and
-its task names the skill ("Use the implement skill") in place of the procedure.
-Real agents have a 150-request cap; scripted sessions have no inference and
-`max-requests: 0`. Real agents do not install scripted sessions.
-Hosted Ubuntu alone cannot reach a private broker. The shipped dispatch
-caller calls the complete reusable workflow, which has no network-join
-inputs. To join a private network on a hosted runner, adapt the caller to
-the [composed form](workflow.md#the-pieces-and-an-agent-job-of-your-own):
-call `policy.yml`, write your own agent job, then call `check.yml` and
-`apply.yml`, all from the same reviewed commit. In the agent job, run
-`prepare`, your chosen network-join step, `secure-host`, then `run`, as
-[example-compose.yml](../.github/workflows/example-compose.yml) marks.
-The join action and its credentials are yours, not a built-in vendor
-integration. Pin that action by commit, leave no credential readable by
-the sandbox user, and keep the agent job's repository permissions read
-only. For a tailnet join, disable its DNS: sandbox setup rejects tailnet
-resolvers when the egress proxy is enabled. This composed form
-changes what the broker has to admit
-([inference admission](inference.md#which-workflows-a-broker-admits)). Or provide disposable runners
-with passwordless sudo initially and systemd 257+, Node and apt-get or dnf;
-see [runner requirements](workflow.md#what-a-caller-provides).
-
-Before real tasks, confirm [broker admission](inference.md#which-workflows-a-broker-admits)
-for the chosen audience, workflow pin and calling repository. Both the
-separate register job and the agent job need a network route to the broker;
-of the two, only register holds the OIDC request credential, and the agent
-job has none. Check's separate [threat detector](workflow.md#optional-threat-detection)
-has its own OIDC permission and registers its own run when
-`AGENTIC_JOB_DETECT_MODEL` is set, from a hosted runner that then also
-needs a route to the broker. With OIDC and a `called_workflows` policy,
-enabling detection requires an entry for `check.yml` at its exact pinned
-commit and the caller's numeric repository ID, not just the register job's entry.
-Confirm per-run budgets.
-No model API key goes on the runner.
-
-For `implement`, and for cross-repository targets, set `APPLY_ENVIRONMENT` to a caller environment
-restricted to the protected default branch, and store its sole secret
-`SAFE_OUTPUTS_PAT` there, as described in
-[credential setup](workflow.md#the-apply-job-and-its-token).
-This is gh-aw's `safe-outputs.github-token` for
-[cross-repository safe outputs](https://github.github.com/gh-aw/reference/cross-repository/#cross-repository-safe-outputs);
-see [the mapping and job-token limits](workflow.md#the-apply-job-and-its-token).
-Use a classic PAT with `repo` and `workflow` scopes of a dedicated bot account that does not
-own the target and has write access to nothing but its own forks: such a PAT
-writes to every repository its account can, and still comments, opens issues
-and forks on any public repository, so the account is what bounds it. Apply
-pushes an `implement` branch only to that account's fork of the target
-(unless the target is the account's own and accepts its branches), which
-it makes if missing, and turns off Actions there before it pushes
-([pull requests come from a fork](workflow.md#pull-requests-come-from-a-fork)).
-Preflight names a missing `APPLY_ENVIRONMENT` too.
-Only apply enters the environment; an empty secret falls back to the job token,
-which cannot write cross-repository, fork or open pull requests. The shipped caller explicitly forwards
-`SAFE_OUTPUTS_PAT` whether or not an environment is configured; scripted CI
-forwards no credential value. If you call `dispatch.yml` as a reusable workflow,
-explicitly pass `SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}` to that wrapper
-too. A repository/organization secret also works; environment protection rules
-still gate apply, and the environment's same-name secret takes precedence.
-Never use `secrets: inherit`. For same-repository triage, research and review
-the apply job uses its job token instead; no environment is needed.
+Confirm [broker admission](inference.md#which-workflows-a-broker-admits),
+budgets and reachability from registration and agent jobs. For private
+network access, you may need to [compose your own job](workflow.md#the-pieces-and-an-agent-job-of-your-own).
 
 ## Start a session on a chosen runner
 
-One dispatch starts a [session](interactive.md): the agent works on the
-item's task in a checkout of `repo`, as any dispatch's does, and then
-waits for the operator's prompts until it has been idle for `idle-minutes`
-(10 if empty, at most 60) or the operator ends it. `runner` picks where it
-runs:
+Set `session=true` to [keep the agent available](interactive.md) after its
+first turn. `idle-minutes` defaults to 10, maximum 60. No scripted runs or
+reviews. Check and apply wait for the session to end.
 
-```sh
-gh workflow run dispatch.yml -f repo=OWNER/REPO -f item=1 -f kind=research \
-  -f task='Wait for my questions' -f session=true -f runner=devspace
-```
-
-`runner` is a name, never labels or a path. It is looked up in the
-`AGENT_RUNNERS` repository variable, a JSON object the repository's
-maintainers set, which maps each name to its `runs-on` labels and the
-caller's runner configuration for that image:
-
-```json
-{
-  "hosted": {"runs-on": "ubuntu-26.04", "config": ".github/agentic-job/hosted.toml"},
-  "devspace": {"runs-on": ["self-hosted", "devspace"], "config": ".github/agentic-job/devspace.toml"}
-}
-```
-
-A dispatch's inputs are often filled in by a plan or a script from an
-issue's text. Naming an entry of a closed map, rather than passing labels,
-keeps them from sending the job to a runner the deployment did not set up
-for it, such as a persistent one that holds credentials, or from pairing a
-runner with another image's configuration. `agentic-job dispatch` refuses
-an unknown name, an entry with keys other than `runs-on` and `config`, more
-than 16 labels, a label or path over 256 bytes or with control characters,
-and a path that is absolute or has `..`. With no `runner`, the job runs on
-`AGENT_RUNNER` with `AGENT_CONFIG`, as before; a named runner stands in for
-`AGENT_RUNNER`. A scripted run ignores `runner` and runs on hosted Ubuntu.
-The name chooses the agent job's runner only: policy, check and apply stay
-on the reusable workflow's default.
-
-`session` is off by default and refused for `review`, whose verdict is a
-merge gate that a conversation must not steer. Policy refuses an effective
-`session.listen = true` for a review, even when the runner configuration
-enables it and the dispatch input is false. Scripted dispatches also refuse
-`session=true`; disable `scripted` and configure a session runner instead. The
-table's other keys say who may attach and from which page, and the runner
-must already be on the tailnet ([session runs](../specs/session.md#shape)):
-the shipped caller has no network join, and `hosted.toml` has no
-`[session]` table, so a session needs a named runner, or `AGENT_RUNNER` and
-`AGENT_CONFIG`, set up for one. A session adds no write: what the agent
-proposes is checked and applied after the session ends, under the same
-profile's outputs and the same bounds. While a session waits, another
-dispatch of the same kind and item waits behind it in its concurrency
-group.
+Set `runner` to a name in the caller's `AGENT_RUNNERS` JSON map, for example
+`{"isolated":{"runs-on":["self-hosted","isolated"],"config":".github/agentic-job/session.toml"}}`.
+Names prevent tasks from choosing labels or paths outside that map. Omit
+`runner` for the defaults. For sessions, use a runner already on the tailnet
+and a `[session]` configuration that admits the operator.
 
 ## Giving runs a toolchain
 
-`[setup.tools]` was removed in
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) with the
-second-user path superseded by
-[#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989).
-The key is refused by name: remove the table, do not enable a second user.
-Migrate to trusted distribution `setup.packages`/`repo-packages`, or a
-caller-owned `setup.script` run unprivileged after lockdown through the
-reusable workflow's `setup` input, not host setup. Preserve trusted setup
-pins and never run target-selected setup as root.
-
-A sandbox has only what the runner image and the runner configuration
-(`AGENT_CONFIG`, by default this repository's
-[hosted.toml](../.github/agentic-job/hosted.toml), which gives only this
-repository a toolchain) put there. A caller whose targets need one keeps a
-copy with its own entries and names it in `AGENT_CONFIG`. `[setup] packages` is installed for every run;
-`[setup.repo-packages]` adds a list for the target repository, or the
-`default` list for a target with none:
-
-```toml
-[setup.repo-packages]
-default = []
-"OWNER/REPO" = ["cargo"]
-"OWNER/OTHER" = ["cargo", "golang-go"]
-```
-
-The policy job picks the entry (`agentic-job config --repo`) and prints
-the resulting `setup.packages`, held to the same checks as every package
-name; `sandbox setup` installs them with apt or dnf, as root and from the
-distribution's signed archive, before it locks the host. Names ignore
-case, as in the bounds. The list applies to every profile of a run on
-that target, so triage and research pay its install time too, and so do
-this repository's own end-to-end jobs, which share `hosted.toml`. The
-[secure-host action](secure-host.md) has no target and gets only the
-`default` list.
-
-The list comes only from the runner configuration, the caller's file or
-this repository's at the pinned commit, never from the target repository:
-its contents, a pull request's head included, are untrusted, and a package
-list read from them would let anyone who can open a pull request choose
-what is installed as root. For the same reason
-`rust-toolchain.toml`, `.tool-versions` and the like are not read. A
-toolchain the distribution lacks needs a `setup` script of the caller's
-(the reusable workflow's input; the shipped dispatch caller passes none),
-which runs unprivileged, never as root: in the reusable workflow as the
-runner's user. The old sandbox-user path was removed in #2991.
-
-**Rust.** The shipped configuration gives this repository Ubuntu 26.04's
-`cargo` (1.93.1, pulling in `rustc` and `gcc` as its linker), which is
-newer than its `rust-version` of 1.88. That is preferred to rustup:
-nothing is fetched by a script, the packages are signed, and the run
-starts with the toolchain installed. List the distribution's rustfmt and
-clippy packages alongside `cargo` in each Rust target's `repo-packages`
-entry (`rustfmt` and `rust-clippy` on Ubuntu), so runs can pass
-`cargo fmt --check` and `cargo clippy` without fetching another toolchain.
-A target that pins a newer Rust in
-its own `rust-toolchain` file can be given rustup from a caller `setup`
-script instead. rustup then follows the target's file, but as the
-unprivileged runner's user: the target picks a toolchain version, not what root
-installs.
-
-A `cargo build --locked` needs no egress rule: the proxy lets every
-`GET` through, and Cargo only reads, from `index.crates.io` (the sparse
-index), `static.crates.io` (the crates) and, for git dependencies, a
-forge whose `git fetch` is already allowed. The shipped configuration
-lists those hosts in a comment; no write is opened for them. Allowing
-crates.io means the run executes code from it: every crate is checked
-against the checksum in `Cargo.lock`, but build scripts and procedural
-macros of the target's dependencies run as the unprivileged runner's user, as the
-target's own tests do. That is the same reach as the agent's own: the
-runner's read-only GitHub token and inference access, not the
-host's root or a write credential.
-
-In a container on Ubuntu 26.04 through the same egress proxy, installing
-`cargo` took 24 seconds (70 packages, most of them `gcc` and LLVM, which
-the hosted image partly has already), and a cold `cargo test --workspace
---locked --no-run` of this repository 68 seconds. The hosted runner's
-`Sandbox setup stage packages` line in the agent job's log is the
-authoritative figure.
-
-The scripted review session checks it: when the checkout has a
-`Cargo.lock`, it runs `cargo --version` and `cargo metadata --locked`
-(which downloads every dependency) and names the version on a
-`Toolchain:` line of its verdict, or `none`. CI's dispatch verifier
-requires a cargo version there for this repository.
-
-## Sessions and boundaries
-
-The built-in [patch](../workflow/dispatch-implement.sh),
-[comment](../workflow/dispatch-comment.sh) and
-[review](../workflow/dispatch-review.sh) session installers come from the pinned
-reusable source: you need no setup script. They run as the sandbox user and write
-`$HOME/.config/fake-agent/demo.json`. That JSON is an array of scripted steps:
-`write` takes `title`, `path` and `content`; `execute` takes `title` and
-`command`; `say`, `read` and `cost` are also supported. `{home}` and `{cwd}`
-expand to the sandbox home and checkout. An executed command's failure is
-reported to the session, not automatically a failing run: make your session
-check the result if needed. The current fake-agent upload gate requires at
-least one redaction: retain the shipped session's first `execute` step when
-customizing. Its dynamically constructed canary is deliberately not a real
-credential; the transcript must redact it before publication. This control is
-specific to scripted runs, not a requirement of real agents.
-To customize, omit `fake-profile` and use your own `setup` script
-writing the same JSON path. The shipped sessions show the two hand-back files:
-`{home}/out/safe-outputs.jsonl` (one safe-output JSON object per line) and
-`{home}/out/outcome.json` (summary, tests, questions and stopped_early).
-The implement session needs only the patch and outcome: apply constructs its
-draft request from that summary. [Safe outputs](safe-outputs.md) defines the
-fields and limits. Editing a session changes the trial, not the real agent.
-
-Preflight, the `target` job's `agentic-job dispatch`, has contents read only and
-no secret, and fetches issue/PR title and body without checking out target code.
-It takes the binary as the policy job does, a release's by its attested
-checksums for the pinned source, or a build of that source where none is
-published yet (about two minutes). Text reaches the task as fenced JSON data, with
-angle brackets escaped so it cannot close the fence. Dispatch inputs are never
-pasted into executable code. Default-branch checks apply to manual dispatch;
-the workflow-call interface lets same-repository CI exercise the exact caller.
-Its caller must be trusted like any other workflow with write permissions.
-
-The reusable policy and check jobs downscope to contents and actions read,
-apart from check's separate detector job, which holds OIDC; the agent job
-has read access only, and a separate register job holds the OIDC permission
-for `github-oidc` inference registration. The sandbox has at most a read-only forge token
-and no OIDC credential. Only apply receives the configured environment
-token; apply and refusal reporting can use the caller's write-capable job
-token, and neither executes agent-produced code. Review resolves
-the open PR's exact head through the read-only policy API, accepts heads in
-forks but refuses wrong bases, and enforces one verdict comment or noop in the
-clean check job.
-Real reviewers start in the base checkout with the pinned head beside it.
-Other profiles allow one each of noop, missing_tool and missing_data, three
-outputs total; implement permits one draft PR, fix one push to the dispatched
-pull request's branch, triage/research one comment. Implement also permits one
-`add_comment` on the dispatched item for comment-only tasks, still within three
-total requests and the caller bounds' `add_comment.max = 1`. This explicit
-profile capability, not plan text, authorizes the comment; targets and tokens
-are unchanged. Callers without that bound cannot grant it by asking in prose.
-Comment routing is fixed to the dispatched item, not agent-supplied fields.
-Triage may also close up to 30 issues of the target `repo` (not the item
-repository) that it finds finished or overtaken, each `close_issue` carrying
-its closing comment, within the bounds' 32 outputs; check refuses one naming
-another repository. A misled run's closes are undone by reopening, and each
-says why on the issue.
-
-## External VM runner to midstream draft
-
-**Caller-specific design example:** the named repositories and settings in this
-section illustrate one proposed deployment, not generic setup requirements.
-
-This is the contract for running a job's agent and check stages on separate
-VM-capable infrastructure while a trusted apply job in `cgwalters-forge`
-publishes the checked result as a draft on a midstream fork (#2891). The
-requirement is the operator's, as relayed by the bot in an
-[issue comment](https://github.com/cgwalters-forge/agentic-job/issues/2891#issuecomment-6657969105):
-"we need to ensure our infrastructure can reuse separate infra like the cncf
-runners while still targeting a PR on our midstream in general". Only that
-sentence is taken as decided. Everything else on this page is this
-project's design for meeting it. It does not approve a deployment, its
-limits or its disposability, a dispatch credential or broker admission, and
-none of it has run. Do not submit the example below as a job plan.
-
-The example deployment is `bootc-dev/cgwalters-devspace-sandbox` on
-bootc-dev's CNCF RHEL runners. Its
-[agent.yml](https://github.com/bootc-dev/cgwalters-devspace-sandbox/blob/54d58072c793b1599114b6dbfa3b9e9e5fd6f71b/.github/workflows/agent.yml)
-takes `cores` (`4`, `16` or `64`, mapped through `runner-sizes.json`) and
-`config` (`rhel10` or `rhel10-kvm-smoke`) as choices, and checks and applies
-within its own repository and bounds, not to midstream forks
-([#589](https://github.com/cgwalters-forge/agentic-job/issues/589)).
-
-### Status
-
-As read on 7 November 2026, these are **shipped**:
-
-- The hosted path. The agent job runs on `AGENT_RUNNER` or the reusable
-  workflow's `runner` input, defaulting to hosted Ubuntu 26.04. The
-  [agent-board job plan](https://github.com/cgwalters-forge/agent-board/blob/77acd7726efea2599d748004760736e634266c82/docs/job-plans.md#format)
-  accepts only `runner: "hosted"` and refuses `devspace`. Tracker's
-  [dispatch.yml](https://github.com/cgwalters-forge/tracker/blob/5ea1135643adb75d52c2689a316c9e7b4c36c733/.github/workflows/dispatch.yml)
-  has no runner input and does not pass the wrapper's `runner`; its closed
-  `pools.json` and `config` choice are the pattern runner profiles follow.
-- Within one run, check.yml's `detect` job releases the checked upload's ID
-  and digest only after the caller's required threat detection succeeds,
-  and apply.yml takes them only from that run's check call.
-- Apply's `agentic-job-applied` names, which stop a re-run of apply from
-  posting twice ([running apply again](workflow.md#running-apply-again)).
-- Sandbox setup's refusal of an agent user in the `libvirt` group.
-- The [capability preflight](#capability-preflight)'s `[preflight]` table
-  and agent job step (#3291). Its refusals are tested against stand-ins;
-  its positive path has not run on a KVM host.
-
-`test-evidence.json` is **implemented but not enabled**: collect, check
-and apply handle it ([test evidence](safe-outputs.md#repeated-test-evidence)),
-off unless the bounds have `[github.test_evidence]`, which no caller sets.
-
-Read-only correlation/fetch and trusted re-check/release adapters are
-**implemented but not enabled**, with offline API and local staged-apply
-fixtures only; see [the binary interface](#binary-correlation-interface).
-These are **designed here but not implemented**: the runner profile map
-and its resolution, dispatch record creation/dispatch and the wrapper's
-external mode. No external caller has been enabled or credentialed, and no
-live cross-run apply has been demonstrated.
-The [implementation slices](#implementation-slices) list them in order.
-
-These are **unverified deployment prerequisites**, and each is the
-operator's decision:
-
-- devspace as the deployment, with the profile's numeric limits;
-- that bootc-dev's RHEL runners run one job and are then destroyed;
-- the credential with which tracker starts a workflow in bootc-dev, and
-  who holds it;
-- broker admission for the external repository and workflow identity;
-- whether ostree or any other fork joins the midstream bounds.
-
-### Implementation slices
-
-This contract's follow-ups, in dependency order, each one implement-sized
-pull request under
-[tracker#1215](https://github.com/cgwalters-forge/tracker/issues/1215).
-Slices 3, 4 and 5 are built and off by default; none has run on an
-external runner, and no caller enables them. No slice enables a profile,
-changes credentials, broker admission or bounds, or adds ostree or any
-other target. Repositories without an owner are under `cgwalters-forge`.
-
-1. **tracker — Closed runner profile map, all disabled.**
-   `.github/agentic-job/runner-profiles.json` with the format and
-   resolution order of [runner profiles](#runner-profiles), and a `runner`
-   input to `dispatch.yml` defaulting to `hosted`. That input picks where
-   the job runs; the existing `config` choice keeps picking a hosted run's
-   configuration and must be `hosted` with an external profile. The map is
-   a protected path in the caller's bounds and may hold the disabled
-   `devspace-rhel10-64` example. Acceptance: a hosted dispatch is unchanged
-   and does not read the map; an unknown or disabled name, a malformed map,
-   and an external request that is not `implement`, targets a non-midstream
-   repository, or sets `pool`, `effort` or another `config` are each
-   refused before any workflow starts, with a test for each.
-2. **agent-board — Carry the profile name in job plans.** In
-   `docs/job-plans.md` and plan, manual and scheduled dispatch, `runner`
-   accepts `hosted` or a name of `pool`'s character set and is forwarded
-   as the caller's `runner` input without resolving it. `hosted` stays the
-   default planners write. Acceptance: hosted plans dispatch exactly as
-   today; an ill-formed name is refused; an accepted name survives dispatch,
-   dedupe and in-flight tracking, and the caller's refusal of an unknown or
-   disabled name is reported, not retried as hosted. Depends on 1.
-3. **agentic-job — KVM and session-libvirt preflight.** Built as
-   `[preflight]` and `sandbox preflight` ([capability
-   preflight](#capability-preflight)), with its refusals tested against
-   stand-ins; the positive path on a KVM host is unverified. It runs in the
-   agent job, before the setup script and any model request, but after the
-   `github-oidc` register job, which runs on another machine: a refusal
-   leaves that run token unused, not unissued.
-4. **agentic-job — `test-evidence.json`.** Built and off by default
-   ([test evidence](safe-outputs.md#repeated-test-evidence)). Check binds
-   the base and head; apply's trial binds the tree, because check has no
-   repository. Tracker's bounds still need `[github.test_evidence]` before
-   slice 7 can use it.
-5. **agentic-job — Correlate, fetch and re-check an external run.** Built
-   and off by default, tested against offline fixtures only ([binary
-   interface](#binary-correlation-interface)); slice 7 still has to pass
-   the receipt.
-6. **actions — External mode of the wrapper.** In
-   `.github/workflows/cgwalters-agentic-job.yml`, a mode that runs policy,
-   agent and check only: no apply job, no `SAFE_OUTPUTS_PAT`, the kind,
-   target, base commit and `dispatch-id` as inputs, and the id as the run
-   name's bracketed suffix. It runs the profile's preflight (3), fixed
-   limits and cleanup. Acceptance: workflow lint and a mocked run show no
-   write credential or apply job in the mode, refusal before inference
-   when a capability is missing, and cleanup on cancellation. Depends on 3.
-7. **tracker — Dispatch record, waiting job and trusted apply.** Write the
-   record, start the external workflow from the one step that holds the
-   dispatch credential, and call 5 from a waiting job with read access only.
-   Then upload the hand-back again and compose agentic-job's `policy.yml`,
-   `check.yml` and `apply.yml` directly, not through the wrapper, passing
-   that upload's ID and digest, with the midstream bounds and the
-   `agent-apply` environment. Acceptance: a staged apply against a fixture
-   run; a hosted dispatch unchanged; the dispatch credential absent from
-   every other job. Depends on 1, 4, 5 and 6. The credential itself is the
-   operator's to provision.
-8. **bootc-dev/cgwalters-devspace-sandbox** stays
-   [#589](https://github.com/cgwalters-forge/agentic-job/issues/589)'s:
-   the caller's move to the external mode (6) at a new commit, calling the
-   wrapper by commit rather than `@main`, broker admission for its workflow
-   and the RHEL KVM smoke run. Its `dispatch.toml` names only bootc-dev
-   repositories, so its policy stage refuses a `cgwalters-forge` midstream
-   target until those forks are added there. These slices do not edit the
-   sandbox.
-9. **Operator enablement and runtime acceptance.** After the
-   [prerequisites](#status) are settled, a reviewed tracker change enables
-   the entry with approved limits and new pins. Runtime acceptance is the
-   contract's [list](#repeated-test-evidence-and-acceptance); documentation
-   checks do not stand in for it.
-10. **Later: `fix` on an external profile.** Pin the pull request's head
-    from dispatch to apply for a pushed fix, as review pins its head today,
-    and add `fix` to the devspace workflow (#589). Acceptance: a moved head
-    is refused as stale, not rebased onto. Until then rule 5 of
-    [runner profiles](#runner-profiles) refuses it.
-
-### Runner profiles
-
-Issue text or a plan could redirect execution to a credential-bearing runner
-or an attacker's workflow. To stop that, the only selection mechanism is a
-closed map the caller owns, `.github/agentic-job/runner-profiles.json` in
-tracker, read from the default-branch commit the dispatch runs on, as
-`pools.json` and the kind profiles are. It must be a protected path in the
-caller's bounds, as the bounds files are, so that a run cannot propose a
-change to it. A plan names a
-profile and nothing else: never runner labels, a repository, workflow, ref,
-configuration path or resource override.
-
-The map is a JSON object. Each key is a profile name with the same character
-set as `pool` (`^[a-z0-9][a-z0-9_-]{0,31}$`). `hosted` is built in and may
-not appear in the map, so it cannot be redefined or disabled. Each value is
-an object with exactly these keys, and any other key is refused:
-
-- `enabled`: a boolean.
-- `repository`, `workflow`, `ref`: the external caller as `OWNER/NAME`, its
-  workflow's path under `.github/workflows/`, and the branch to dispatch on.
-- `commit`: the 40-hex commit the run's workflow must be at.
-- `agentic-job`: the 40-hex agentic-job commit whose `policy.yml` and
-  `check.yml` the external workflow must call.
-- `actions`: the 40-hex commit of cgwalters-forge/actions'
-  `cgwalters-agentic-job.yml` the external workflow must call, since that
-  wrapper names the jobs and composes policy, agent, check and detect.
-- `inputs`: fixed string inputs for that workflow, such as `cores`, `pool`
-  and `config`. They come only from the map, never from the task.
-- `kvm` (boolean) and `libvirt` (`"session"` or absent): the capabilities
-  the preflight must prove.
-- `limits`: the positive integers `vcpus`, `memory-gib`, `disk-gib`,
-  `max-guests`, `job-minutes`, `lifetime-minutes`, `max-attempts` and
-  `artifact-retention-days`.
-
-Dispatch resolves the plan's `runner` before it starts any workflow:
-
-1. `hosted` takes the existing path unchanged and does not read the map.
-2. A name not in the map is refused as unknown.
-3. A malformed map is refused whole for every non-hosted name: a missing or
-   unknown key, a commit that is not 40 lowercase hex digits, a limit that
-   is not a positive integer, `lifetime-minutes` not above `job-minutes`,
-   or a lifetime beyond what tracker's waiting job may run (see
-   [correlation](#correlating-a-dispatch-with-its-external-run)).
-4. A profile with `enabled: false` is refused as disabled. There is no
-   fallback to `hosted`: that would run a VM test without KVM and hide that
-   it never ran.
-5. An external profile is refused for any kind but `implement`, and for
-   any target that `midstream.toml` does not list. A profile chooses where
-   a job runs, never what it may change. `fix` waits for a later design:
-   it needs the pull request's head pinned from dispatch to apply, which
-   policy does not do today outside review, and the devspace workflow has
-   no `fix` kind.
-6. An external profile is refused with a `pool` or `effort` or with any
-   `config` but `hosted`: the external caller has its own closed model and
-   configuration choices, which the profile's `inputs` fix. It is also
-   refused while tracker's own `AGENTIC_JOB_DETECT_MODEL` is empty, since
-   tracker's detection is the one that counts.
-
-The resolved profile, its values and the map's commit go into the
-dispatch record.
-
-This disabled entry is a concrete example, not an approved deployment.
-The pins are what was read on 7 November 2026. The devspace commit
-predates #589's external mode, so enabling the entry needs a new one.
-The limits are illustrative numbers, not an authorized budget.
-
-```json
-{
-  "devspace-rhel10-64": {
-    "enabled": false,
-    "repository": "bootc-dev/cgwalters-devspace-sandbox",
-    "workflow": ".github/workflows/agent.yml",
-    "ref": "main",
-    "commit": "54d58072c793b1599114b6dbfa3b9e9e5fd6f71b",
-    "agentic-job": "427ce2295925654be9c35e91ca5cee91bbc2c9ea",
-    "actions": "e084c52a9aa07f1279182cfc738de68b96016278",
-    "inputs": { "cores": "64", "config": "rhel10-kvm-smoke", "pool": "claude" },
-    "kvm": true,
-    "libvirt": "session",
-    "limits": {
-      "vcpus": 64, "memory-gib": 256, "disk-gib": 500, "max-guests": 4,
-      "job-minutes": 240, "lifetime-minutes": 300, "max-attempts": 5,
-      "artifact-retention-days": 30
-    }
-  }
-}
-```
-
-An enabled deployment differs in three ways. Its entry has `enabled: true`.
-Its `commit`, `agentic-job` and `actions` point at revisions that carry
-the external mode. Its limits are ones the operator approved. All three
-land through a reviewed pull request on tracker's default branch after the
-prerequisites above are met, and a run cannot propose any of them.
-The name `64` alone is not a resource contract, and a smaller profile needs
-its own entry.
+In the runner TOML (`AGENT_CONFIG` or the named runner's `config`), set
+`[setup]` `packages` for all targets. `[setup.repo-packages]` adds packages
+by `OWNER/REPO`, with an optional `default` fallback. Only trusted caller
+configuration can choose what is installed as root. To replace removed
+`[setup.tools]`, use distribution packages or adapt the caller to pass the
+reusable workflow's unprivileged `setup` input.
 
 ### Capability preflight
 
-A profile must provide a fresh disposable job host, not a shared persistent
-runner. Before any target code or inference starts, trusted preflight checks
-the effective CPU, memory and disk allocation against `limits`. For `kvm`,
-it checks that `/dev/kvm` is readable and writable by the user the agent
-runs as, that hardware virtualization is present, and that a minimal guest
-starts and stops. For `libvirt: "session"`, it also checks that
-`qemu:///session` answers for that user and can create and destroy a
-disposable guest. It does not accept membership in `libvirt` granting
-`qemu:///system`, which setup already refuses. A label or a device node's
-existence is not proof. A missing capability refuses the job, and software
-emulation must not turn an unavailable KVM profile green.
-Each refusal needs its positive control: the same preflight passes on a
-KVM-capable host and boots and destroys a minimal guest.
+On a disposable runner, opt in with `[preflight]` to require `vcpus`,
+`memory-gib`, `disk-gib`, `kvm` or `libvirt = "session"`. Missing capabilities
+fail the agent job before the task starts. KVM requires a working hardware
+guest; there is no software fallback. See the [CLI reference](interface.md).
 
-The external workflow's runner configuration asks for these in a
-`[preflight]` table, which the profile's `config` input selects, such as
-`kvm = true`, `libvirt = "session"`, `vcpus = 64`, `memory-gib = 250`
-and `disk-gib = 500`. Each limit is at most 4096 vCPUs, 65536 GiB of
-memory and 1048576 GiB of disk. `MemTotal` is below the installed memory
-by what firmware and the kernel keep, so a 256 GiB host asks for a
-little less. The agent job runs `agentic-job sandbox preflight`
-as the runner's user after secure-host, before the setup script, the
-target's code or any model request; only the earlier proxy reachability
-check has connected to the inference proxy, and it sends nothing.
-Registration under `github-oidc` is a separate job on another machine
-and comes first; its run token then goes unused and expires. The
-command refuses to run as root, and:
+## External runs
 
-- counts the CPUs the process may run on, the least of `MemTotal` and its
-  cgroups' `memory.max`, and the free space an unprivileged user has in
-  the working directory. Memory discovery maps membership through
-  `/proc/self/mountinfo` and requires the initial cgroup namespace.
-  It refuses unavailable limits, unmappable membership, subtree mounts
-  that hide ancestors, and a cgroup v1 memory controller rather than
-  treating these as unlimited memory. A cgroup namespace is refused even
-  with a mount rooted at `/`: tighter ancestor limits may be hidden;
-- for `kvm`, refuses a host that is not x86-64, opens `/dev/kvm`, not
-  followed if a link, for reading and writing, and requires `vmx` or
-  `svm` among the CPU's flags;
-- boots `qemu-system-x86_64` from PATH, or else RHEL's
-  `/usr/libexec/qemu-kvm`, with `-accel kvm -cpu host -machine q35` and
-  no fallback, from a boot sector it writes, whose code makes QEMU's
-  `isa-debug-exit` device end QEMU with a status only a guest that ran
-  can give, within 60 seconds;
-- for `libvirt = "session"`, asks `virsh -c qemu:///session uri`,
-  creates a transient KVM guest from the same sector, requires it
-  running, destroys it and checks that it is gone, each step within 60
-  seconds and the cleanup's two within 4 each. The cleanup runs after any
-  failure past the answer and on the job's cancellation (SIGINT or
-  SIGTERM, which the step's `exec` lets reach it), within the runner's
-  grace before SIGKILL; a cleanup that fails is reported with whatever
-  came before. A fresh random UUID identifies the guest in both its XML
-  and cleanup commands, so a failed create cannot stop an unrelated guest
-  with a reused name. Parsed commands run with `LC_ALL=C`.
-  Past that grace, the disposable host is the backstop.
+The shipped dispatcher does not orchestrate separate runs. These opt-in
+interfaces are for custom callers.
 
-A refusal is one `::error::` line naming what failed, and fails the job.
-A command past its limit or a cancelled one is killed. The guest has no
-network and 16 MiB of memory. The image and domain are written to a
-temporary directory at run time; nothing binary is in the repository.
-Whether RHEL's QEMU build has `isa-debug-exit` has not been checked.
-Guest privilege and libvirt sockets stay inside the disposable host, never
-on a shared control host. The host must also meet the
-[runner requirements](workflow.md#what-a-caller-provides) and pass
-`sandbox check`.
+### Match the external run
 
-On an authorized disposable KVM host, as its unprivileged runner user, run
-`cargo test --locked -p agentic-job --test preflight -- --ignored` to exercise
-the public CLI's real KVM boot and session-libvirt creation and cleanup. This
-test requires QEMU, virsh and a working session instance; it does not install
-them or grant device access. Ordinary test runs explicitly ignore it. The
-stand-in unit tests are not evidence of a working guest, and the real-host
-positive path remains unverified until this test runs on a provisioned host.
-
-### Resources, lifetime and cleanup
-
-With the example's illustrative limits, a job gets 64 vCPUs, 256 GiB of
-memory and 500 GiB of disk, and runs at most 4 guests at once. The agent
-job may run for 240 minutes. The host's whole lifetime, cleanup included,
-is at most 300 minutes, from registration to destruction. A request for
-repeated tests may plan at most 5 attempts. The external run keeps its
-evidence artifacts for 30 days, as check.yml keeps its checked upload, so
-the draft's link to the evidence still works while the draft is reviewed.
-The run's inference budget and request cap still apply.
-
-The lifecycle owner enforces the deadline and the guest limit. On success,
-failure and cancellation it tears down guests, volumes, networks, the
-runner registration and the job host. When the runner dies, it reaps the
-abandoned host once the lifetime has passed. A cleanup failure is reported,
-not left silently green, and no disk or workspace is reused for the next
-job. Whether bootc-dev's runners behave this way is not verified; it is
-one of the prerequisites above.
-
-### Correlating a dispatch with its external run
-
-Apply could otherwise publish the result of a run tracker never started,
-of another revision of the external workflow, or of an older or repeated
-run. A search for the latest run or artifact by name picks whatever a
-concurrent dispatch, or anyone who can start that workflow, produced last.
-A run ID or digest in the agent's report is only the agent's word. So
-tracker correlates each dispatch with exactly one external run attempt from
-its own record and the forge's metadata, and nothing else.
-
-The whole flow is one tracker run, so the bounds, the map and the kind
-profiles all come from a single tracker commit:
-
-1. **Record.** Before starting anything, tracker's dispatch job writes the
-   dispatch record and uploads it as an artifact of its own run. The record
-   never passes through the external side. It holds a new `dispatch-id`
-   (128 random bits as 32 lowercase hex digits), tracker's repository, run
-   ID and attempt, the resolved profile and the map's commit, the target
-   repository, item and kind, and the target's base commit. It also
-   records the dispatch time and the deadline. The deadline is the
-   dispatch time plus `lifetime-minutes`, so time queued before the host
-   registers counts against the lifetime.
-2. **Dispatch.** Only this step holds the dispatch credential. It starts
-   the profile's `workflow` on its `ref` in its `repository`, passing the
-   task, kind, target repository and item, the base commit, the fixed
-   `inputs` and the `dispatch-id`. The external workflow checks out that
-   base, and its pinned `run-name` ends with the `dispatch-id` in square
-   brackets (#589's change).
-3. **Match.** A separate waiting job, holding only read access to the
-   external repository's Actions API, finds the run. If the forge's dispatch
-   call returned the new run's ID, the record keeps it and the rules below
-   still apply to it. Otherwise the job lists that workflow's
-   `workflow_dispatch` runs created no more than 2 minutes before the
-   dispatch time, a margin for clock skew, and keeps those whose run name
-   ends with a space and `[DISPATCH-ID]` exactly. Exactly one run must match, and it
-   must satisfy every rule:
-
-    - its workflow path is the profile's `workflow`;
-    - its `head_branch` is the profile's `ref`;
-    - its `head_sha` is the profile's `commit`;
-    - its `triggering_actor` is the identity of the dispatch credential;
-    - its `run_attempt` is 1;
-    - its referenced workflows include the wrapper at the profile's
-      `actions` commit and agentic-job's `policy.yml` and `check.yml` at its
-      `agentic-job` commit, and no other revision of either.
-
-    The dispatch fails, and nothing is applied, if no such run appears
-    within 10 minutes of dispatch, or if a run whose name carries the
-    `dispatch-id` breaks any rule. The window bounds the run's creation
-    time, not the waiting job's: a job queued past it still finds a run
-    created within it, until the deadline. It also fails if more than one run
-    matches, and then all of them are refused. A ref that moved between the
-    map's review and the dispatch fails `head_sha`; the fix is a reviewed
-    change to the map's commit, not a looser match.
-
-4. **Wait.** The job polls that one run by ID until it completes or the
-   deadline passes. Tracker's waiting job runs on a hosted runner with a
-   360-minute job limit, so the map refuses a `lifetime-minutes` above 330.
-   That leaves 30 minutes for the run to appear and for the fetch. A run
-   still going at the deadline is refused, and the lifecycle owner
-   destroys its host.
-5. **Release.** On completion the job applies every rule of step 3 again.
-   A re-run by anyone with Actions write access on the external repository
-   makes a second attempt with another `triggering_actor` and possibly other
-   settings. So `run_attempt` must still be 1, and the run is refused
-   otherwise. The artifacts API names an artifact's run but not its
-   attempt, and this rule is what ties both artifacts below to the
-   attempt that was checked. The run's conclusion must be success, and so
-   must its check and detect jobs, read from the Actions API's jobs for
-   attempt 1. The pinned wrapper names those jobs, so the agent cannot
-   rename them. The run must hold exactly one artifact named
-   `<artifact-prefix>checked-outputs`, which shows the external check
-   accepted, and exactly one named `<artifact-prefix>safe-outputs`, the
-   agent job's raw hand-back. A second artifact of either name is refused
-   as ambiguous. The record keeps the run ID, the attempt and both
-   artifacts' IDs and API digests. The digest the download is checked
-   against comes from the same API, so it protects the transfer's integrity
-   only. Provenance rests on the run rules above, not on the digest.
-6. **Re-check.** The waiting job downloads the raw hand-back by ID and
-   checks its digest. It uploads it again in tracker's own run, and passes
-   that upload's ID and digest to tracker's `check.yml`. The receipt names
-   each extracted file with its digest, and check holds the directory it
-   reads to that manifest, so a file substituted, changed, dropped or added
-   between fetch and check is refused. Today only the
-   agent job's own upload reaches check.yml that way; a non-agent producer
-   passes a name, which checks no digest. So tracker composes `policy.yml`,
-   `check.yml` and `apply.yml` itself for this path rather than going
-   through the wrapper. The hand-back is what check's `collect` reads
-   (`outputs.jsonl`, the patches, `test-evidence.json`). The external
-   checked upload is never re-checked: it is already collected output, and
-   its `policy.json`, `config.json` and `report.json` are the external
-   run's. Tracker's own calls run with the midstream bounds at this run's
-   commit. The hand-back's `base.json` must name the record's base commit,
-   and its branch the external run's ID. Policy, check and apply all take
-   both from the record, not from the hand-back. Apply's check that the
-   branch is `agent-run-` and its own run ID is one of the checks this
-   changes. Tracker's `detect` must have run under its own
-   `AGENTIC_JOB_DETECT_MODEL`. check.yml's detect job gains an output
-   saying whether detection ran, and apply refuses when it did not. The external check and
-   detection are early filters only. They grant no authority, and they
-   cannot switch off tracker's.
-
-Re-running only tracker's apply job is covered by the existing
-`agentic-job-applied` names. A replay of an old external run into a new
-dispatch matches nothing, because the run name must carry the new
-record's `dispatch-id`. A result that completes after the deadline is
-refused. Tracker never re-runs the external run, and never re-dispatches
-with the same `dispatch-id`. A retry is a new dispatch with a new record.
-Tracker's concurrency group is per kind and item and does not cancel a
-run in progress, so it holds the retry until the first has ended. GitHub
-keeps only one pending run per group, so a third dispatch replaces a
-queued second. The draft names the external run's URL and attempt and the
-raw hand-back's digest.
+Keep the dispatch record on the trusted caller. Match exactly one producer
+attempt before fetching its raw hand-back. A digest verifies the downloaded
+bytes, not who produced them or whether tests ran. Re-check the raw files
+under caller bounds; never execute them as code.
 
 ### Binary correlation interface
 
-An unrelated run, a second attempt or a substituted hand-back must not
-become publication authority. The one opt-in mechanism is a **caller-owned
-record and receipt**, never a producer-supplied policy or configuration.
-No command here dispatches a workflow or needs a write credential. Record
-creation, random-ID generation, profile admission and dispatch are the
-caller's responsibility and are not implemented by this slice.
+| Forge | Available interfaces |
+| --- | --- |
+| GitHub | `external-fetch` verifies a caller-owned record and writes a receipt for one draft implement result. |
+| GitLab | `external-fetch --forge gitlab` and receipt checking are available; apply refuses GitLab receipts. See the [caller spec](../specs/gitlab-caller.md). |
 
-`external-fetch --record record.json --archive raw.zip --outputs raw --receipt receipt.json`
-reads at most 64 KiB of strict JSON. The record has exactly these fields:
+On GitHub, compose the same-pinned policy, check and apply workflows:
 
-- `dispatch_id`: 32 lowercase hex digits, newly generated before dispatch;
-  `caller_repository`, positive numeric `caller_run_id` and `caller_attempt`;
-- `profile_commit`: the reviewed map commit; `kind`: exactly `implement`;
-  `target_repository`, `target_branch`, `base_commit` and positive `item`;
-- `repository`, positive numeric `repository_id`, `workflow` (a flat
-  `.github/workflows/NAME.yml` path), `reference`, `commit` and positive
-  numeric `triggering_actor_id` of the dispatch credential;
-- `agentic_job` and `actions`: the two reusable-workflow commits;
-  `artifact_prefix` (ASCII letters, digits, underscore or hyphen);
-- `actions_workflow`, `policy_workflow` and `check_workflow`: distinct
-  `OWNER/REPO/.github/workflows/NAME.yml` identities chosen by the caller;
-  the first must match `actions`, and the other two `agentic_job`;
-- `check_job` and `detect_job`: distinct, exact API job names as composed
-  by the pinned external caller, including reusable-call prefixes;
-- `dispatched_at` and `deadline`: RFC3339 timestamps; `returned_run_id`:
-  null, or the positive numeric ID returned by dispatch.
+1. Pass the receipt JSON to policy as `external-receipt`, with `output-repo`
+   equal to `repo` and `issue` equal to the recorded item number.
+2. Upload only the extracted raw files in the trusted caller run. Pass
+   policy's outputs and the new upload's `safe-outputs-artifact-id` and
+   `safe-outputs-artifact-digest` to check.
+3. Set `AGENTIC_JOB_DETECT_MODEL`: apply requires successful detection in
+   the caller. Give apply `policy: ${{ toJSON(needs.policy.outputs) }}` and
+   `check: ${{ toJSON(needs.check) }}` (including the job result). Keep
+   publishing credentials off producer runners.
 
-All commit pins are full lowercase SHAs. The record never visits the
-external machine. Fetch requires the caller's `GITHUB_REPOSITORY`,
-`GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT` to agree. It reads the read-only
-`GH_TOKEN` and HTTPS `GITHUB_API_URL` from the deployment environment.
-API credentials are never forwarded to an artifact-storage redirect.
-HTTP failures refuse rather than silently choosing another result.
+See the [external run module](../crates/agentic-job/src/external.rs)
+for the record and receipt formats.
 
-Fetch polls at most every 15 seconds, stops waiting for a run to appear
-ten minutes after dispatch, and stops waiting/downloading at the record's
-deadline (at most 330 minutes from dispatch). A run created more than ten
-minutes after dispatch is refused whenever it is read; a fetch that itself
-starts later still finds a run created in time. Every request has a
-maximum 15-second timeout, further limited by the remaining lifetime.
-Each metadata page is at most 4 MiB;
-each list is at most ten pages of 100 entries. Pagination overflow refuses
-rather than assuming uniqueness from a partial list. The ZIP and its total
-expanded contents are each at most 128 MiB, with at most 256 flat,
-regular hand-back files, no duplicate paths and no restored archive modes.
-The entry count and duplicate names are checked on the archive's own
-central directory before the ZIP library indexes it, which would otherwise
-merge duplicates; only single-disk, non-ZIP64 archives are accepted.
-The ordinary checker then applies its stricter per-file and patch bounds.
+### Resources, lifetime and cleanup
 
-All output paths must be new. A refusal writes no receipt authorizing a
-result; an I/O failure may leave partial output, which must be discarded.
-The receipt holds `record`, numeric `run_id`, `attempt` (1), `checked`
-and `raw`, each an `id` and `digest` (`sha256:HEX`) from the Actions API,
-and `files`, a JSON object mapping each extracted filename to its
-`sha256:HEX` digest, with at most 256 entries. Fetch again if an older
-receipt lacks `files`. The receipt is limited to 120 KiB; caller transports
-with a lower input limit must not truncate it.
-The checked artifact is an early filter only: fetch never downloads or
-trusts its policy/config/report. The downloaded raw artifact is fetched
-by API ID and hashed before extraction; the API digest is transfer
-integrity, not provenance or proof that any reported tests ran.
-
-The trusted caller uploads **only the extracted raw files** into its own
-run, retaining that upload's ID and digest. It composes the same-pinned
-`policy.yml`, `check.yml` and `apply.yml` directly, not the complete wrapper:
-
-- Pass the caller-owned receipt JSON as policy's `external-receipt` input
-  (default empty), with the normal caller bounds, target branch and item.
-  With the binary, pass `--external-receipt receipt.json` and set
-  `--output-repo` explicitly to the same repository as `--repo`.
-  This supports only one draft-only GitHub implement target, not fix,
-  secondary targets or a different output repository.
-- Pass the new raw upload's ID and digest to check, never a legacy artifact
-  name. In check.yml, the bounded collector reads `outputs.jsonl` first;
-  then the `check` command holds the outputs directory to the receipt's
-  `files`: first the same names, before it opens any file, then each
-  file's digest over the bytes it goes on to use, so a substituted,
-  changed, dropped or added file refuses the hand-back. Endpoint replay
-  uses those bytes too, and so does the upload: with `--stage DIR`,
-  which check.yml always passes, `check` itself writes the reported
-  `aw-*.patch` or `replacement.json`, the secondary patch under
-  `secondary/`, and `test-evidence.json` with its `test-evidence-*.log`
-  files, and check.yml copies none of them from the outputs. The
-  collected result must also match what the
-  native collector produces from the verified `outputs.jsonl` bytes. The
-  ordinary patch, protected-path and size checks still run. `base.json`
-  must match the record's exact commit; the request's
-  branch must be `agent-run-EXTERNAL-RUN-ID`, not the caller's run ID.
-- Check exposes `detection-result`: `success` only if the trusted detector
-  step ran successfully. An external check releases no upload if detection
-  was skipped. Apply additionally runs `external-release --policy FILE
-  --report FILE --detection-result RESULT` before any publication, including
-  in staged mode, rejecting absent/skipped/failed detection and another
-  caller's policy. A green external detect job cannot disable this gate.
-
-Apply retains its existing target-head ancestry, exact git-am trial,
-changed-path comparison, bounds and fork/owner-branch checks. Idempotency
-names remain keyed to the **caller's** run, while the branch names the
-external run. Apply-only retries may retain the original policy within
-the same caller run; another caller run or an earlier attempt cannot
-reuse it. The draft includes the external run URL, attempt and raw digest.
-Hosted calls omit `external-receipt` and retain optional detection and all
-existing same-run artifact associations. No shipped caller sets this input.
-[The GitLab caller spec](../specs/gitlab-caller.md) defines this contract's
-GitLab CI equivalent. `external-fetch --forge gitlab` fetches a recorded
-producer pipeline's agent-job archive under the same bounds, and policy and
-check take its receipt, checking the caller's `CI_SERVER_URL`,
-`CI_PROJECT_ID` and `CI_PIPELINE_ID`. `external-release`, `publish` and every
-apply, standalone `safe-outputs` included, still refuse every GitLab receipt's
-policy, since how GitLab detection reaches them is not
-specified, and nothing has run against a live GitLab.
-
-### Checked hand-back and trusted apply
-
-The external side runs only agent and check, on separate fresh machines;
-check runs pinned trusted code, not the agent's checkout. Neither stage nor
-the VM tests gets a forge-write token, a provider key or a broker lifecycle
-credential. Inference endpoints come from deployment environment
-configuration, not task text. Broker admission for the exact external
-repository/workflow identity is a separate prerequisite; existing RHEL runs
-do not prove admission for a new identity or runner-only credential safety
-(see [current refusals](interface.md#removed-keys-and-runner-mode-refusals)).
-Registration and lifecycle authority stay off the agent/test host, and
-evidence and transport metadata are bounded data, never executable code.
-
-Only apply in `cgwalters-forge` holds the publication credential. It does
-not execute target code or tests, and reuses normal policy/check/apply
-limits, protected-path refusals and head checks. The external side cannot
-broaden those limits or provide replacement bounds. Apply opens one draft
-PR on the midstream fork, never upstream and never by merging it or
-advancing its default branch. Updating an existing draft waits for the
-`fix` design above. Existing fork/branch opt-ins remain required;
-this contract does not authorize a new same-repository push path.
-
-For the bootc example, the trusted target is `cgwalters-forge/bootc` on
-`main`, with its exact base commit recorded, not the devspace repository
-or `bootc-dev/bootc`. As read on 7 November 2026, tracker's
-[midstream bounds](https://github.com/cgwalters-forge/tracker/blob/main/.github/agentic-job/midstream.toml)
-list bootc, composefs-rs, bcvk, rpm-ostree and gh-agentic-workflows under
-`cgwalters-forge`; the effective implement/fix bounds at admission remain
-authoritative. Ostree is **not** in that list: adding it or any other fork
-requires a separate operator bounds decision. A runner profile grants no
-target authority. A draft links the external run; VM logs and RESULTS-style
-evidence stay in that run's bounded artifacts, not pasted into the PR.
+Set a deadline and destroy each disposable host and its guests on success,
+failure and cancellation. Fetch and check do not manage their lifecycle.
 
 ### Repeated-test evidence and acceptance
 
-The evidence is one bounded file, `test-evidence.json`, in the hand-back
-beside the patch, so tracker's re-check collects it with the rest.
-For example, a bootc install test requested three times records the exact
-tested commit (including the proposed patch), image digest, test identifier
-and command, profile and effective resources, planned attempt count `3`,
-and each attempt's exit status, duration and artifact-relative log/RESULTS
-paths. Record `pass`, `fail`, `skipped` or `not-run` for every attempt;
-one pass after two failures is not three passes. A changed patch/head needs
-a new evidence set. Check validates the bounded evidence manifest and its
-association with the checked patch; it cannot prove test truth from prose.
-Cancellation or missing logs cannot count as a successful repeated run.
-The manifest must bind the checked-out base/head and the patched tree.
-Check holds the base and head to the checked patch's base. Apply refuses
-any tree other than the one its trial makes by applying that patch. Attempt
-counts must fit the profile's `max-attempts`, which tracker's bounds carry
-as `[github.test_evidence] max_attempts`. Each attempt has one outcome and
-one regular-file log, within the bounds' `max_log_bytes`. Failed attempts are not dropped; the draft
-summarizes the count of each outcome and links the external run.
-
-Runtime acceptance remains outstanding: demonstrate an admitted external
-run and its hand-back applied as one draft on an allowed midstream fork.
-Negative tests must refuse unknown and disabled profiles, a malformed map,
-a `fix`, `pool`, `effort` or non-hosted `config` with an external profile,
-unavailable KVM/libvirt, unauthorized targets (including ostree today), a
-download that does not match its digest, a wrong
-repository/workflow/commit/wrapper/triggering actor/run, a second attempt,
-no match or two matches for a `dispatch-id`, a replayed or late run, a
-hand-back on another base, and absent, failed, skipped or bypassed threat
-detection.
-Also prove cleanup after cancellation/runner loss and absence of write or
-lifecycle credentials in agent/test processes.
-Each negative proof needs its positive control: an enabled profile starts,
-a KVM-capable host boots and destroys a minimal guest, one run matches its
-`dispatch-id`, and an allowed midstream target receives one draft. No
-runtime proof has run here.
+Opt in to [repeated-test evidence](safe-outputs.md#repeated-test-evidence)
+to bind accepted attempts and logs to the patch. Include failures and skips.
+Validation is not proof a test ran, and missing evidence does not block a draft.
 
 ## Forgejo Actions caller
 
-This is a caller-specific integration example with agent-board, not a
-requirement for adopting agentic-job.
-
-[workflow/forgejo/dispatch.yml](../workflow/forgejo/dispatch.yml) is the
-caller agent-board's Forgejo dispatch starts; a caller copies it to
-`.forgejo/workflows/dispatch.yml` in its own repository. It is kept out of
-this repository's `.forgejo/workflows/`, because any file there makes a
-Forgejo mirror of this repository ignore `.github/workflows/`. It only
-supports an opt-in scripted trial through check; it neither publishes nor
-runs an agent.
-
-Its `workflow_dispatch` inputs are strings matching agent-board's job plan:
-`task`, `repo` (`OWNER/NAME`), `item`, `kind`, `pool` and `base`. The run is
-named `KIND REPO#ITEM (POOL)`, which agent-board's in-flight listing matches.
-Runs are grouped per kind, repository and item with `cancel-in-progress: false`,
-so a second dispatch for an item waits for the first; no group is shared
-across items.
-
-The caller sets these repository variables:
-
-- `TRIAL_FORGEJO_URL`: the Forgejo instance's URL, never taken from the event.
-- `AGENT_BOUNDS`: the absolute path of the caller's bounds file on the
-  runner, provisioned there by the runner's owner and not writable by jobs.
+Use the [scripted Forgejo trial](try-forgejo.md) with a dispatch repository
+distinct from both the public target and publisher's fork. Do not put a
+publishing token on any runner available to the dispatch repository: the
+automatic job token already has write access to that repository.
 
 ### Scripted Forgejo trial
 
-- Set `TRIAL_SCRIPTED` to `true` to enable the trial. The job otherwise
-  refuses before anything else runs; it only accepts an `implement` dispatch
-  on the caller's exact default branch.
-- Set `TRIAL_RUNNER` to the JSON label or array for a trusted, isolated
-  runner. Provision a pinned `agentic-job` binary, Bash, Git and jq.
-- In `AGENT_BOUNDS`, admit the trial's public target and base, allow one
-  `create_pull_request` under `[forgejo.outputs]`, and set `[forgejo].push_repo`
-  to the bot's fork. The other keys are top-level, as in
-  [the bounds and the policy](safe-outputs.md#the-bounds-and-the-policy);
-  `allow_http` is needed only for a plain-HTTP forge and names its
-  authority, port included. A minimal trial file:
+| Repository variable | Value |
+| --- | --- |
+| `TRIAL_SCRIPTED` | `true`; accepts only `implement` on the default branch. |
+| `TRIAL_RUNNER` | JSON runner labels for a trusted isolated runner with pinned `agentic-job`, Bash, Git and jq. |
+| `TRIAL_FORGEJO_URL` | Forgejo instance URL. |
+| `AGENT_BOUNDS` | Absolute path to runner-provisioned bounds, not writable by jobs. Admit the public target and base, set `[forgejo].push_repo` to the separate fork, and bound `[forgejo.outputs]` to one `create_pull_request`. |
 
-    ```toml
-    hosts = ["forgejo.example:3000"]
-    allow_http = ["forgejo.example:3000"]
-    repos = ["example/target"]
-    bases = ["main"]
-    max_outputs = 1
-    max_patch_bytes = 65536
-    max_patch_files = 1
-
-    [forgejo]
-    push_repo = "example-bot/target"
-
-    [forgejo.outputs]
-    create_pull_request = { max = 1 }
-    ```
-
-- Do not provision a publishing PAT, even a trial PAT, as a dispatch repository
-  secret or on any runner available to that repository. A runner label does not
-  restrict access to a workflow or ref, and the automatic job token can write
-  to the dispatch repository. If you installed the earlier draft, detach its
-  apply runner and revoke its PAT before enabling this trial.
-- Use a dispatch repository distinct from the target and the fork. Forgejo's
-  automatic job token can write to the dispatch repository. The job refuses,
-  before any Git read, a target or publishing fork that is that repository.
-
-The trial is one job of shell steps with no `uses:` step: Forgejo's automatic
-job token can write to the dispatch repository despite `permissions: {}`, so
-no action code, checkout or artifact transfer runs beside it. The job compiles
-the policy once, reads the admitted base SHA anonymously without following
-redirects, so a renamed target is refused until the bounds name it. The read
-starts from an empty environment apart from `PATH`, so a private target is
-refused whatever credential the runner's Git configuration, netrc or askpass
-holds; it also uses no proxy, so the runner must reach the forge directly. It
-then writes a one-file patch and one draft PR request, and checks them
-against the runner's bounds. A refused check fails the job. The checked hand-back stays in the job's temporary directory; nothing
-is uploaded or published. This is not an agent sandbox. CI checks that no
-publication credential is wired into the caller, a tripwire rather than a
-test of what a job can reach, and runs its producer and check scripts
-against its test service. It does not exercise the Forgejo Actions runner.
-
-The trial ends at check: it opens no draft pull request. Publication from
-Actions, the agent session, its inference registration and its hand-back
-transport remain unwired. Publication needs a credential
-boundary enforced by workflow and ref outside the dispatch runners' reach.
-Container runners for the session still need #1347.
-
-## Verification
-
-`cargo test -p agentic-job dispatch` covers every preflight refusal and each
-profile's task text; the dispatch tests in
-[tests/workflows.rs](../crates/agentic-job/tests/workflows.rs) check the
-caller's shape, and `the_shipped_dispatch_setups_hand_back_through_a_fake_agent_session`
-plays every shipped session; `cargo test -p agentic-job review`
-covers hostile review routing and output cases.
-CI calls the **same dispatch.yml**, running research wherever it runs its
-end-to-end jobs, plus review on PRs; triage takes the same path with other
-profile text. CI does not run implement because it has no PAT to
-create forks. Its separate verifier checks the issue comments and the review
-verdict, then existing CI cleanup removes the comments. Fork PRs skip these
-jobs.
-These tests do not prove real-model quality or connectivity to a private broker.
+Success means the one-file patch and draft request passed check, not that
+a pull request was opened.
