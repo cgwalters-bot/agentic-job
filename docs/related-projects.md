@@ -48,7 +48,7 @@ one compared.
 [feature table](background-ghaw.md#feature-comparison),
 [what remains borrowed](background-ghaw.md#what-remains-borrowed),
 [what could go upstream](background-ghaw.md#what-could-go-upstream) and
-[how cross-repository coordinators fit](background-ghaw.md#across-repositories-gh-cao-and-agent-board).
+[how cross-repository coordinators fit](background-ghaw.md#coordinators-across-repositories).
 
 ## Paperclip
 
