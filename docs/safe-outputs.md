@@ -1706,7 +1706,10 @@ pushes to any head repository but its own fork only when one of two sources
 accepts it: the caller's bounds match that head repository, or its default
 branch has `.github/agentic-job/accept-owner-branches` naming that repository
 (`owner/repo`) on a line of its own. Write access alone is not acceptance;
-a fork's inherited file naming its parent does not accept the fork.
+a fork's inherited file naming its parent does not accept the fork. Neither
+source accepts a fix push of workflow files the agent wrote; that needs
+`.github/agentic-job/accept-workflow-pushes` as well
+([the `.github` exemption](#the-bounds-and-the-policy)).
 
 The threat is running agent-written code in a repository whose workflows can
 reach credentials or other privileged resources. The caller may choose to
@@ -1867,7 +1870,7 @@ forge serves a fork pull request's head from the target too) and starts there:
   leaves nothing to push to); it refuses a head repository its
   identity cannot push to, saying so, one that is neither a fork of the target nor the
   target, the calling repository unless it is the target, a branch of the
-  target itself that the target does not accept, and the `.github` exemption anywhere but its own fork. For a pull request from that
+  target itself that the target does not accept, and the `.github` exemption in the calling repository or, outside its own fork, in a head repository that does not accept workflow pushes. For a pull request from that
   fork it makes or finds the fork and turns its Actions off, as for a new
   pull request. gh-aw's handler is given the head repository as the only one
   it may push to, and refuses a pull request from any other;
@@ -2110,14 +2113,25 @@ exempts a patch only where policy is told that its destination is that
 checkout. The policy workflow says so when `output-repo` is unset or names
 the checkout. A pull request to any other repository keeps every protection.
 A fix push still requires the open PR and head
-repository/branch checks described above, and is refused the exemption
-anywhere but apply's own fork. A repository
+repository/branch checks described above. Outside apply's own fork, a workflow
+file the agent wrote runs on the push with the head repository's secrets,
+choosing its own triggers and token permissions, before anyone reviews it.
+Accepting the account's branches there does not accept that: apply refuses the
+exemption unless the head repository's default branch also holds
+`.github/agentic-job/accept-workflow-pushes` naming that repository on a line
+of its own, and always in the calling repository, which holds the run's own
+secrets.
+Caller bounds cannot accept it for the head repository. Refusing the calling
+repository does not cover organization secrets: before opting in, make sure
+no secret the head repository's workflows can read, such as the apply
+credential shared across the organization, reaches the calling repository. A
+repository
 [its applying account owns](workflow.md#a-repository-the-applying-account-owns), whose
 new pull request's branch is pushed to it and not to a fork, cannot have the `.github`
-exemption either: apply refuses the pull request. Workflow changes are pushed only to
-apply's fork, which has Actions turned off, and reach the repository as a
-fork pull request. Its `pull_request` CI gets no secrets and a read-only
-token, not the target repository's write credentials. Operators must configure
+exemption: apply refuses the pull request. A new pull request's workflow
+changes are pushed only to apply's fork, which has Actions turned off, and
+reach the repository as a fork pull request. Its `pull_request` CI gets no
+secrets and a read-only token, not the target repository's write credentials. Operators must configure
 and enforce pre-merge review and the intended required checks; the exemption
 does not provide these merge protections automatically. If relying on the trusted
 [workflow ingress check](workflow-ingress.md) as a merge gate, an administrator
@@ -2145,8 +2159,9 @@ hardening, not prerequisites for the exemption:
   members and collaborators bypass it.
 
 The apply credential needs classic PAT `repo` and `workflow` scopes (or a
-fine-grained token with Contents and Workflows write permissions on the fork)
-to push workflow files. No agent or check job gains a write credential.
+fine-grained token with Contents and Workflows write permissions on the fork,
+and on each head repository that accepts workflow pushes) to push workflow
+files. No agent or check job gains a write credential.
 
 `policy.json` holds, as `safe_outputs`, gh-aw's own configuration format:
 the collector reads that part as it is. The additional `unprotected_dot_folders`

@@ -444,9 +444,13 @@ its own credential and, before it forks, fetches or pushes anything for it,
 refuse one that is not open, whose branch is not the policy's, or whose
 branch is its head repository's default branch, protected, or one a ruleset
 applies to, and a head repository its identity cannot push to, naming that
-reason. For one not from its own fork (which RC-021 checks and turns
-Actions off in), it MUST also refuse the `.github` exemption, a head
-repository that is neither a fork of the output repository nor that repository, the calling
+reason. It MUST refuse the `.github` exemption in the calling repository.
+For one not from its own fork (which RC-021 checks and turns
+Actions off in), it MUST also refuse the `.github` exemption unless that head
+repository's default branch has the file
+`.github/agentic-job/accept-workflow-pushes` naming it on a line of its own,
+which neither caller bounds nor `accept-owner-branches` stand in for. For
+such a pull request it MUST also refuse a head repository that is neither a fork of the output repository nor that repository, the calling
 repository unless it is the output repository, and a branch of the output repository or of
 another's fork unless that head repository's default branch has the file
 `.github/agentic-job/accept-owner-branches` naming that repository on a

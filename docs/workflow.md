@@ -1678,9 +1678,9 @@ must not check out or run the pull request's code.
 A `push_to_pull_request_branch` goes to the branch of its pull request
 wherever that is: to this fork the same way, and otherwise to another
 fork of it the account may push to, or to a branch of the output
-repository, only where that head repository accepts it and never with
-`.github` exempted;
-never to a default or protected branch
+repository, only where that head repository accepts it, and with `.github`
+exempted only where it also accepts workflow pushes (never in the calling
+repository); never to a default or protected branch
 ([pushing to a pull request's branch](safe-outputs.md#pushing-to-a-pull-requests-branch)).
 Apply checks this before it fetches or pushes anything, and gives the push
 handler that repository as its `head-repo`, which refuses any other.
@@ -1755,7 +1755,8 @@ An account has no fork of its own repository, so apply refuses an output
 repository owned by the user `GET /user` names, unless the repository
 accepts its owner's branches through either the caller's `own-branch-repos`
 bounds or its default-branch `.github/agentic-job/accept-owner-branches`
-file. A fix push uses the same two sources; see the
+file. A fix push uses the same two sources, and with `.github` exempted
+also needs `.github/agentic-job/accept-workflow-pushes`; see the
 [acceptance policy and CI trade-off](safe-outputs.md#pushing-to-a-pull-requests-branch).
 
 Then a new pull request's branch is pushed to that repository itself and

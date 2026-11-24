@@ -24,8 +24,11 @@
 //!   (gh-aw's handler refuses those too, but goes on where it cannot read);
 //! - a repository the user cannot push to is refused here, with that
 //!   reason, rather than by the forge mid-apply;
-//! - never with `.github` exempted, as a workflow file the agent wrote
-//!   would run there with them: only the user's fork has Actions off;
+//! - with `.github` exempted, a workflow file the agent wrote runs there
+//!   with them: outside the user's fork, which has Actions off, only where
+//!   the head repository accepts that apart from its branches
+//!   ([`WORKFLOW_PUSHES`]), and never in the calling repository, which
+//!   holds the run's own;
 //! - a branch of the output repository itself, or of another's fork of
 //!   it, only where the caller's bounds accept it or that repository does
 //!   ([`OWNER_BRANCHES`] naming it on its default branch), and of no
@@ -38,7 +41,9 @@
 //! the fork, where the caller's bounds set `in-repo-pull-requests` and their
 //! `own-branch-repos` accept that repository, so that a later run can stack
 //! on it: only a run's own [`IN_REPO_BRANCH_PREFIX`] branch, never the
-//! default branch or a protected one, and never with `.github` exempted.
+//! default branch or a protected one, and never with `.github` exempted:
+//! unlike a fix's branch, which a person opened, no pull request there asks
+//! for the agent's workflow files yet.
 
 use std::path::{Path, PathBuf};
 
@@ -63,13 +68,19 @@ use crate::{CREATE_PULL_REQUEST, PUSH_TO_PULL_REQUEST_BRANCH};
 /// holds the target's file, which names the target.
 pub const OWNER_BRANCHES: &str = ".github/agentic-job/accept-owner-branches";
 
+/// The same for a fix push with `.github` exempted, to a head repository
+/// other than apply's own fork: a workflow file the agent wrote runs on
+/// that push with the repository's secrets, which accepting branches does
+/// not accept, and caller bounds cannot accept for it.
+pub const WORKFLOW_PUSHES: &str = ".github/agentic-job/accept-workflow-pushes";
+
 /// Where a new pull request's branch pushed to the output repository
 /// itself (`in-repo-pull-requests`) starts: the dispatch workflow's
 /// `dispatch/KIND/`, before a run's `agent-run-ID`.
 pub const IN_REPO_BRANCH_PREFIX: &str = "dispatch/";
 
 /// More than a name or two is not an opt-in file.
-const OWNER_BRANCHES_MAX: usize = 4096;
+const OPT_IN_MAX: usize = 4096;
 
 /// The most of config.json and agent_output.json read: what the collector
 /// bounds them to.
@@ -267,12 +278,13 @@ fn caller_accepts(config: &Value, name: &str) -> Result<bool> {
 
 /// Whether checked caller bounds or NAME's default-branch file accept NAME.
 fn accepts_owner_branches(github: &Github, config: &Value, name: &str) -> Result<bool> {
-    if caller_accepts(config, name)? {
-        return Ok(true);
-    }
+    Ok(caller_accepts(config, name)? || names_itself(github, name, OWNER_BRANCHES)?)
+}
+
+/// Whether NAME's default branch holds the opt-in file PATH naming NAME.
+fn names_itself(github: &Github, name: &str, path: &str) -> Result<bool> {
     // Without a ref this reads the default branch.
-    let Some(file) = github.get_optional(&format!("/repos/{name}/contents/{OWNER_BRANCHES}"))?
-    else {
+    let Some(file) = github.get_optional(&format!("/repos/{name}/contents/{path}"))? else {
         return Ok(false);
     };
     let content = file["content"].as_str().filter(|_| {
@@ -280,7 +292,7 @@ fn accepts_owner_branches(github: &Github, config: &Value, name: &str) -> Result
             && file["encoding"] == "base64"
             && file["size"]
                 .as_u64()
-                .is_some_and(|size| size <= OWNER_BRANCHES_MAX as u64)
+                .is_some_and(|size| size <= OPT_IN_MAX as u64)
     });
     let Some(content) = content else {
         return Ok(false);
@@ -292,7 +304,7 @@ fn accepts_owner_branches(github: &Github, config: &Value, name: &str) -> Result
     let Ok(text) = BASE64.decode(content) else {
         return Ok(false);
     };
-    Ok(text.len() <= OWNER_BRANCHES_MAX
+    Ok(text.len() <= OPT_IN_MAX
         && String::from_utf8_lossy(&text)
             .split('\n')
             .any(|line| line.trim().eq_ignore_ascii_case(name)))
@@ -646,10 +658,14 @@ fn head(github: &Github, config: &Value, args: &TargetArgs, me: &str) -> Result<
     let own =
         pull["head"]["repo"]["fork"] == true && same(&pull["head"]["repo"]["owner"]["login"], me);
     let itself = name.eq_ignore_ascii_case(output);
+    // Elsewhere the exemption needs the head repository's own
+    // WORKFLOW_PUSHES below. Never the calling repository, where such a
+    // file would run with the run's own secrets.
     ensure!(
-        own || !exempts_github(push),
-        "{what} is from {name}, not from {me}'s fork with Actions turned off: a workflow file the \
-         agent wrote would run there, so it is not pushed to with .github exempted from protection"
+        !(exempts_github(push) && name.eq_ignore_ascii_case(&args.calling_repo)),
+        "{what} is from {name}, the calling repository, which holds the run's secrets: a workflow \
+         file the agent wrote would run there with them, so it is not pushed to with .github \
+         exempted from protection"
     );
     let head = github.send("GET", &format!("/repos/{name}"), None)?;
     // Write access, not a pull request's "maintainers may edit": that lets
@@ -705,6 +721,12 @@ fn head(github: &Github, config: &Value, args: &TargetArgs, me: &str) -> Result<
              {OWNER_BRANCHES} naming {name} to its default branch to accept that, or accept it in the caller's own-branch-repos bounds"
         );
     }
+    ensure!(
+        own || !exempts_github(push) || names_itself(github, name, WORKFLOW_PUSHES)?,
+        "{what} is from {name}, not {me}'s fork with Actions turned off: a workflow file the agent \
+         wrote would run there with its secrets, so it is pushed to with .github exempted from \
+         protection only where {WORKFLOW_PUSHES} naming {name} is on its default branch"
+    );
     let current_base = if args.replacement {
         let upstream = config
             .get("upstream_pull_request_base")
@@ -738,6 +760,10 @@ mod tests {
     const RULES: &str = "GET /repos/carol/r/rules/branches/fix/x";
     const ACCEPTS: &str = "GET /repos/carol/r/contents/.github/agentic-job/accept-owner-branches";
     const OWN_ACCEPTS: &str = "GET /repos/o/r/contents/.github/agentic-job/accept-owner-branches";
+    const WORKFLOWS: &str =
+        "GET /repos/carol/r/contents/.github/agentic-job/accept-workflow-pushes";
+    const OWN_WORKFLOWS: &str =
+        "GET /repos/o/r/contents/.github/agentic-job/accept-workflow-pushes";
     const FORK: &str = "POST /repos/o/r/forks";
     const ACTIONS: &str = "PUT /repos/bot/r/actions/permissions";
     const IN_REPO_BRANCH: &str = "GET /repos/o/r/branches/dispatch/implement/agent-run-7";
@@ -1371,6 +1397,27 @@ mod tests {
                 pushed_to("o/r", None),
             ),
             (
+                "another's fork that accepts it and workflow pushes, with .github exempted",
+                |c| {
+                    c.set(WORKFLOWS, 200, naming(&["Carol/R"]));
+                    c.config[PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
+                        json!([".github"]);
+                },
+                pushed_to("carol/r", None),
+            ),
+            (
+                "a branch of the repository itself, which accepts it and workflow pushes, with \
+                 .github exempted",
+                |c| {
+                    c.from("o/r", false);
+                    c.set(OWN_ACCEPTS, 200, naming(&["o/r"]));
+                    c.set(OWN_WORKFLOWS, 200, naming(&["o/r"]));
+                    c.config[PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
+                        json!([".github"]);
+                },
+                pushed_to("o/r", None),
+            ),
+            (
                 "the same where the output repository calls the run itself",
                 |c| {
                     c.from("o/r", false);
@@ -1585,22 +1632,54 @@ mod tests {
                 "or is the calling repository",
             ),
             (
-                ".github exempted, outside the fork with Actions off",
-                |c| {
-                    c.config[PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
-                        json!([".github"]);
-                },
-                "not from bot's fork with Actions turned off: a workflow file",
-            ),
-            (
-                ".github exempted, in the repository itself",
+                ".github exempted, in the calling repository",
                 |c| {
                     c.from("o/r", false);
                     c.set(OWN_ACCEPTS, 200, naming(&["o/r"]));
+                    c.set(OWN_WORKFLOWS, 200, naming(&["o/r"]));
+                    c.calling_repo = "O/R";
                     c.config[PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
                         json!([".github"]);
                 },
-                ".github exempted",
+                "o/r, the calling repository, which holds the run's secrets",
+            ),
+            (
+                ".github exempted, in another's fork that accepts only its branches",
+                |c| {
+                    c.config[PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
+                        json!([".github"]);
+                },
+                "only where .github/agentic-job/accept-workflow-pushes naming carol/r is on its \
+                 default branch",
+            ),
+            (
+                ".github exempted, in a fork holding its parent's workflow opt-in",
+                |c| {
+                    c.set(WORKFLOWS, 200, naming(&["o/r"]));
+                    c.config[PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
+                        json!([".github"]);
+                },
+                "accept-workflow-pushes naming carol/r",
+            ),
+            (
+                ".github exempted, in the repository itself accepted only by caller bounds",
+                |c| {
+                    c.from("o/r", false);
+                    c.config["own_branch_repos"] = json!([["o/*"]]);
+                    c.config[PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
+                        json!([".github"]);
+                },
+                "accept-workflow-pushes naming o/r",
+            ),
+            (
+                ".github exempted, in another's fork that accepts only workflow pushes",
+                |c| {
+                    c.set(ACCEPTS, 404, json!({}));
+                    c.set(WORKFLOWS, 200, naming(&["carol/r"]));
+                    c.config[PUSH_TO_PULL_REQUEST_BRANCH]["unprotected_dot_folders"] =
+                        json!([".github"]);
+                },
+                "whose CI would run the pushed commit",
             ),
             (
                 "the repository itself, without its opt-in",

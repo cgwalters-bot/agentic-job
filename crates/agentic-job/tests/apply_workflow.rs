@@ -1593,7 +1593,13 @@ fn hide_comment_and_review_threads_are_held_to_triggering_item() {
 #[test]
 fn carriers_exempt_at_most_github_of_policy_dot_folders() {
     let (pr, push) = handler_settings();
-    for carrier in ["create_pull_request", "push_to_pull_request_branch"] {
+    // A push's head is apply's fork or one `push target` admitted, which
+    // refuses the exemption where the head does not accept workflow pushes.
+    for (carrier, head) in [
+        ("create_pull_request", "bot/repo"),
+        ("push_to_pull_request_branch", "bot/repo"),
+        ("push_to_pull_request_branch", "carol/repo"),
+    ] {
         for folders in [
             None,
             Some(json!([])),
@@ -1616,7 +1622,7 @@ fn carriers_exempt_at_most_github_of_policy_dot_folders() {
                     ("READY", ""),
                     ("PULL_REQUEST", &pr),
                     ("PUSH", &push),
-                    ("FORK", "bot/repo"),
+                    ("FORK", head),
                 ],
             );
             status(&out, 0);
@@ -1643,8 +1649,8 @@ fn carriers_exempt_at_most_github_of_policy_dot_folders() {
             for key in ["max_patch_size", "max_patch_files"] {
                 assert_eq!(got[key], json!((1u64 << 53) - 1), "{carrier}: {key}");
             }
-            assert_eq!(got["head-repo"], "bot/repo");
-            assert_eq!(got["allowed_repos"], json!(["bot/repo"]));
+            assert_eq!(got["head-repo"], head);
+            assert_eq!(got["allowed_repos"], json!([head]));
             let other = if carrier == "create_pull_request" {
                 "push_to_pull_request_branch"
             } else {

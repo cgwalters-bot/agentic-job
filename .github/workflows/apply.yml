@@ -475,7 +475,9 @@ jobs:
           PULL_REQUEST: '{"signed_commits": false, "fallback_as_issue": false, "preserve_branch_name": true, "auto_close_issue": false}'
           # A push that fails is not to become a pull request, and an
           # empty one fails. Workflow edits require the exact-repository
-          # exemption and the owned fork checked above, with Actions off.
+          # exemption and a head repository the target step admitted:
+          # the owned fork, with Actions off, or one accepting workflow
+          # pushes that is not the calling repository.
           # Unsigned, as above. No title prefix: the push handler would
           # take it for one the pull request's title must have.
           PUSH: '{"signed_commits": false, "fallback_as_pull_request": false, "if_no_changes": "error"}'
