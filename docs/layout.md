@@ -85,8 +85,9 @@ settings from redirecting the run token, filters its environment, and
 knows its token file, API route, instruction files and cost reporting.
 Limits depend on recognizing its subagent tool names and on its reported
 usage, so test against the real adapter, not only generated
-configuration. The [agent-extension recipe](harness.md#adding-an-acp-agent-to-run)
-lists the files to change and the security tests to add.
+configuration. See the
+[ACP agent registry](../crates/agentic-job/src/session/agents.toml) for
+adapter-specific requirements.
 
 ## Other directories
 

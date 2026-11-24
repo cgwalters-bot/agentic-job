@@ -1,767 +1,154 @@
-# The ACP session
+# Agent harnesses
 
 > This text is LLM generated.
 
-`agentic-job run` drives its agent over the
-[Agent Client Protocol](https://agentclientprotocol.com): JSON-RPC
-between a client and an agent, the same for every agent that implements
-it. The session (`src/session/`) is the client. That gives one
-integration, a transcript with the same structure whatever the agent,
-permission requests as explicit messages, and a session a person could
-join ([interactive.md](interactive.md)). Where its code sits and what
-it is handed is in [layout.md](layout.md#the-session).
-
-CI drives the scripted `fake` agent. Real-agent deployment evidence is
-reported in the [workflow guide](workflow.md#what-has-run-and-what-has-not); configuration
-unit tests alone do not show that an adapter works.
-
-## What it does
-
-It starts the agent through the wrapper `run` gives it and speaks ACP
-over the agent's standard input and output; nothing listens on the
-network. The runner-only path uses `--runner-home`: the agent is the runner's user
-too, so it can write the session's files, the transcript and limits
-included, read same-UID process state and `run`'s environment and stop `run`; the record is then
-evidence of what the agent let through, not a guarantee
-([requirements.md](requirements.md#actors-and-trust)). The agent's
-environment holds none of the job's `ACTIONS_*` variables and none of
-its inherited provider settings. Clearing those variables does not hide
-credentials in same-UID files, processes or memory. The old `run0` path was
-removed in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991);
-no second user should be introduced to bypass the runner-mode refusals below.
-
-It sends the task as one prompt and advertises no filesystem or
-terminal capability, so the agent uses its own tools inside the
-sandbox. Every message in both directions is recorded as it passes.
-This does not restrict the agent's tools: Claude Code still offers its own
-Read, Edit and Write in the session's working directory.
-`just claude-acp-test` checks this against the pinned adapter and a loopback
-stub. The run's prompt tells every agent to change files with its edit
-tools, and `shell_edits` in `summary.json` flags a change made without
-calling any of them.
-
-It answers permission requests from a policy: allow, except a `git
-push` and an edit, delete or move outside the sandbox user's home. An
-allow is the agent's "allow once", never "allow always". This is for
-tidiness and for the record, since an agent only asks when it chooses
-to: the [sandbox](sandbox.md) is the boundary.
-
-When the session ends in runner mode, it kills only the agent's process group.
-processes the agent detached from its group run until the job ends.
-[layout.md](layout.md#run) describes what `run` leaves under `--out`.
-
-An agent that makes no model request in its first five minutes must not hold
-a runner until the full timeout. When the inference proxy's count is known
-and still zero, the budget watcher ends the session as `no_requests`, with
-retryable exit 4 and a `stall` failure in the summary, not success. Before
-killing it, the session logs bounded process state (including the sandbox
-user's processes) and its last stdout and stderr. No deadline applies when
-the count is unavailable, including direct providers without a run API.
-
-A run that allows outputs gets one reminder if it ends without a hand-back,
-then fails if none is left. A fix can leave a change for the pull request's
-branch, a replacement series, or a `noop` or `missing_data` request with a
-reason. An unfinished rebase or unmerged index prevents completion even if
-a request exists; the reminder names that state. These checks run under the
-session's existing limits and do not replace output validation.
+The harness starts the agent, sends it the task, watches its limits and records
+the session. Choose an agent that works with your [inference endpoint](inference.md),
+set limits, then use the run summary to see what happened.
 
 ## Agents
 
-### Reading a session in the summary
-
-The session is included in the run summary by default. Set
-`render-session = false` in `[agent]` in the repository-owned sandbox
-configuration to opt out; there is no dispatcher input.
-The runner renders its redacted ACP copy, not agent-supplied Markdown, but
-the same-UID agent can tamper with that copy too. User and assistant text is prose;
-reasoning and tools are collapsed separately. Tools show arguments, measured
-duration, reported status and exit code when available, and at most 8192 bytes
-of output with an omitted-byte count. Transcript punctuation is encoded to
-prevent HTML or Markdown injection, including closing a generated details block.
-Joined text is redacted again so secrets split across streamed chunks stay hidden.
-Tool labels retain the initial name when opencode replaces its title with a
-command or filename; the updated arguments remain visible inside the block.
-
-`session.md` in the `agent-run` artifact contains the complete rendered session
-(tool outputs are still bounded). The summary reserves space for accounting
-and stays below GitHub's 1 MiB limit: assistant prose is retained first, then
-head and tail blocks. If assistant prose alone exceeds the limit, each message
-is abbreviated; the artifact keeps it.
-
-A subagent's messages and tool calls render inside the call that started it
-when the agent identifies that call (Claude Code does; opencode and vibe
-report only the call's output). Each step shows the context's tokens as the
-agent reports them. Where it reports the session's running cost in USD, each
-reading shows what the turn added, and the three costliest turns are bold;
-`session/prompt` responses show their turn's tokens. These are the agent's
-figures, not the inference proxy's.
-
-To replay a long real run in the renderer regression test, download its
-`*-agent-transcript` artifact and extract `acp.jsonl`, then run
-`SESSION_TRANSCRIPT=/absolute/path/acp.jsonl cargo test --locked --lib real_long_session_summary_and_artifact -- --ignored --nocapture`.
-The test checks the full artifact and summary, then forces a smaller preview
-budget to check prose retention. The ordinary suite separately covers overflow
-of the 1 MiB limit with 150 tool calls. Real transcripts stay external, like
-the corpus inputs, rather than committing whole task conversations.
-
-Claude currently runs through `claude-agent-acp`, not native stream-json.
-This renderer uses that recorded protocol. Native stream-json ingestion,
-subagent nesting for opencode and vibe, which do not say which call started
-a message, and agent-specific opencode/vibe fidelity remain follow-ups. No sandbox transcript
-collection or additional permissions are introduced.
-
 ### Agent adapters
 
-The deliverable is the `agentic-job` binary: the session, `run` and its
-launchers, released as a static build beside `fake-agent` and
-`secure-host`. The agents it drives are programs of their own, and
-installing them, at versions of the caller's choosing, is to be the
-caller's; today the reusable workflow installs the binary's own pins
-(`setup.agents`). See [who installs the agents](sandbox.md#who-installs-the-agents)
-for installation and `PATH` requirements and the proposed deprecation.
-
-To the session, an agent is an entry of `session/agents.toml`, built into
-the binary: its command, how it is told the model, and whether it takes
-notices. This is not a caller-extensible registry for `run`: `run` also
-has a closed `Kind` enum and agent-specific configuration and launcher
-code. ACP makes the session transport common, not provider setup, and it
-does not make any version of an agent work. The entries differ in how
-each comes to speak ACP, which decides what a caller can install:
-
-- `opencode` speaks ACP natively: `opencode acp`.
-- `claude` is Claude Code through an external adapter,
-  `claude-agent-acp` (`@agentclientprotocol/claude-agent-acp`, a package
-  of its own that brings the Claude Agent SDK), run by the host's `node`.
-  The adapter is a dependency between the session and Claude Code,
-  maintained outside both; its version, not
-  Claude Code's, is what the session's entry was written against.
-- `vibe` is a bespoke shim: a Python launcher that `agents.toml` embeds,
-  run by the interpreter of a virtualenv at the fixed path
-  `/opt/agentic-job/vibe` that setup makes. A Vibe installed anywhere
-  else is not found, and the launcher calls that version's internals.
-  Shims of this kind are to leave this repository for a project of their
-  own, destination not chosen; [below](#what-moving-a-shim-out-must-keep)
-  is what the move must keep.
-- `fake` is `fake-agent demo`, which plays a recorded session and needs
-  no model.
-
-The versions the reusable workflow installs, and the only ones this
-repository's tests run against, are opencode-ai 1.18.35, claude-agent-acp
-0.88.0 and mistral-vibe 2.26.1. Installing another is the caller's
-choice and risk: nothing checks it, and the entry's contract is what
-breaks with a version, such as how the agent reports a model set over
-ACP, the words a refused model request ends a turn with
-(`provider-error`), steering, stalls and the configuration keys the
-launcher writes. Supported versions are the tested ones; a test against a
-caller-installed agent, outside the pins, is part of the staged migration
-and not yet there.
-
-Vibe's entry uses its legacy Python ACP runtime, through its library
-entrypoint with only the user configuration source and isolated Python
-imports: `.vibe/config.toml`, project profiles and checkout modules
-cannot redirect inference. Both built-in provider
-names are replaced with the broker's `/mistral/v1` chat-completions route;
-the caller's model is selected under its own name, which Vibe reports over
-ACP and tells the model it is, and also replaces the built-in model, which
-Vibe's default and fallback paths select. A model named `devstral-2`, which
-Vibe renames to the built-in's, is refused.
-Mid-turn notices are not supported. That broker model uses text-only tools
-rather than inheriting Medium 3.5's capabilities. Its context window is
-its entry of `context-windows` in `[agent]` in the repository-owned
-configuration, for the main agent and the child alike, and Vibe compacts
-at three quarters of it. `agentic-job config` refuses a window over 1,048,576,
-which keeps a request under the broker's 16 MiB body limit.
-Without an entry a model gets a conservative 32k, compacted at 24k, at
-which a GLM research task compacted 18 times and lost its findings
-(#821). Z.ai documents a 1M window for GLM-5.3; check what the broker's
-provider serves before claiming it:
+For standalone `agentic-job run`, this TOML fragment selects Claude Code
+with a provider that resolves `opus`. Add the required
+[`[inference]` URL and registration mode](inference.md#what-run-does) and
+[`[limits]` settings](#limits) to make a run configuration:
 
 ```toml
-[agent.context-windows]
-"zai-glm-5-3" = 1048576
+[agent]
+name = "claude"
+model = "opus"
 ```
 
-Each model's reply is capped by its `max_output_tokens`, at most 65,536.
-A model without one gets 32,000, or a quarter of its declared window if
-that is less: 8,192 for the job's own model. Uncapped, one response ran
-past the broker's body limit. The legacy runtime ignores the model's
-`max_output_tokens`, so the session also sends the active model's cap as
-Vibe's undeclared `max_tokens` session config option, which that runtime
-sends with every model request. That runtime does not fail a reply cut
-off at the cap; how a model recovers from one has not been tested.
-Vibe 2.26.1 does not retry a model stream that ends without a finish
-reason, and retries a dropped connection only before the first chunk. Only
-its terminal interface retries those, and no setting enables that for ACP.
-Over ACP the failure is a generic internal error, which the session cannot
-tell from others to resend the turn. Such a run fails: a known limitation.
+For the GitHub reusable workflow, set `with.agent`, `with.model`,
+`with.timeout` and `with.max-requests` to override the corresponding settings
+in `with.config`. Even if omitted, `with.agent`, `with.timeout` and
+`with.max-requests` override the file with their defaults: `fake`, 60 minutes
+and 150 requests. Follow the [real agent checklist](workflow.md#real-agent-checklist)
+for broker setup and limits.
 
-A configuration repository (`agent-config-repo`, `agent-config-path`) may
-instead declare the models, in its `config.toml`. Only its `[[models]]`
-(at most 32) and `active_model`, the alias of one of them, are taken; each
-model's `provider` must be `mistral` or `llamacpp`, the two names the job
-writes as the broker, and a model may set only the fields of the pinned
-Vibe's model definition, none of them an address or a key, under an alias
-that is not Vibe's own (`mistral-medium-3.5`, `devstral-2`), which Vibe
-would merge with its built-in or rename. The file's
-providers and every other setting are ignored: they could send inference
-and the run token elsewhere, or turn on telemetry and connectors. The file
-holds no key. Its models' window, compaction, thinking and output settings
-apply as written; only `max-requests` bounds what they spend. A model the
-caller names still wins over `active_model`: it selects the declared model
-of that alias, else of that name, or, if none is declared, is added as
-above. Dispatch and review always pass `AGENT_MODEL`, so there the file
-only declares models. Vibe keeps its built-in model beside the file's, on
-the same broker provider, where it may serve as the image fallback of a
-text-only active model.
-Vibe's private generated TOML puts the run token in an Authorization
-header, with no provider key or browser login. Telemetry, experiments,
-connectors and update checks are disabled. Instructions are pointed out
-in the task rather than automatically loaded from the project.
+| `[agent] name` | Program and tested version | Inference | Live nudges and item updates |
+| --- | --- | --- | --- |
+| `claude` | Claude Code via `@agentclientprotocol/claude-agent-acp` 0.88.0 | Anthropic-compatible | Yes |
+| `opencode` | `opencode-ai` 1.18.35 | A configured opencode provider | Yes |
+| `vibe` | `mistral-vibe` 2.26.1, installed by sandbox setup | Mistral-compatible broker route | No |
+| `fake` | The released `fake-agent` binary | None; use it to test a run without a model | Yes |
 
-The credentialless hosted adapter test uses generated configuration and
-a loopback model to verify ACP model selection, the output cap, a permission-requested
-file write, cancellation followed by hand-back, and hostile project config
-and import canaries. Run it with
-`AGENTIC_JOB_TEST_VIBE_PYTHON=/path/to/venv/bin/python3 cargo test --locked --test vibe -- --nocapture`
-after installing `mistral-vibe==2.26.1` there. This is adapter evidence,
-not a privileged sandbox or live broker test.
+Use the [installation and PATH requirements](sandbox.md#who-installs-the-agents)
+when provisioning an agent. Other versions aren't covered by the adapter tests.
+There is no caller-defined adapter registry. For contributor information, see
+[Adding an agent](layout.md#adding-an-agent).
 
-`run` does not start the real agents by those commands. It starts
-`agentic-job launch-agent NAME`, a hidden command that runs as the
-sandbox user, uses the generated agent configuration, sets the
-agent's environment and becomes the agent. So the binary must be where
-the sandbox user can run it, such as `/usr/local/bin`; `run` checks
-that before it clones. The agent's own program is not checked before:
-the launcher resolves it when the session starts it, and an agent that
-cannot be found fails the run then, exit state 1.
+| Optional `[agent]` setting | Effect |
+| --- | --- |
+| `config-repo`, `config-ref`, `config-path` | Claude Code, OpenCode and Vibe only. Load supported settings from a trusted public repository URL. The ref defaults to its default branch, and the path to its root. See [Claude and opencode configuration](workflow.md#agent-configuration-repositories-and-model-names) or the Vibe rules below. |
+| `[agent.context-windows]` | For Vibe models defined by the run, map model names to context windows in tokens. The default is 32,768; the maximum is 1,048,576. Match the window your provider actually serves. Models imported from a config repository declare their own. |
+| `fallback-model` | Claude Code and `fake` only. After retries for sustained provider overload, try one alternative model in the same session. The model must be available through the same provider. |
+| `skills`, `subagents` | Configure [skills or named worker subagents](skills.md). |
 
-#### What moving a shim out must keep
+For Vibe, the configuration repository's `config.toml` can supply up to 32
+`[[models]]` using `provider = "mistral"` or `"llamacpp"`. Each entry needs
+a broker model `name`. The optional selection `alias` defaults to `name`;
+aliases must be unique and cannot be `mistral-medium-3.5` or `devstral-2`.
 
-Vibe's launcher is in this repository because its ACP entrypoint enables
-project configuration unconditionally; the shim is what keeps a
-checkout from redirecting inference. Wherever such a shim ends up, and
-whatever installs a caller's agent, these hold, each from code the
-[recipe](#adding-an-acp-agent-to-run) below names:
+```toml
+active_model = "coding"
 
-- **Trusted installation.** Follow the
-  [caller installation and `PATH` requirements](sandbox.md#who-installs-the-agents)
-  so the task cannot replace the program or its dependencies.
-- **Managed settings.** Claude Code's managed settings
-  (`/etc/claude-code/managed-settings.json`) are root's, written by
-  `sandbox setup` or `prepare` from the same configuration `run` reads,
-  and `run` refuses any difference. They win over the user's and the
-  project's settings key by key, so a target repository cannot send the
-  conversation elsewhere. That does not depend on how the adapter was
-  installed, and a caller-installed adapter still needs them.
-- **Inference routing.** The launcher sets only what the run configured.
-  Nothing named `ACTIONS_*`, `ANTHROPIC_*`, `CLAUDE_*`, `OPENCODE_*`,
-  `VIBE_*` or `MISTRAL_*`, nor the run's own credential variables, is
-  inherited from the job (`NOT_INHERITED` in `session/process.rs`);
-  Claude's private environment file may set only `ANTHROPIC_*`. For
-  opencode, `run` sets the selected provider's `baseURL` to the proxy URL
-  and its `apiKey` to the run token.
-  The launcher disables project configuration, model fetching, default
-  plugins and external skills (`OPENCODE_SWITCHES`) and drops the XDG base
-  directories (except `XDG_RUNTIME_DIR`, for rootless podman). This does
-  not disable all plugins or guarantee the provider honors those options.
-  The caller must trust its configuration repository, distinct from the
-  untrusted target checkout, and the provider code it selects. Vibe's
-  launcher uses only the user configuration source and runs Python in
-  isolated mode, so `.vibe/config.toml`, project profiles
-  and checkout modules cannot redirect inference.
-- **Token placement.** Within the generated agent configuration, the run
-  token is written to one private file in the agent's home (0600, directory
-  0700). That is not the only copy: the hosted path passes the token in
-  `run`'s environment, readable by same-UID processes, and token-file mode
-  starts with a separate caller-provided file. Never put the token in argv,
-  the registry's `env`, public settings, managed settings or published logs.
+[[models]]
+name = "example-broker-model"
+alias = "coding"
+provider = "mistral"
+```
 
-These protections depend on how the launcher, host and agent work together.
-A new agent version may read a setting the launcher does not pin. A shim
-moved out needs the same review against the agent version it starts.
+`active_model` must select an imported model by alias and is required when
+the run does not supply a model. Other settings, including provider
+definitions, are not imported.
 
-### Adding an ACP agent to `run`
+## What it does
 
-Paths here are relative to `crates/agentic-job/src/`. Adding a TOML entry
-alone does not make a new `[agent] name` work. Keep provider setup in
-reviewed code: an agent's configuration precedence and alternate login
-paths cannot be secured by assuming it honors a base-URL variable.
+`agentic-job run` talks to the agent over standard input and output using the
+[Agent Client Protocol](https://agentclientprotocol.com) (ACP). The agent uses
+its own file and shell tools. ACP permission answers apply only to actions the
+agent asks about; the [sandbox](sandbox.md), not ACP, is the security boundary.
 
-First establish the adapter's contract. It must speak ACP on stdio and
-use its own filesystem and terminal tools (the client advertises neither).
-Identify the inference API it speaks, how it takes a base URL and run
-token, and how it selects a model. Check which user, project, environment,
-profile and login settings can override those choices. Determine whether
-a mid-turn `session/prompt` steers the current turn or ends it, how it
-ends a turn whose model request the provider refused, and test
-cancellation followed by the hand-back prompt against the actual adapter.
-
-The implementation recipe is:
-
-1. In `session/agents.toml`, add the ACP command and non-secret defaults.
-   Use `model-env` if the adapter selects its model with an environment
-   variable; otherwise the session uses ACP's `session/set_config_option`
-   with the `model` option, and fails the run unless the agent's answer
-   reports that exact value as current: so opencode's `provider/model/variant`,
-   reported without the variant, is refused. Neither a model from the
-   environment nor a later change of model is checked. Leave `notices`
-   false unless a mid-turn prompt is known to reach the next step without
-   ending the running turn.
-   Set `provider-error` to what the adapter's last message starts with
-   if it answers a turn whose model request was refused as done.
-   Registry `env` values go on the wrapped command line: never put a token
-   there, or in `command`.
-2. In `run/agent.rs`, extend `Kind`, its name/parser list and its matches.
-   Choose the proxy API route, declare the one token-bearing home file,
-   implement configuration generation and validation, and decide which
-   instruction files need to be pointed out in the task. If configuration
-   repositories are supported, explicitly select and validate their files;
-   do not copy a directory of plugins or tools. Pin or disable settings
-   that could redirect inference, enable alternate providers or load
-   project configuration. Tokens belong only in the private home file
-   (0600, directory 0700), never root-owned managed settings, argv or logs.
-   If managed settings are needed, provide them through `managed_settings`
-   for `sandbox setup`; `run` cannot write them after hardening. Keep
-   them to what holds inference and permissions: in an agent job setup is
-   the pinned secure-host image's release, older than `run` between
-   releases, and `run` refuses any difference. With an image of this
-   source, `sandbox prepare` writes them, from the policy job's binary,
-   before it.
-3. In `run/launch.rs`, add the agent's launch behavior: read the run's
-   configuration, set only the required environment, and execute the
-   registry command. Extend `KEPT` only for non-secret model settings that
-   must survive filtering. In `session/process.rs`, extend
-   `NOT_INHERITED` for the new agent's provider, credential and configuration
-   variables, so neither the wrapper nor agent inherits ambient settings.
-   Account for configuration-location variables too, while preserving the
-   login session variables needed by rootless containers. The launcher has
-   no privilege or credential the agent lacks; the sandbox and egress
-   policy remain the security boundary.
-
-The current integrations illustrate why the last two steps are code.
-Claude uses `ANTHROPIC_BASE_URL`, a private environment file and managed
-settings that override project provider switches. With the proxy run API,
-it sends a placeholder credential plus the run token in `x-run-token`;
-with token-file registration, the token is the credential itself. Its
-model is `ANTHROPIC_MODEL`, and mid-turn notices are disabled. opencode
-instead gets a single provider's `options.baseURL` and `options.apiKey`
-rewritten in its global JSON configuration; its launcher disables project
-configuration and model fetching. Its model is an ACP session option and
-mid-turn notices are enabled. See [inference.md](inference.md) for the
-proxy modes and routes; an ACP adapter still needs a compatible inference
-API, not just a compatible session protocol.
-
-Extend the table tests beside `run/agent.rs`, `run/launch.rs`,
-`session/agents.rs` and `session/process.rs`. Cover registry/`Kind`
-agreement, model delivery, missing inference, exactly one private token
-file, token-free managed settings and argv, hostile inherited variables,
-and project/configuration overrides. Check `run/probe.rs`'s token-location
-probes for the new file. Review `session/digest.rs`'s subagent tool and cost
-interpretation so task and spending limits remain meaningful. Exercise
-permission requests, notices, cancellation, limits and cleanup through
-the scripted session tests, then verify the real adapter in the sandbox
-with the proxy: generated-config tests alone are not deployment evidence.
-Install the agent and adapter where the sandbox user can execute them,
-and document the tested versions and results before claiming support.
+The agent and `run` share the runner's user. Environment filtering doesn't hide
+credentials in files or processes accessible to that user. The agent can tamper
+with its transcript and harness limits, so treat the record as a diagnostic, not
+an attestation. See [inference credential requirements](inference.md) before
+provisioning a runner, or [interactive sessions](interactive.md) to join a run.
 
 ## Limits
 
-`[limits]` has `timeout-minutes`, `max-requests` (model requests, as
-the [inference proxy](inference.md) counts them), `max-tasks` (subagent
-tasks) and `budget` (hundredths of a dollar, of the cost the agent
-reports). Three tables are refused before the agent starts:
+| `[limits]` setting | What it controls |
+| --- | --- |
+| `timeout-minutes` | Required wall-clock limit, including retries and hand-back. |
+| `max-requests` | Model requests as counted by the inference broker. Refused if accounting is unavailable at startup (including `token-file` registration). If [accounting becomes unavailable](inference.md#what-run-does) during the run, the run stops. |
+| `budget` | Spending in hundredths of a US dollar, based on cost reported by the agent after replies. It can't prevent the reply that takes the run over budget. |
+| `max-tasks` | Delegated tasks. With [named workers](skills.md#worker-subagents), their calls count separately under `max-worker-tasks`. |
+| `max-worker-tasks` | Tasks addressed to configured workers. Workers also require `max-requests`; the lead agent's reported cost can omit worker usage. |
+| `max-repeats` | Warning threshold for consecutive completed calls with identical tool, input and result (2–100; off by default). If two more identical calls follow, the harness asks for hand-back, even on adapters that don't receive the warning. Unchanged polling results count too. |
+| `uncapped` | Set to `true` only when deliberately running without either `max-requests` or `budget`. A timeout is still required. |
 
-- one without a timeout;
-- one with neither `max-requests` nor `budget`, unless it says
-  `uncapped = true` (and one that says it together with either);
-- one with `max-requests` where nothing counts requests: no proxy,
-  `register = "token-file"`, or a proxy that registered the run
-  without a count. The cap is refused, not dropped.
+Set at least one of `max-requests` and `budget` unless you opt out with
+`uncapped = true`. Vibe requires `max-requests` and broker registration with
+request accounting; a spending budget alone isn't enough. Use a broker-side
+cap when you need a hard request ceiling; the harness checks the count periodically.
 
-At 60% and 80% of the more used of the time and the requests, an agent
-whose entry says `notices = true` is told so in a prompt of its own.
-Claude Code is not: its adapter would end the running turn for one. At
-95% of the timeout, within ten requests of the cap (a quarter of a cap
-under 40), or once the agent
-starts more tasks than allowed, the turn is cancelled and one more
-prompt asks the agent to hand back what it has. At the limit the
-session is cancelled. Spending over `budget` stops it at once, with no
-hand-back ([then](workflow.md#a-run-stopped-at-a-limit)). The cost
-comes after each model reply, so the reply that crosses the budget is
-often the last of a turn the agent has already ended. If the agent
-answers the cancel with `end_turn`, the run ends well, exit state 0:
-its `harness.json` message says how far over it went, the run action
-warns and sets its `over-budget` output, and the status comment says so.
-A turn answered with `cancelled` is a stop as before. A turn that ends
-just as the timeout, or another limit that asks for a hand-back, cancels
-it is treated the same way if the agent left the output the run
-requires; without it, the agent gets the turn to hand back in, since
-opencode answers any cancel with `end_turn` (#2149). A run the timeout
-stopped with nothing handed back exits 124, and `run` and the run action
-say `the agent timed out without handing back a result`. The budget
-cannot refuse a reply in advance, because no one knows its cost before it
-comes; `max-requests` is the cap that acts before a request is made.
-
-`max-repeats` (off unless set, 2 to 100) is for an agent stuck making
-one tool call over and over: GLM agents have repeated one `gh api`
-command hundreds of times, until the provider's rate limit ended the
-run with nothing handed back. Once that many finished calls in a row
-had the same tool, input and result, the agent is told so in a notice.
-The step under way may still make the call once more; a second call
-after the notice has the agent hand back as at a limit. Only a changed
-result starts the count again: a poll that keeps answering "in
-progress" counts, so leave room for one. The harness sees calls only as
-the agent reports them, after they ran, so it cannot refuse one. An
-agent without notices is not told, and hands back at the same call.
-
-A task's turn that ends on an error is not taken for a finished task.
-That is a turn the agent answers with an error, as opencode and Vibe
-answer one whose model request failed and as Claude Code's adapter
-answers one it gave up on (`Internal error: API Error: Request rejected
-(429) ...`, with `errorKind` in the error's data), or one it answers as
-done after saying it gave up on a refused request, as Claude Code says
-`API Error: ...` after its own retries (the entry's `provider-error`
-names the words). After a pause of a minute (no longer than the
-hand-back window), the agent is asked to hand back as near a limit.
-If it does, the run is stopped at a limit, exit state 3, with the
-error as the reason; if it doesn't, the run fails with the error. A
-limit the run reaches meanwhile stops it as any other time, and a bridge
-client's prompts meanwhile are refused.
-
-The agent's word is not needed to keep its change, though: handing back
-needs the model too, and two runs lost 45 minutes of work to a provider
-that stayed overloaded (#1860). A run that failed on a model provider's
-failure of a known class (any but `other`, an agent that died of one
-included) and whose working tree has a change is handed back as if
-stopped at a limit: exit state 3, `harness.json` and `summary.json`
-with result `budget` and a message starting "the model provider stopped
-the run" that names the class but not the error's words, the default
-partial pull request with that as `stopped_early`, and its checkpoint
-under `ready_when_complete`. Like a run whose agent handed back, it is
-filed as `budget`, a partial result to continue rather than a run to
-repeat, with the class in `provider_error`. The session's own
-`harness.json` under `work/` keeps the failure. A run
-that changed nothing, whose change was not handed back, or that failed
-for anything else, still fails with exit state 1.
-
-A model provider's failure that a wait may clear gets a few retries
-before that, for every agent. The session sorts the error's words, or
-the agent's, into a class (`session/provider.rs`): `rate_limited` (HTTP
-429, "rate limit"), `overloaded` (5xx, Anthropic's 529, "overloaded"),
-`unreachable` (refused, reset, closed, EOF, a timeout), `quota` (a usage
-or spending limit), `unauthorized` (401 or 403) or `other`. The words
-are those of real runs' transcripts, in
-`tests/data/provider/errors.json`; a status code counts only next to a
-word that makes it one. Vibe's `RateLimitError`, code -31001, is
-`rate_limited` by the entry's `rate-limit-code` whatever its words
-(JSON-RPC's reserved codes are refused there). A turn that ended on one
-of the first three is sent again on the same session, labelled `rate
-limited` or `provider error`, behind a note, after a wait of 10, 20 and
-40 seconds plus up to a quarter of jitter, or as long as the provider
-said to (`retry-after`), each no longer than the hand-back window: three
-times, and then the turn is taken as one that ended on an error. An
-`overloaded` provider is out of capacity for a while rather than
-refusing the run, and is waited out for about four minutes: six times,
-the waits growing to a minute each. A
-provider that asks for more than two minutes is not waited for at all.
-Runs had ended on a 429 that a minute's wait would have cleared (#1339).
-A `quota` or `unauthorized` failure is never waited on: nothing within
-the run clears it, so the agent is asked to hand back at once, without
-the pause. The waits count against the run's time; a limit reached in
-one stops the run, and near one the agent is asked to hand back instead
-of waiting on. `provider_error` in `harness.json` and `summary.json`
-names the class of the failure a run that did not end well ended on. An
-agent that died mid-turn, after letting a failure out on its standard
-error or in its words in that turn, died of it: that, not the adapter's
-crash, is the class; the words of an earlier turn do not count, and the
-agent's own log uses words like "timed out" or "connection closed" for
-other things, so only a provider's phrasing of them does. `resends` and
-`resend_wait_s` count the times the task was sent again and the seconds
-spent waiting, a wait a limit interrupted included. `summary.json` files
-the failure of a run that did not hand back under `inference_` and the
-class, and the run action and the status comment carry that word on
-([workflow.md](workflow.md#why-a-run-failed)).
-
-An overload that outlasts its waits can be worked around rather than
-handed back: `fallback-model` in `[agent]` (for example `opus` for a run
-of `fable`; Claude Code and the fake agent only, whose models are names
-the provider resolves) has the session switch the agent to that model
-through its `model` session config option (ACP's
-`session/set_config_option`, which claude-agent-acp serves), so that it
-keeps its context, and send the task again at once, the waits starting
-over. It switches once; an agent that refuses the switch, reports no
-model or still the one it ran is asked to hand back as without one.
-`fallback_model` in `harness.json` and `summary.json` names the model
-the agent then said it ran, and `model` in `summary.json` names it too,
-so that pacing charges the pool the run went on with.
-
-Nor is a task's turn that stalls left to the timeout. Vibe has no read
-timeout on its model requests, and one waited six minutes on idle
-connections before going on (#983), and an opencode review sent nothing
-for 70 minutes after its last tool call (#2149), and a hung claude run
-holds its board slot until the job's limit (tracker#369). An agent entry
-with `stall-timeout` (seconds; Vibe's is 120, opencode's and Claude
-Code's 600, the fake agent has none) has a turn in which nothing comes
-from the agent for that long, with no tool call other than a subagent's task
-running, cancelled and the task sent again once on the same session,
-labelled `stalled`, behind a note that the last turn stalled; a cancel
-answered with `end_turn`, as opencode answers one, is still a stall. A second
-stall, or a cancel the agent does not answer, fails the run with a
-message that starts `the agent stalled`, and `summary.json` files it as
-a `stall` failure rather than `agent_exit`. `stalls` and `stall_retries`
-in `harness.json` and `summary.json` count both. Only the task's turn is
-watched; the hand-back, reminder and client turns are not. A subagent task
-can hang on inference too, so it does not exempt the turn; any update from
-the agent resets the wait, including streamed text and subagent progress.
-
-Nor is a task's turn that ends well without the output the run requires.
-A run whose policy allows any output requires one: a request in
-`out/safe-outputs.jsonl`, a replacement, or, where the policy carries a
-change, a change of the checkout. Agents have answered `end_turn` without
-theirs, after a compaction of their context, and the run ended well with
-nothing handed back (#607). The session then checks, as the sandbox user,
-and asks once more in a prompt of its own, labelled `reminder`, under the
-same limits. A requests file the run would not take (over its limit, or
-not a regular file) is reminded of the same way, naming the file and the
-limit, since the hand-back would otherwise be dropped whole without the
-agent hearing of it. If the agent still left none, the run fails, exit
-state 1.
-`reminded` in `harness.json` and `summary.json` says a reminder was sent.
-The check only decides the reminder; the hand-back is still collected and
-checked as before. A run with a bridge client is not reminded: the
-client sees what the agent left.
-
-Where the bounds set `ready_when_complete` for the run's change, the
-brief asks the agent to write its outcome early, with a `checkpoint`
-object (`complete`, `done`, `left`, `next`) marked incomplete, keep it
-current, and set `complete` to true last. Restating the hand-back's path
-and what was left is what brought back a hand-back lost to a compaction,
-where a bare reminder did not (#813). So the reminder quotes the
-checkpoint's `left` and `next`, and after each compaction the session
-sees during the task's turn (a Vibe-style compaction tool call that
-completes, or the context reported in a `usage_update` falling below
-half, as for [a second agent](#a-second-agent)), an agent that takes
-notices is sent a `compaction` notice: the start of its task, the paths
-it hands back in, and what its checkpoint says is left. An open
-checkpoint is never taken for done: see
-[ready or draft](safe-outputs.md#ready-or-draft). Without
-`ready_when_complete`, the brief asks for no checkpoint and no
-`compaction` notice is sent.
+Near a time or request limit, or after too many delegated tasks, the harness
+cancels the turn and asks the agent to hand back partial work. Over-budget stops
+do not get an extra turn. When a run requires an output and the agent finishes
+without one, the harness normally sends one reminder; if nothing is handed back,
+the run fails. An incomplete [checkpoint](safe-outputs.md#ready-or-draft) stays
+incomplete even if the turn ends normally.
 
 ## Updates of the run's item
 
-Direction added to a run's issue used to mean cancelling the run and
-dispatching it again, losing its work (#925). With the repository-owned
-configuration's
+To send new issue or pull request activity into a running turn, opt in with
+`watch-item = true` in `[session]`. `watch-seconds` defaults to 60 and accepts
+10–3600. Runs using `--runner-gate` do not allow the watch.
 
-```toml
-[session]
-watch-item = true
-watch-seconds = 60   # the default; 10 to 3600
-```
+| Forge | What to provide | Updates delivered |
+| --- | --- | --- |
+| GitHub | `--watch-item 'OWNER/REPO#NUMBER'` and the agent's read-only `GH_TOKEN`. The reusable workflow supplies the item when available. | New issue or pull request comments and body edits; not line-level review comments. |
+| GitLab | `--watch-item` with a public issue URL such as `https://gitlab.example.org/GROUP/PROJECT/-/issues/123`, and `CI_SERVER_URL` set to the installation's base URL. No token is used. | New public issue comments; no internal or system notes or body edits. |
+| Forgejo | Not supported. | None. |
 
-For GitHub, `run` polls the issue or pull request the run is for (`--watch-item`,
-which the reusable workflow sets from the event or the `issue` input)
-with the agent's own read-only token, and sends the agent each comment
-made on it (not a pull request's review comments), and each edit of the
-body, while it works. What came between the event and the session's
-start is in the brief or not seen. Off by default; without
-the token or an item it watches nothing, and says so. The polls are
-conditional (`If-None-Match`), so an unchanged item costs no rate limit,
-and a poll GitHub refuses for a limit waits as long as GitHub asks.
-An answer whose `X-RateLimit-Remaining` is 100 or less, with an
-`X-RateLimit-Reset` still to come, holds off the watch's next request,
-the same poll's comments included, until that reset, but no less than
-the poll interval and at most an hour, so that the watch leaves the last
-of the token's quota to its other users. Any updates that poll read are
-delivered. Skipped comments keep their last ETag and are fetched only
-when a later issue response lets the poll proceed. If the quota stays
-low, comments can remain unread for the rest of the run. Without both
-headers as numbers, the watch polls as usual.
-
-A GitLab item is watched too, where `--watch-item` names its web
-address instead: `SERVER/GROUP/…/PROJECT/-/issues/NUMBER` (nested
-namespaces as the address writes them), where SERVER is the GitLab
-installation's web address in `CI_SERVER_URL`, any path it is mounted
-under included (`https://example.org/gitlab`). GitLab CI sets it; a
-caller elsewhere sets it, and without it the run watches nothing. An
-item not under it is refused, since the item's address alone cannot say
-where an installation under a path ends. The issue is read under that
-server only: the page URLs are built from it, and redirects are refused.
-GitLab watches use the GraphQL notes connection anonymously, with GET
-requests, which an egress policy that admits reads alone lets through,
-and read only publicly readable issues in public projects. No token is
-used. Only notes GitLab marks as neither internal nor system notes are
-delivered; internal text must not enter transcripts that may be
-published. A gated run refuses the watch on either forge.
-The installation's certificate must chain to a certificate in
-`SSL_CERT_FILE` or, without it, in the system's CA bundle
-(`/etc/ssl/certs/ca-certificates.crt` or
-`/etc/pki/tls/certs/ca-bundle.crt`), where an egress proxy's authority
-is installed; with neither, to the Mozilla roots in the binary.
-Only comments made in the session watch's starting second or later are
-updates, because the API reports whole seconds. Comments from earlier
-checkout or preparation are not picked up, and edits do not replay them.
-Each poll asks for comments alone, starts with the newest page and
-follows GitLab's cursors back to the first page with a comment older
-than the watch, so an idle issue costs one page a poll; it has
-a two-second deadline and bounds of twenty requests and 8 MiB. A page over
-1 MiB is requested in smaller pages. If a single note exceeds the page
-bound, the run logs that it skipped the note and reads only its cursor.
-A poll that stops at its bounds or at a page GitLab refuses delivers
-the notes it read and logs why it stopped; the next reads them all
-again, so a note it did not reach comes later, and one past the bounds
-is not read while it stays there. A poll GitLab refuses for a rate limit with a `Retry-After` in
-seconds waits that long, but no less than the poll interval and at
-most an hour.
-
-Every update is passed on, whoever wrote it, and none claims authority:
-it is quoted with its author and link as new input on the item, which
-the agent weighs as any other text it reads. Anyone who can comment on
-the item could already put text before an agent that reads it with the
-forge's own tools (`gh`, `glab`). A run takes at most ten updates, each
-cut to 8000 characters.
-
-Updates go into a running turn only: by claude-agent-acp's
-`_session/steering` for an entry with `steering = true`, which asks the
-adapter not to start a turn when none is running; otherwise as a notice
-is, for an entry with `notices = true`. An agent that takes neither (Vibe)
-is sent none, and the condensed log says so. Each update sent is a line
-of the condensed log, and its link is in `updates` of `summary.json`
-and in `summary.md`.
+Only updates from the watch's start are eligible; include earlier context in the
+task. Updates are untrusted input, not authorization. Delivery is best effort
+and limited to ten updates per run, each at most 8,000 characters. See `updates`
+in `summary.json` for links to the updates actually sent.
 
 ### Nudges on the clock
 
-Runs that reached their timeout, or lost their runner, lost work that a
-checkpoint would have kept (tracker#1413, tracker#1425). Claude Code gets
-none of the budget's notices, so nothing told it the time. With
-
-```toml
-[session]
-nudges = true
-```
-
-the session sends the agent two messages of its own, whatever else it
-has used. Halfway through `limits.timeout-minutes` it is told to
-summarize its progress, checkpoint what works and plan what is left. At
-five sixths of the timeout it is told to finish the change it is on,
-checkpoint and hand back. For an hour's run that is at 30 and 50
-minutes, before the hand-back at 57. They go as an update of the item
-does, with no item watched: steered into the running turn, or queued as
-a notice. An agent that takes neither, or a nudge that comes when no
-turn is running, goes without. Each one is a line of the condensed log
-(`notice to the agent: Halfway: …`), or a line saying why it was not
-sent. Its label (`halfway`, `wrap up`) is in `notices` of
-`summary.json`. Off by default. The times follow from the timeout, and
-the words are fixed.
+Set `nudges = true` in `[session]` to ask a running agent to checkpoint halfway
+through `timeout-minutes` and to wrap up at five-sixths. This is off by default,
+doesn't require an item watch, and only works with adapters that accept live
+updates. Check `notices` in `summary.json` to see which nudges were sent.
 
 ## A second agent
 
-A run can let its agent start a second agent, the child, and drive it
-over ACP turn by turn: to watch, for one, what a model does after its
-context is compacted. Only Vibe can be the child. It is off unless the
-repository-owned configuration names one:
-
-```toml
-[child-agent]
-name = "vibe"
-model = "zai-glm-5-3"
-```
-
-`sandbox setup` installs the same pinned Vibe 2.26.1 runtime whether
-Vibe is the main agent, the child, or both. Other child names are refused
-by `agentic-job config` and setup: only Vibe has a supported child installer.
-
-The child uses `[inference] url` plus `/mistral/v1`, not the main
-agent's `openai-url` or `anthropic-url`. The
-[broker's run-token contract](https://github.com/cgwalters-bot/praxis-credential-broker/blob/main/INTERNALS.md#credential-modes)
-admits an active run token on every injected route, including Mistral;
-registration is not scoped to the main agent's provider. No child pool
-list or second registration is needed by this protocol (this repository
-has no pool configuration). The broker deployment must enable its Mistral
-route and supply its Mistral credential. This confirms the documented
-protocol, not a live deployment test. The repository-owned configuration
-must explicitly set `[inference] url`, `register` (and `audience` for
-`github-oidc`), allow that address in `egress.direct` when required, and
-set `[limits] timeout-minutes` and `max-requests`.
-
-`run` then writes the child a Vibe configuration of its own,
-`~/.config/agentic-job/child-vibe/config.toml`, as it would write the
-main agent's for that model: the same proxy route and run token, so the
-token probes expect it in that file and the agent's, and nowhere else.
-Its model is a built-in definition, with the window `[agent]
-context-windows` gives it (32k without an entry); the
-main agent may edit that file, which gives it nothing it does not have
-with its own token. The task is told the path of `acp-drive`.
-
-The configuration is refused without `limits.max-requests`. The budget
-reads only the cost the main agent reports, but the proxy counts every
-request made with the run's token, so the request cap covers both
-agents: a run capped by its budget alone could spend without bound
-through the child. The timeout covers both too, since the session kills
-every process of the sandbox user when it ends. `run --runner-home` has
-no sandbox user to end, and the daemon's session of its own would outlive
-the agent's, so it refuses `[child-agent]`.
-
-The main agent uses it through bash; each command prints JSON:
-
-- `agentic-job acp-drive start --agent vibe [--model M] [--cwd DIR]`
-  starts a daemon, as the sandbox user, that starts Vibe through
-  `launch-agent --child`, opens a session and holds its standard
-  streams. It prints the session and the model Vibe reports.
-- `prompt TEXT [--timeout S]` sends a turn and prints its stop reason,
-  or the error it was answered with. With `--timeout` it stops waiting
-  (exit 124) and the turn goes on.
-- `events [--since N]` prints the events from the Nth on: the prompt,
-  messages, thinking, tool calls and their results, permission answers,
-  compactions, the end of each turn and the child's exit. An event never
-  changes once printed; a message still streaming is cut where it stood
-  and goes on in the next.
-- `cancel` cancels the running turn; `status` prints the session's
-  state; `stop` kills the child and ends the daemon.
-
-Vibe 2.26.1 reports a compaction as a tool call titled "Compacting
-context", then "Context compacted"; those are `compaction` events. A
-compaction it does not report is inferred, `"inferred": true`, when the
-context it reports in a `usage_update` falls below half the last one.
-The child's permission requests are answered by the main agent's policy.
-
-The daemon talks to its commands over a socket in
-`~/.local/state/agentic-job/acp-drive`, private to the sandbox user, and
-writes there every ACP message (`acp.jsonl`), the child's standard
-error and its own log. It holds nothing the main agent does not and is
-not a boundary: the sandbox and the proxy's count are. After the
-session `run` reads that directory and the child's Vibe logs as the
-sandbox user, as it reads the agent's own logs, into
-`child-session.txt` and `child-logs.txt` of the transcript, redacted
-with it; `child_logs` in `summary.json` says what was taken. As there,
-the last 4 MiB of each file is kept.
-
-`tests/acp_drive.rs` drives the scripted agent through a prompt, a
-cancel, reported and inferred compactions and a crash. Driving a real
-Vibe this way has not been tested.
+Current runs reject `[child-agent]` and don't provision a child for `acp-drive`.
+Use [worker subagents](skills.md#worker-subagents) for supported delegation within
+the main agent; workers don't provide a separate isolation boundary.
 
 ## How a run ends
 
-The session's result becomes `run`'s exit state: 0 when the agent ended
-its turn, 1 when it failed, exited, could not be started or cancelled,
-3 when a request, task or spending limit stopped it (or it handed back
-after a turn that ended on an error), and 124 for the
-timeout. [interface.md](interface.md#exit-states) has the whole table,
-with the states that are `run`'s own. `handed_back` in `summary.json`
-says whether a stopped agent handed back.
+| What happened | Where to look |
+| --- | --- |
+| A limit stopped the run | `handed_back` in `summary.json` says whether partial work was returned. A timeout without hand-back exits 124. See [exit states](interface.md#exit-states). |
+| The provider failed | The harness retries transient failures within the run's limits, but doesn't wait out exhausted quota or rejected credentials. Check `provider_error` in `summary.json`. A recognized provider failure can preserve a change as a partial result. |
+| The agent went quiet | The harness can retry a stalled task turn once. If the broker reports zero requests after five minutes, the run stops as `no_requests` (retryable exit 4). That check is skipped when the count is unavailable. |
 
-The transcript also holds `agent-logs.txt`: the agent's own log files
-written during the session, which may say what its standard error and
-ACP do not, such as a dropped model stream. They are read as the sandbox
-user from one directory under its home: `~/.config/agentic-job/vibe/logs`
-(the launch command turns Vibe's log on, as its ACP entrypoint does),
-`~/.local/share/opencode/log`, and `~/.claude/debug`, which Claude Code
-writes only with debugging on. Links are not followed; the newest 16
-files are taken, the last 4 MiB of each and 16 MiB in all, and redacted
-with the rest of the transcript. `agent_logs` in `summary.json` says what
-was taken, and the summary says when the directory is missing.
+Hand-back isn't publication. See [how to recover partial work](workflow.md#a-run-stopped-at-a-limit)
+if a limit or provider failure stopped the run.
 
-Vibe sends its reasoning as message chunks holding Python reprs of
-thinking blocks; the condensed log and the rendered session read them as
-reasoning in plain text, as other agents' thought chunks.
+### Reading a session in the summary
+
+The run summary includes a redacted session preview by default. Set
+`render-session = false` in `[agent]` to disable both the preview and the
+rendered `session.md` in the `agent-run` artifact. Otherwise, open `session.md`
+for the full rendering (tool output is bounded). Also check the agent's own
+`agent-logs.txt` in the transcript, when collected. Costs shown in the session
+are agent-reported, not broker accounting. See
+[run artifacts](workflow.md#what-a-run-leaves) for the full inventory.
