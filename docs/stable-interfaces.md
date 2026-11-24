@@ -319,7 +319,7 @@ the next in the same major version.
   ([inference](inference.md#what-run-does)).
   `[inference] stop-long-retry-after` is an optional boolean, default false;
   it requires `front` or `api-key` and stops a long upstream 429 followed
-  by 60 seconds of ACP silence ([inference](inference.md#long-rate-limit-waits)).
+  by 60 seconds of ACP silence ([inference](inference.md#a-provider-api-key)).
   `[session] nudges` is an optional boolean, default false; it sends the
   agent two messages at times derived from `limits.timeout-minutes`
   ([nudges on the clock](harness.md#nudges-on-the-clock)).

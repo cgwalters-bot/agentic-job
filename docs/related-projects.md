@@ -38,7 +38,7 @@ rootless Podman and `/dev/kvm` where provisioned, drives the agent over
 ACP, and publishes to GitHub, GitLab and Forgejo, though not with full
 GitHub parity on the others ([forge support](safe-outputs.md#neutral-profile)).
 The agent still gets a run token and normally a GitHub read token; credentialed MCP is
-refused ([inference boundary](inference.md#current-boundary-5-november-2026),
+refused ([inference boundary](inference.md#credential-boundary),
 [MCP status](mcp.md#current-status)).
 
 agentic-job borrows gh-aw's safe-output format, collector semantics,

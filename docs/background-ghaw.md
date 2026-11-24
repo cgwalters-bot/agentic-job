@@ -28,7 +28,7 @@ or its wider set of outputs and triggers fit your project. Read agentic-job's
 [known limitations](limitations.md) before you deploy it.
 
 The agent in agentic-job has no provider key and no forge write token. It
-does hold a run token for the [inference broker](inference.md) and,
+does hold a run token for the [inference broker](inference.md#credential-boundary) and,
 normally, the job's read-only forge token
 ([token placement](workflow.md#which-tokens-reach-what)). Processes running
 as the same user can read both. Do not call it credentialless.

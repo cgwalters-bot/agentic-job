@@ -1372,7 +1372,7 @@ passes the secret `INFERENCE_API_KEY` to no job
 ([inference.md](inference.md#a-provider-api-key)).
 `inference-provider: github` alone sets `api-key` and GitHub's API root,
 whatever `inference-register` and `inference-url` say, unless
-`inference-register` is `api-key` ([GitHub billing](inference.md#github-billing)). The proxy speaks
+`inference-register` is `api-key` ([GitHub billing](inference.md#a-provider-api-key)). The proxy speaks
 [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker)'s run API. A proxy on a private network is
 reached by joining it in a step of your own agent job. When the inference URL is an HTTP(S) IPv4 literal in
 100.64.0.0/10, `agentic-job config` defaults `[egress] direct` to that URL

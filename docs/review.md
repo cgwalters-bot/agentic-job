@@ -24,7 +24,7 @@ the agent reads such a pull request's text, upstream release notes
 included, without anyone having asked: it is data to a sandboxed agent,
 but it can steer the verdict. The agent holds a broker run token and, by
 default, a GitHub read token
-([current boundary](inference.md#current-boundary-5-november-2026)). Admission
+([current boundary](inference.md#credential-boundary)). Admission
 spends a review; it does not override the repository's merge restrictions. The
 workflow, the bounds and the
 [standing task](../workflow/review.md) come from the trusted caller, never the

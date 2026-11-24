@@ -2,193 +2,181 @@
 
 > This text is LLM generated.
 
-## Current boundary (5 November 2026)
+A real agent reaches its model through a broker on another machine that holds
+the provider key. The run normally gets a short-lived, capped run token from it
+and ends that token when the agent finishes.
 
-A provider key on the agent machine can be stolen by prompt-injected code.
-The agent and `run` share the runner's UID: a separate process, environment
-filtering, Yama or `hidepid=2` is not a demonstrated boundary between them.
-Do not put a provider key, MCP credential or OIDC request credential there.
-Check and apply run on other machines and never execute agent-produced code.
+## Credential boundary
 
-Standalone `run` delegates host controls, not credentials, when explicitly set
-to `[host] isolation = "external"` or when it detects a disposable GitLab
-container job. Summaries and hand-back metadata distinguish detection from a
-declaration, and `check --run-summary` carries sanitized prose to apply without
-trusting it as an attestation. Otherwise, the default is `managed`. The host must provide one job per
-runner, a fresh environment, an egress allowlist and no credentials beyond the
-run's own; provider keys, MCP and OIDC request credentials remain refused.
-No sudo, systemd or second user is required in the container. See
-[external host isolation](gitlab.md#explicit-external-host-isolation) for
-standalone configuration, detection and the limits of both.
+The agent and `run` share the runner's user, so the agent can read anything
+`run` holds; separate processes, environment filtering, Yama or `hidepid=2` do
+not change that. Keep provider keys, MCP credentials and OIDC request
+credentials off the agent machine. `run --runner-home` refuses API-key mode,
+configured MCP and known OIDC request environment variables; those checks do
+not inventory credentials on the machine. Check and apply run elsewhere and
+never execute agent-produced code.
 
-Current broker inference still gives the agent a **run token**, and the workflow
-forwards a GitHub read token unless `github-reads: false`. Those credentials
-remain a gap against the operator's no-credentials requirement, not proof it is
-met. [#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) is the
-acceptance umbrella; [#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999)
-owns an endpoint-only client and [#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000)
-the fail-closed readiness gate. Neither is supplied by these docs.
+What the agent can still read:
 
-The operator chose runner-only execution in
-[#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989).
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) removed the
-second user. Do not reintroduce one to work around runner-mode refusals. What runner mode refuses is
-[listed](interface.md#removed-keys-and-runner-mode-refusals); the
-[hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
-tracks caller migrations and missing deployment proof.
+| Credential | Why it is there | How to limit it |
+| --- | --- | --- |
+| The broker's run token | The agent's model requests carry it | Broker caps, expiry and `run` ending the run at finish |
+| A forge read token (GitHub workflow) | Lets the agent read issues, pull requests and logs | `github-reads: false` stops forwarding it |
+
+So broker inference is not credentialless inference
+([#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903)). Do not
+add a second user or a local proxy to work around a
+[runner-mode refusal](interface.md#removed-keys-and-runner-mode-refusals).
+A disposable container job can take over host controls, not credentials; see
+[external host isolation](gitlab.md#explicit-external-host-isolation).
 
 ## What a broker provides
 
-The existing client speaks
+The client speaks
 [praxis-credential-broker](https://github.com/cgwalters-bot/praxis-credential-broker)'s
-token-based API. Runtime configuration supplies its root URL (`inference-url`),
-not a hard-coded deployment address. Default agent routes are `/anthropic`
-(Claude Code), `/v1` (opencode) and `/mistral/v1/chat/completions` (Vibe).
-`anthropic-url` and `openai-url` can select the first two routes, not Vibe's.
+run API.
 
-`POST /v1/runs` returns 201 with a token and usage record. `GET` and `DELETE
-/v1/runs/self` read usage and end the run. Broker policy owns admission, caps,
-expiry and provider credential injection. Reachability is not authentication.
-An approved credentialless identity/lifecycle contract is future work in
-[broker#60](https://github.com/cgwalters-bot/praxis-credential-broker/issues/60).
-Source-address binding is research, not an approved or verified deployment.
-It needs authenticated per-job identity, preserved peers, refusal of shared or
-rewritten identities, bounded accounting, expiry and trusted off-agent revocation.
-Moving the lifecycle token into same-UID `run` memory would not meet that goal.
+| Request | Purpose |
+| --- | --- |
+| `POST /v1/runs` | Register a run; 201 returns the run token and a usage record |
+| `GET /v1/runs/self` | Read the run's usage; `run` polls it to count requests |
+| `DELETE /v1/runs/self` | End the run, so the token admits nothing more |
+
+Agents reach the model under the broker's root URL:
+
+| Agent | Default route | Override |
+| --- | --- | --- |
+| Claude Code | `/anthropic` | `inference.anthropic-url` |
+| opencode | `/v1` | `inference.openai-url` |
+| Vibe | `/mistral/v1/chat/completions` | none |
+
+Broker policy owns admission, caps, expiry and injecting the provider key;
+reachability is not authentication.
 
 ## What `run` does
 
-`[inference] url` requires an explicit `register`; without a URL the other
-inference settings are refused. Current modes are:
+`run` registers a run (or takes over one an earlier job registered), writes
+the token into the agent's configuration, counts requests while the agent
+works, and ends the run at finish.
 
-| Mode | Current runner-mode behavior |
+### Configuration
+
+| `[inference]` key | Workflow input | Meaning |
+| --- | --- | --- |
+| `url` | `inference-url` | The broker's root URL, not one of its routes. Required for any other key. |
+| `register` | `inference-register` | How to get a run token; see the modes below. No default in the binary; the reusable workflow passes `github-oidc`. |
+| `audience` | `inference-audience` | The OIDC audience the broker expects, for `github-oidc` |
+| `token-file` | `inference-token-file` | Absolute path of a token, for `token-file` |
+| `identity-proxy` | none | An HTTPS CONNECT proxy for the identity-token request only, for a host that reaches the CI system only through one |
+| `anthropic-url`, `openai-url` | none | Override the routes above |
+
+`limits.max-requests` caps the run's model requests. Read the broker's
+address from configuration or the environment; never copy it into code.
+
+### Registration modes
+
+| Mode | What it does | Limits |
+| --- | --- | --- |
+| `github-oidc` | A separate job with `id-token: write` registers with its identity token; the agent job takes the run over through `AGENTIC_JOB_INFERENCE_RUN_TOKEN` | GitHub only. The agent job must not hold OIDC request credentials. |
+| `plain` | Registers with a name (`x-run-id`, up to 128 letters, digits, `.`, `_`, `-`) and no proof, if the broker admits unproven runs (off by default; otherwise 401) | The agent can register another run to reset its per-run cap; only broker-wide quotas and the job timeout bound it. A name stays taken for a day after expiry; a 409 is not retried. |
+| `token-file` | Reads a bearer token from a file | No counting and no ending the run. `limits.max-requests` is refused, so a workflow caller must pass `max-requests: "0"` (its default is 150). Not an isolation mechanism. |
+
+### What you can rely on
+
+- The token is kept in memory and written only into the agent's
+  configuration, which the agent can read.
+- The request cap is enforced by polling the broker, not by the broker. If
+  polling keeps failing, a run with `max-requests` stops within about three
+  and a half minutes. Treat it as a guard, not a hard spending cap.
+- Registering and ending the run are retried on timeouts, 429 and 5xx. A 404
+  is a failure: a broker without the run API never runs an agent uncapped.
+  Ambiguous retries can leave a registration whose token never arrived; the
+  broker's expiry cleans it up.
+- Requests to the broker ignore the job's `HTTP_PROXY` and follow no
+  redirects: `url` must reach the broker directly.
+- If the broker no longer knows the run when it is ended (401), the run fails
+  even after a successful turn: exit 1, or exit 3 when it retains a change,
+  classified `inference_unreachable`. Nothing is uploaded until the run is
+  ended. Same-user interference can stop cleanup, so the broker's expiry must
+  not rely on `run` alone.
+- Configured `host:port` literals of the broker are replaced by
+  `<inference-address>` in hand-backs, logs and transcripts. A URL rendered
+  without its explicit port does not match, so give ports explicitly. The
+  replacement can break a patch, so review it. This is not comprehensive
+  address nondisclosure. Known run tokens, upstream credentials and private
+  keys refuse the upload.
+
+## Forges
+
+| Forge | Registration |
 | --- | --- |
-| `github-oidc` | Take over a run registered by a **separate job**, using `AGENTIC_JOB_INFERENCE_RUN_TOKEN`. OIDC request credentials in the agent job are refused. |
-| `plain` | Register without proof if the broker explicitly admits that mode; it still returns a bearer token, so it is not credentialless inference. |
-| `token-file` | Read a bearer from an absolute path; no accounting or revocation by `run`. A request cap is refused. Not an isolation mechanism. |
-| `api-key` | Refused by `run --runner-home` and the reusable agent job. |
+| GitHub | `github-oidc` through the reusable workflow's separate `register` job; see [the run token](workflow.md#the-run-token) |
+| GitLab | Agent runs unsupported: no supported registration proof yet; see [GitLab](gitlab.md) |
+| Forgejo | Agent runs unsupported: no supported registration proof yet; see the [Forgejo trial](try-forgejo.md) |
 
-The reusable workflow defaults to `github-oidc`. Its separate `register` job has
-`id-token: write`; the agent job has none. The check call also grants OIDC for
-its separate detector job; see the [full permission inventory](workflow.md).
-`agentic-job register` emits a job
-output passed to `agent.yml` as the secret `INFERENCE_RUN_TOKEN`. Debug logging
-can disclose job outputs, so registration refuses debug mode. If the agent
-never takes over, the broker must expire the run; rerun all jobs, not only the
-agent job with an ended token ([workflow](workflow.md#the-run-token)).
-
-`run` holds the token in memory and writes it into agent configuration. These
-are agent-readable locations. Legacy token probes do not run with
-`--runner-home`. `GET /v1/runs/self` supplies the request count (`requests` plus
-`unmetered`) every five seconds. Six failed polls make accounting unavailable;
-a run with `max-requests` stops. Each poll has a 30-second timeout plus the
-five-second wait: detection is bounded by 210 seconds plus scheduling delay.
-This is not a broker-side hard spending cap.
-
-Registration and cleanup make up to four attempts for unanswered requests, 429
-and 5xx, three seconds apart. A 404 is a failure, not a tokenless broker. HTTP clients
-ignore the job's `HTTP_PROXY` and follow no redirects. `identity-proxy`, where
-used by trusted registration, is CONNECT-only for an HTTPS identity request,
-not an inference forwarder.
-
-At finish `run` sends `DELETE /v1/runs/self`. A 401 means the broker lost or
-revoked the run: even an apparently successful turn fails (exit 1, or partial
-exit 3 when retaining a change), classified `inference_unreachable`. Failure
-to end a still-live run leaves nothing to upload. `token-file` has no cleanup
-API. Same-UID interference can stop cleanup; expiry must not rely on `run` alone.
-
-Runtime endpoint **host:port literals** in hand-backs become `<inference-address>`;
-logs and transcripts redact those configured literals too. A URL rendered
-without its explicit port does not match: use explicit ports in configuration,
-and do not treat this as comprehensive address nondisclosure. The replacement
-can break a patch and must be reviewed. Known run tokens, upstream credentials and private keys
-still refuse upload. `[inference] allow-base-address-lines` is a legacy no-op.
-Read inference addresses from runtime configuration/environment, never copy a
-deployment's address into code.
-
-### Long rate-limit waits
-
-`stop-long-retry-after` is off by default and requires `front` or `api-key` to
-observe upstream 429 responses. Both are refused in runner mode, so this is
-not an available runner-only control. The retained local-proxy implementation
-is not an invitation to enable it.
-
-## Registering without proof
-
-`plain` sends `POST /v1/runs` with no Authorization or body and `x-run-id:
-NAME`, up to 128 letters, digits, `.`, `_` and `-`. Broker `unproven` admission
-is absent by default. Without it, registration fails with 401. Names remain
-taken until a day after expiry; a 409 is not retried. Ambiguous retry responses
-can leave a registration whose token was never received; expiry owns cleanup.
-
-An agent able to reach this registration route can register another run and
-reset its per-run cap. Broker-wide quotas and job timeout are the remaining
-bounds. `plain` is not the future credentialless identity contract, and the
-refused `front` mode must not be revived to paper over this gap.
-
-## Fronting the broker
-
-`inference.front = true` is refused with `--runner-home`: its upstream token
-would live in same-UID supervisor memory, and the legacy sandbox-UID network
-rules would not isolate it. Do not deploy a local replacement proxy. External
-credential injection and lifecycle ownership belong to broker#60 and #2999.
+Do not substitute a provider key for a missing identity contract. On GitHub,
+`agentic-job register` writes the token as a job output, which the workflow
+passes to the agent job as the secret `INFERENCE_RUN_TOKEN`. Step debug
+logging would print job outputs, so registration refuses to run with it. To
+retry, rerun all jobs: the agent job's token has ended.
 
 ## Which workflows a broker admits
 
-The existing broker's token policy supports `called_workflows` (the reusable
-workflow ref/commit and caller repository IDs) and `any_workflow` (repository
-or owner scope). Pins and admitted workflow commits must move together.
-An agent job composed in the caller's own file does not have the reusable
-workflow's `job_workflow_ref`; its **separate registration job** needs admission.
-Repository-wide admission is broader than admitting one workflow and remains
-an operator decision ([tracker#452](https://github.com/cgwalters-forge/tracker/issues/452)).
-Do not grant OIDC to the agent job to make admission succeed.
+On GitHub the broker's token policy admits runs by the identity token's
+claims:
 
-For runner network enforcement, enable the existing `egress.write-policy`:
-without it, the runner is not held to the proxy allowlist. Its Actions-service
-write exceptions mean even this is not private-source confinement. A tailnet
-IPv4 endpoint can be selected through `egress.direct`; the egress proxy itself
-refuses private, loopback and tailnet destinations. Keep network joins trusted
-and before host lockdown, with no credential left readable afterwards.
+| Policy | Admits |
+| --- | --- |
+| `called_workflows` | A reusable workflow at a ref or commit, called from listed repository IDs |
+| `any_workflow` | Any workflow of a repository or owner |
+
+Move pins and the broker's admitted workflow commits together. If you compose
+the agent job in your own workflow file, it does not carry the reusable
+workflow's `job_workflow_ref`: admit your separate registration job instead.
+Repository-wide admission is broader than admitting one workflow; choose it
+deliberately. Never grant OIDC to the agent job to make admission succeed.
+
+## Reaching the broker
+
+On a managed runner, `egress.write-policy` enforces the configured proxy
+policy. The default still allows reads to unlisted public hosts. To restrict
+read destinations as well, set `[egress] mode = "allowlist"` and list the
+needed domains in `allow` in the proxy policy file (`egress.policy`). Forge
+write exceptions still prevent private-source confinement. With external
+isolation, enforce egress on the host instead.
+
+See the [egress write policy](secure-host.md#the-egress-write-policy-for-an-agent-job)
+for routing a public broker or using `egress.direct` for a tailnet IPv4
+address. If you join a tailnet, do it in trusted steps before host lockdown,
+with no join credential left readable by the agent.
 
 ## Prompt caching
 
-`summary.json` reports `cache_ratio` from broker `cache_read` and `input`
-tokens, or marks agent-reported figures as such when no broker record exists.
-Agent/provider configuration determines cache behavior, not an isolation
-control. For opencode models that need encrypted reasoning replay, the
-configuration repository can set
-`"options": {"include": ["reasoning.encrypted_content"]}`. Generated settings
-tests alone do not verify provider caching or real-agent streaming.
-
-## How the default was chosen
-
-The workflow defaults to token-based `github-oidc`, not tokenless admission.
-The binary has no default registration mode. Non-GitHub callers need an
-explicit supported identity contract; do not substitute a local provider key.
+`summary.json` reports `cache_ratio` from the broker's `cache_read` and
+`input` token counts, or marks agent-reported figures as such when the broker
+has no record. Caching is set by agent and provider configuration. For
+opencode models that need encrypted reasoning replay, set
+`"options": {"include": ["reasoning.encrypted_content"]}` in the configuration
+repository.
 
 ## A provider API key
 
-`register = "api-key"` is refused in runner mode because the agent could read
-the provider key from `run`. `check-key` and the retained proxy tests exercise
-legacy code, not an available hardened launch path. The reusable workflows
-declare `INFERENCE_API_KEY` for compatibility but do not forward it to a job.
-Do not compose a second-user caller to enable it.
+These options would put a provider credential where the agent can read it,
+and are refused in runner mode and by the reusable workflows:
+
+| Option | Why it is refused |
+| --- | --- |
+| `register = "api-key"` | `run` would hold the provider key. `INFERENCE_API_KEY` is declared for compatibility but forwarded to no job. |
+| `inference-provider: github` | Implies `api-key`; a Copilot-capable token pays for inference. Do not grant `copilot-requests: write` or pass that token to the agent job. |
+| `inference.front = true` | `run` would hold the broker's upstream token in its own memory |
+| `stop-long-retry-after` | Needs `front` or `api-key` to see upstream 429s, so it has no runner-mode effect |
+
+Do not compose a second-user caller to enable them. Externally owned billing
+or key injection needs its own verified broker contract.
 
 ### On a multi-user guest
 
-Testing Farm/tmt was reported to put a secret on a wrapper command line
-([#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993)). The old
-stacked-procfs workaround hides **other UIDs**, not same-UID processes or
-supervisor memory. Do not mount/remount `/proc` as a credential solution.
-[#2994](https://github.com/cgwalters-forge/agentic-job/issues/2994)'s diagnostics
-are useful observations, not proof of runner-only isolation. Keep credential
-injection outside the agent-readable machine; current TF/GitLab reports used
-an older two-user/API-key topology and do not verify this boundary.
-
-## GitHub billing
-
-`inference-provider: github` implies `api-key` and is refused by the runner
-workflow. A Copilot-capable token is still a credential that pays for inference.
-Do not grant `copilot-requests: write` or pass that token into the agent job.
-Externally owned billing/injection requires its own verified broker contract.
+Some test systems put a secret on a wrapper's command line. Mounting `/proc`
+with `hidepid` hides other users' processes, not same-user processes or
+`run`'s memory, so it is not a credential solution. Keep credential injection
+off the agent's machine.

@@ -67,7 +67,9 @@ const MAX_DETAIL_CHARS: usize = 200;
 /// several subagents at once make a request every few seconds between them.
 pub const COUNT_INTERVAL: Duration = Duration::from_secs(5);
 /// After this many failed polls the request cap must no longer trust the
-/// last count. Each poll has HTTP_TIMEOUT plus COUNT_INTERVAL as its bound.
+/// last count. Each poll has HTTP_TIMEOUT plus COUNT_INTERVAL as its bound,
+/// so lost accounting stops a capped run within this many times that bound
+/// plus scheduling delay: a guard, not the broker's hard spending cap.
 const MISSED_COUNTS_BEFORE_WARNING: u32 = 6;
 /// The answer of a proxy that has the run API but no policy for it.
 const NOT_CONFIGURED: &str = "run registration is not configured";
