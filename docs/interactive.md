@@ -2,248 +2,94 @@
 
 > This text is LLM generated.
 
-**Runner-only status:** a session run takes `[session] listen` with the
-runner's user as the agent, which can attach to its own bridge ahead of the
-operator and so deny them the chat; no message over the bridge authorizes a
-write, which waits for the end-of-run check and apply
-([session runs](../specs/session.md#recommendation-lift-the-refusal)). Do not
-create a second user or a local credential holder for it. A run on a real
-tailnet is still to do under
-[#536](https://github.com/cgwalters-forge/agentic-job/issues/536).
-The shipped dispatch caller starts one with `session=true`, on a runner
-the caller names in a closed map
-([start a session](dispatch.md#start-a-session-on-a-chosen-runner)).
-A run without a tailnet can be reached through an
-[attach gateway](#an-attach-gateway) instead.
+Use an interactive session to ask an agent follow-up questions in the same run.
+Start with a task, or let the first prompt start the conversation. Sessions are
+off by default. Chat does not change the run's permissions or approve writes:
+proposed changes still go through [safe outputs](safe-outputs.md) after the run ends.
 
-Partly built: a session run ([session runs](../specs/session.md))
-accepts an operator's prompts after its optional task's turn, through a bridge
-that listens on the runner's tailnet name behind `tailscale serve`, and a
-client attaches to it from anywhere on the tailnet, late or again
-([attaching](#attaching-to-a-session)). What follows that is the earlier
-design note: a person, or another
-program, attaches to the agent's session and works with it, while the
-agent stays inside the same [sandbox](sandbox.md),
-[inference proxy](inference.md) and [safe-outputs](safe-outputs.md)
-limits as an unattended run. It is why the agent is driven over ACP.
+## Start a session
 
-With `[session] listen = true`, `run` also accepts no `--task`, or an empty
-or whitespace-only task file. It initializes the agent's ACP session but sends
-no initial prompt: the first client prompt starts the first turn, with the
-run's hand-back brief prepended. This works with either the tailnet bridge or
-the attach gateway below. An explicitly named task file must still exist and
-fit the task size limit. Without the listener, a missing or empty task is
-refused. This is the standalone `run` interface; event admission in the reusable
-workflow still requires its event task.
+For standalone `agentic-job run`, enable the listener in the runner configuration:
 
-The idle timeout (`session.idle-minutes`, 10 by default, at most 60) starts
-after ACP setup for a taskless session, or after the task's turn otherwise,
-and restarts after each client turn. Merely connecting, attaching, reconnecting
-or polling `_session/status` does not renew it. A late client can use
-`session/new` to attach; after a dropped connection another `session/new` on a
-new connection attaches to the same agent session, not a fresh conversation.
-A second `session/new` on one connection is refused. Normal close ends the run;
-start a new run for a new conversation.
+```toml
+[session]
+listen = true
+```
 
-For a taskless counted run, the five-minute first-inference-request watchdog
-starts with the first client prompt, not while the run is waiting for one.
-The overall timeout and budget still run from startup.
+Choose how clients will reach the runner: use a [tailnet](#attaching-to-a-session)
+or configure an [attach gateway](#an-attach-gateway). With the listener enabled,
+you can omit `--task` or supply a blank task file. An explicitly named file
+must still exist and fit the task size limit. Without the listener, a task is required.
+
+| Forge | How to start a session from CI |
+| --- | --- |
+| GitHub | Use `session: true` in the reusable workflow or [start a session on a chosen runner](dispatch.md#start-a-session-on-a-chosen-runner) by manual dispatch. Both need an initial task and a runner configured for sessions and already joined to the tailnet. The shipped dispatch does not support sessions for review or scripted runs. |
+| GitLab | Use standalone `run` with an [attach gateway](#an-attach-gateway) on a runner with [external host isolation](gitlab.md#explicit-external-host-isolation). |
+| Forgejo | The shipped dispatch workflow does not support sessions. |
 
 ## Attaching to a session
 
-The endpoint is `wss://NAME/`, for the runner's tailnet name, as the
-job's summary and its `session-endpoint` output give it, or as the
-caller's wrapper posts it to the dispatch issue while the session is
-live. From a tagged node the tailnet policy grants the caller's
-`[session] capability`:
+For tailnet access, enable HTTPS certificates on the tailnet and join the
+runner before host setup. With the egress proxy enabled, join without accepting
+tailnet DNS (`tailscale up --accept-dns=false`). Configure access in the runner's
+`[session]` table:
+
+| Setting | What to set |
+| --- | --- |
+| `origins` | List at least one allowed browser origin, even if you only use the terminal client. Use HTTPS except for local clients on `localhost` or `127.0.0.1`. This prevents other sites from using the browser's tailnet access to attach. |
+| `operators` | List allowed Tailscale logins. A client connecting by login also needs an allowed origin. This list can be empty if `capability` is set. |
+| `capability` | Name the app capability for tagged clients. Grant it in the tailnet policy to client devices, not CI runners. If the client sends an origin, it must be allowed. |
+
+While the run is live, use the `wss://NAME/` endpoint from the setup log or
+from your caller if it publishes the endpoint. The job summary and
+`session-endpoint` workflow output are available after the agent job ends,
+too late to attach. To connect from a tagged device with the capability:
 
 ```sh
 agentic-job session connect wss://NAME/
 ```
 
-The terminal client does not send an `Origin` header, so it cannot use
-the operator-login admission path: an ordinary device of an operator in
-`[session] operators` receives HTTP 403 (`no Origin`). That path requires
-a browser client with an allowed Origin; the terminal command above uses
-the capability path instead.
+The terminal client does not send an `Origin` header. If it gets HTTP 403
+when using an operator login alone, use an allowed browser client or connect
+from a device with the capability grant.
 
-It attaches with a replay of everything the session kept of the agent's
-notifications, so the task's turn, its words and its tool calls, scrolls
-by first, then the live stream; each line of standard input is then a
-prompt, answered before the next is sent. The end of the input (Ctrl-D,
-or a script's last line) leaves the session, which ends it. Ctrl-C
-detaches instead: the session goes on until its idle timeout, and the
-client prints the cursor it saw last, so that
+| To… | Do this |
+| --- | --- |
+| Send a prompt | Enter one line. The terminal client sends one turn at a time; if the task is still running, it waits and retries the prompt. |
+| End the session | Close standard input (Ctrl-D in a terminal). Work already in progress can finish before the run ends. |
+| Leave without ending it | Press Ctrl-C. The client prints its last replay cursor. |
+| Resume a detached session | Run `agentic-job session connect --since CURSOR wss://NAME/` before the session ends. This rejoins the same conversation; the terminal client also tries to reconnect automatically after a dropped connection. |
+| Read the stream from a program | Add `--json` for one JSON message per line. See the [ACP wire reference](../specs/session.md#wire) for custom clients and cursors. |
 
-```sh
-agentic-job session connect --since CURSOR wss://NAME/
-```
-
-from the same or another device resumes with what was said meanwhile and
-nothing twice. When the connection drops, from a laptop's sleep or a
-tailnet hiccup, the client connects again by itself with that cursor, up
-to 30 times in a row two seconds apart, and says so on standard error; a
-prompt the bridge had, whose answer was lost with the connection, is not
-sent again, since the agent may be answering it, while one the bridge
-refused because a turn was running goes again. The bridge pings every 20
-seconds and drops a connection silent for 60, so a path that died without
-a close does not keep the client from coming back. Where the cursor is older than what the
-session kept (the latest 4096 notifications, up to 4 MiB), the bridge
-says which cursor it can replay from, the client takes it, and the rest
-is in the run's `acp.jsonl` artifact. `--json` prints each message from
-the bridge as one line for a program that drives the session, cursor
-included in `params._meta.botHarness.cursor`.
-
-Another ACP client, such as the chat pane, does the same over the
-[wire](../specs/session.md#wire): `session/new` with
-`_meta.botHarness.since`, a normal close (code 1000) to end the session,
-and any other end of the connection to come back later. A client that
-attaches without `since` gets only what follows, as the pane does today.
-
-The slot is one client's while it is connected. The agent, which is the
-runner's user, can take it with forged headers whenever it is free, as it
-could before the operator first came; that denies the operator the chat
-and nothing else, and nothing a client sends authorizes a write.
-
-The operator's words: "Another use case I have btw is interactive
-chats this is why ACP. We just mix in Tailscale or equiv. Should be a
-clean mode flag to wait for a connection. Or start from a prompt but
-accept dynamic connections."
-
-A session run already waits for one operator's prompts after its task's
-turn, over the tailnet ([session runs](../specs/session.md)), with the
-runner's user as the agent, which can take the bridge's one client slot
-itself. Writes during a session wait for a premise the agent cannot forge,
-and until then for the end-of-run check and apply. A client attaches late
-or comes back with the cursor it last saw
-([attaching](#attaching-to-a-session)). No end-to-end session has run over
-a real tailnet;
-[#536](https://github.com/cgwalters-forge/agentic-job/issues/536) tracks
-the rest of this work. The proposed
-first bridge is a Unix socket on the
-runner, reached by an `attach` command over Tailscale SSH that copies
-its standard input and output to the socket: ACP stays a byte stream,
-nothing new listens on the network, and the tailnet's own identity
-decides who gets in. Everything below is a proposal.
-
-## What exists
-
-One seam, in `session/clients.rs`. The [session](harness.md) holds
-ACP's `Client` role toward the agent. Every message from the agent
-passes through one tap, which records it and hands the agent's notifications
-to a list of attached clients. The list is empty for a task run; in a
-session run it holds the bridge's one client, which
-[the spec](../specs/session.md) describes with its trust boundaries.
-
-The ACP SDK's `Proxy` role is not what this builds on. It speaks
-`_proxy/*` to a conductor that owns both of its connections, and a run
-with no client side has nothing for a conductor to own.
+By default, the terminal client replays everything still retained. If a cursor
+is too old, the client resumes from the oldest available point; see the run's
+`acp.jsonl` transcript for older events. A prompt accepted before a connection
+dropped is not resent automatically.
 
 ## An attach gateway
 
-A self-hosted runner's job pod has no tailnet identity of its own, so
-nothing there can be served on the tailnet. Instead an attach gateway,
-which only the operator reaches, connects to each job's bridge on the
-cluster's network. The job's runner configuration says where the bridge
-listens:
+For a standalone runner without a tailnet identity, use a gateway that can
+reach the runner over a private or encrypted network. The gateway authenticates
+the operator; the bridge checks a per-run secret to keep out other jobs or
+services that can reach it.
 
-```toml
-[session]
-listen = true
-bind = "0.0.0.0:7790"
-```
+| Where | What to set |
+| --- | --- |
+| Runner configuration | Set `[session] listen = true` and `bind` to the `ADDRESS:PORT` the gateway can reach. Leave `operators`, `origins` and `capability` unset. |
+| Run environment | Set `AGENTIC_JOB_ATTACH_TOKEN` to a fresh secret for each run (32–1024 bytes of visible ASCII; `openssl rand -hex 32` is one way to generate it). The reusable workflow does not pass this variable. |
+| Gateway | Open the WebSocket with `Authorization: Bearer SECRET`, using the same secret. The bridge does not encrypt this connection, so do not expose it on a public or shared network without transport encryption. |
 
-The runner makes a secret for each run, such as `openssl rand -hex 32`
-(32 to 1024 bytes of visible ASCII), gives it to the gateway, and starts
-`run` with it in `AGENTIC_JOB_ATTACH_TOKEN`, for one in the job pod's
-environment; the reusable workflow does not pass it. Without it `run` stops
-before the agent starts. The gateway opens the WebSocket with
-`Authorization: Bearer SECRET`; every connection without that header,
-or with another secret, is refused with 403, and the bridge goes on
-listening for the right one. The protocol after the handshake is the
-same as on the tailnet: one client, prompts and cancels only.
+The terminal client cannot connect directly to this bridge: it does not send
+the bearer header. For a gateway client, see the [ACP wire reference](../specs/session.md#wire).
 
-The secret keeps out whatever else reaches that address, such as
-another job's pod. Such a peer can still open connections faster than
-the gateway finishes its handshake, of which the bridge holds a few at
-once, and so delay or deny the operator the chat. It does not keep out the agent, which is the
-runner's user as `run` is and can read `run`'s environment: as on the
-tailnet, it can take the one client slot ahead of the gateway, which
-only denies the operator the chat. Nothing `run` starts inherits the
-variable, and every log of the run is redacted of it. `tailscale serve`
-is not set up for the port, and `session.operators`, `session.origins`
-and `session.capability` are refused beside `bind`: nothing in front of
-the bridge would set the headers they check, so any client could send
-them. A browser cannot set the header on a WebSocket, so a page cannot
-attach either; the gateway is the one to authenticate the person.
+## Session limits
 
-Writes are where they always are: nothing sent over the bridge
-authorizes one, and they wait for the end-of-run check and apply job.
-The bridge speaks plain WebSocket, so the cluster's network, not this
-bridge, keeps the secret from being read on the way; keep the gateway's
-path to the pod on a network that only it and the job share, or
-encrypted by the cluster.
+| Limit | What to expect |
+| --- | --- |
+| Idle time | `session.idle-minutes` defaults to 10 and can be set to at most 60. It starts when a taskless session is ready or when the initial task turn ends, and resets after each client turn. Attaching or polling does not reset it. |
+| Overall time and budget | The run's limits still apply from startup. For a taskless counted run, the first-inference watchdog starts with the first prompt, not while waiting for it. |
+| Client access | One client can be connected at a time. The agent shares the runner user and can take that slot, preventing the operator from attaching. Do not treat a session prompt as proof of operator consent. |
 
-### In a restricted container
-
-`just test-deployed-session` runs `run` as such a server in a rootless
-Podman container: a non-root user, a read-only image of only the
-programs a session executes, no capabilities, no new privileges, its
-configuration, policy and Claude Code's managed settings mounted
-read-only, and only its state directory and `/tmp` writable. The agent
-is a caller's install, a `claude-agent-acp` on the configured `PATH`
-that plays the fake agent, against the mock broker, with synthetic
-settings and a fixture secret. It shows that managed settings other
-than the configuration's are refused before the agent starts, and the
-same mounted file serves every start unchanged; that a registration the
-broker answers with 503 is tried again, at most four tries in all,
-before a client attaches, prompts and leaves; that a restart with the
-same run identifier and attempt in `--meta` is refused with 409, so
-each start needs its own; and that SIGTERM, passed on by `podman run`,
-ends a waiting server and its registration with exit state 1. The
-container's end takes the agent with it, so this does not show `run`
-stopping its agent; `a_signal_ends_the_run_and_the_agent` does, outside
-a container.
-
-It cannot show isolation between the server and its agent: they are one
-user in one container, so the agent can still read the attach secret,
-the run token and the transcript, and signal `run`, as described above
-and in [the ACP session](harness.md#what-it-does). Read-only mounts stop
-the agent changing its configuration and managed settings, not reading
-them. The image is copied from the host, so the test says nothing of a
-published image, and it shares the host's network to reach the broker
-on loopback, so a deployment's network policy is untested.
-
-## Still to design
-
-[The session spec](../specs/session.md) settles the way from a client
-to the agent (prompts and cancels over the bridge), who answers a
-permission request when a person is watching (the run's policy, still),
-how a prompt sent during a turn is held (it is refused: Claude Code's
-adapter would end the running turn for it) and what ends a session with
-a client (the client leaving on purpose, or an idle timeout). A client
-that joins a session already running, or comes back to one, gets the
-bridge's replay since its cursor.
-
-## Who may attach
-
-A client is a new source of instructions with the authority of whoever
-is typing, but it cannot widen the run: the safe-output types, the
-target, the egress policy and the limits are fixed before the agent
-starts, and nothing sent over ACP changes them.
-
-With `--runner-home`, which every run now has, the agent is the
-runner's user and can reach the bridge's port itself. It can attach
-ahead of the operator and prompt itself, so nothing a client sends can
-stand for the operator's consent to a write.
-
-The user a client logs in as must not be the runner's user. That user
-holds the job's credentials even after setup removes its root access.
-SSH as that user would admit a credentialed user, not a chat client.
-Attaching needs a user of
-its own that can open the socket and nothing else. The tailnet's rules
-must also keep one runner from logging in to another.
-
-Also open: several clients at once, a read-only client, and a
-WebSocket bridge for a browser client, which would have to
-authenticate the client itself.
+The run's permission policy still decides which actions the agent may take.
+For implementation details, see the [session bridge](../crates/agentic-job/src/session/bridge.rs)
+and [terminal client](../crates/agentic-job/src/session/connect.rs).
