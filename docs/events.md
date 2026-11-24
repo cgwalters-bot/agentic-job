@@ -24,10 +24,11 @@ context the agent receives. A workflow starting does not mean the agent will run
    under the call's `with:` and `bases = ["trunk"]` in the bounds file. Otherwise
    the `base` input defaults to `main`.
 
-   Pinning the reusable workflow does not pin these caller files. To keep a pull
-   request from supplying its own bounds or setup, use the base-branch
-   `pull_request_target` pattern in the [label example](#label-caller-and-activation-step)
-   and do not execute its head code in the caller.
+    Pinning the reusable workflow does not pin these caller files. To keep a pull
+    request from supplying its own bounds or setup, use the base-branch
+    `pull_request_target` pattern in the [label example](#label-caller-and-activation-step)
+    and do not execute its head code in the caller.
+
 3. Write `task` as the standing instruction. For item events, use a job-level
    concurrency group keyed to the issue or pull request to avoid overlapping
    runs on the same item.
