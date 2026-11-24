@@ -1,6 +1,17 @@
 //! Opt-in evidence that the pinned agents find the skills and subagents
 //! `run` installs, where it installs them and with the launcher's
 //! switches. Neither makes a model request; no setup or forge access.
+//! The ACP adapter itself and a real session are not covered. CI does not
+//! run it yet. It needs both pinned packages, installed from the pins as
+//! setup does:
+//!
+//! ```sh
+//! cargo run -q --locked --bin pinned-agents -- install "$TMP/o" opencode-ai@1.18.35
+//! c=$(cargo run -q --locked --bin pinned-agents -- install "$TMP/c" @agentclientprotocol/claude-agent-acp@0.88.0)
+//! AGENTIC_JOB_TEST_OPENCODE="$TMP/o/bin/opencode" \
+//! AGENTIC_JOB_TEST_CLAUDE_ACP="$c/node_modules/@agentclientprotocol/claude-agent-acp" \
+//!   cargo test --locked --test skills -- --nocapture
+//! ```
 #![allow(clippy::unwrap_used)]
 
 use std::path::Path;

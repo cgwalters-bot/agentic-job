@@ -1357,6 +1357,15 @@ pub struct Workers {
     pub models: Vec<String>,
 }
 
+/// KIND's native profiles for WORKERS. opencode gets each model added to
+/// its sole provider, and the profile's `model` prefixed with that
+/// provider's name; a prefix for the same provider is accepted and
+/// stripped for the upstream request. A source model definition mapping
+/// the ID to another upstream `id`, or a `whitelist` or `blacklist`
+/// excluding it, is refused. Claude Code takes the ID as it is. Vibe gets
+/// a model under a private `worker-NAME` alias, selected by the profile's
+/// `active_model`; a source alias of that name is refused. Profiles carry
+/// `WORKER_MARKER` so that the next run removes only its own.
 pub fn workers(
     kind: Kind,
     workers: &[config::Subagent],
