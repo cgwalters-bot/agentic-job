@@ -2,137 +2,135 @@
 
 > This text is LLM generated.
 
-agentic-job hardens a CI host so it can run untrusted steps, including a coding agent.
-Its Rust CLI and reusable workflow separate the agent from credentials and check its outputs on another machine before applying them.
-Start with the [overview](../site/overview.md) for usage, limitations and topic documentation,
-and the [project layout](layout.md) for the contributor's map.
+agentic-job hardens a CI host so it can run untrusted steps, a coding agent among them,
+and checks what those steps produce on another machine before applying it.
+This page says what a change must respect and how to check it.
+Start with the [overview](../site/overview.md) for usage and the
+[project layout](layout.md) for where the code lives.
 
 ## Design principles
 
-agentic-job is a generic GitHub agentic-workflow tool that any repository can
-adopt, in the spirit of [gh-aw](https://github.github.com/gh-aw/).
-It knows nothing of agent-board, this organization, or any particular repository,
-custom property, topic, label or account. Repository rules, including which
-repositories are midstream forks and how they are treated, come from the caller's
-configuration, never from code.
+agentic-job is a generic agentic-workflow tool that any repository on any
+supported forge can adopt, in the spirit of [gh-aw](https://github.github.com/gh-aw/).
+It knows nothing of a particular organization, repository, custom property,
+topic, label or account. Repository rules, such as which repositories are
+forks and how they are treated, come from the caller's configuration, never
+from code or defaults.
 
-Generic mechanisms are fine: for example, the `{org, forks}` bounds rule takes
-the organization as a parameter. Names of our repositories, properties or topics
-must not appear in non-test code or defaults. Test fixtures use neutral example
-names such as `example-org/example`, not our real repositories.
+Generic mechanisms are fine: a bounds rule may take an organization as a
+parameter. Test fixtures use neutral names such as `example-org/example`.
+
+Keep it simple: a change should pass the "secure" gut check without extra
+machinery, and before adding a control, name the threat it stops. Hardening
+is not specific to agents, so code and documentation must also read correctly
+for deterministic jobs. Watch what gh-aw does, and share ideas and code with
+it and other projects, citing sources.
 
 ## Build and checks
 
-Run from the repository root on Linux with Git, just and a C compiler/linker.
-The workspace uses Rust edition 2024 and requires Rust 1.88 or newer;
-use stable Rust, Node 22 and Python 3.11+ (`tomllib`). Cargo needs network
-access on a cold cache; ordinary tests use local fixtures and loopback mock
-services, not a real inference service or forge credential.
+You need Linux with Git, [just](https://github.com/casey/just), a C linker,
+stable Rust 1.88 or newer (edition 2024), Node 22 and Python 3.11 or newer.
+Cargo needs network access on a cold cache. Ordinary tests use local fixtures
+and loopback mock services, not a real inference service or forge credential.
 
-The [Justfile](../Justfile) provides the commands from [CI](../.github/workflows/ci.yml),
-with short comments recording prerequisites and observed timings (guidance, not
-CI guarantees). The Markdown recipe spells out the CLI equivalent of CI's action.
-Run the narrow test covering a change first, then applicable checks.
-Run `just fmt` and then `just check` before every commit you hand back;
-a change that fails `just check` isn't done.
+The [Justfile](../Justfile) holds the commands [CI](../.github/workflows/ci.yml)
+runs, with prerequisites and observed timings in its comments.
 
-CI's `javascript` job lets the JavaScript outside `.github/actions/`
-and exactly `corpus.test.mjs`, `handlers.test.mjs` and `collect.cjs` in
-`crates/agentic-job/tests/corpus/` only shrink: put new logic in the Rust binary,
-and do not add `.js`, `.mjs`, `.cjs` or `.ts` files elsewhere. The directory itself
-is not exempt. Keep the legacy `corpus.test.mjs` allowance and its CI
-dependencies until trusted caller evidence supports their removal.
-Keep the [pinned upstream parity drivers](safe-outputs.md#upstream-javascript-disposition)
-and their coverage; this is not acceptance of the 1.0 no-JavaScript bar.
+| Step | Command |
+| --- | --- |
+| Run the narrow test covering your change | `cargo test --locked -p <crate> <name>` |
+| Format | `just fmt` |
+| Required before every commit you hand back | `just check` |
 
-Passing the workspace suite does **not** prove the privileged integration paths:
-`run` and `probe` tests can return successfully without executing those paths,
-and `session` uses a different path without `AGENTIC_JOB_TEST_SANDBOX_USER`.
+A change that fails `just check` isn't done.
 
-Other CI checks need a prepared runner; their exact setup, commands and pins
-are in [ci.yml](../.github/workflows/ci.yml) and [build.yml](../.github/workflows/build.yml).
-Do not run destructive host setup, ignored `sandbox_fresh`/`sandbox_host` tests,
-or secure-host examples inside an existing sandbox: they change users, sudo,
-services and firewall rules. CI uses fresh Ubuntu 26.04 machines with root and
-systemd; its `sandbox` job has a 30-minute limit. There is no second user to
-test as: the runner's user is the only agent user (#2989).
+Passing the workspace suite does **not** prove the privileged paths: `run`
+and `probe` tests can pass without executing them, and `session` takes a
+different path without `AGENTIC_JOB_TEST_SANDBOX_USER`. These checks need
+inputs or permissions a workstation or sandbox usually lacks; leave them to
+CI, whose [ci.yml](../.github/workflows/ci.yml) and
+[build.yml](../.github/workflows/build.yml) hold their setup and pins.
 
-Corpus/parity tests need the pinned external old-tree and gh-aw checkouts;
-validation regeneration needs gh-aw's compiled workflows. Release-pin checks
-download published binaries, proxy hash checks download wheels, and end-to-end
-jobs write to the forge. Leave these to CI when those inputs or permissions
-are absent; do not broaden network access from a sandbox.
-Their CI job limits are 5–20 minutes, not measured runtimes.
+| Check | Needs |
+| --- | --- |
+| Sandbox and secure-host tests (ignored `sandbox_fresh`, `sandbox_host`) | a fresh disposable machine with root and systemd; they change users, sudo, services and firewall rules |
+| Corpus and parity tests | the pinned old-tree and gh-aw checkouts |
+| Validation regeneration | gh-aw's compiled workflows |
+| Release-pin and proxy hash checks | downloads of published binaries and wheels |
+| End-to-end jobs | write access to a forge |
 
-The forge rule is about writes. Reading public forge data with the token the
-run was given is allowed and expected: the item, its comments and review
-threads, check results, Actions job logs and artifacts. Writing to a forge
-(comments, pushes, API mutations, end-to-end tests that write) goes only
-through [safe outputs](safe-outputs.md). A fix run finds what it must fix
-in the latest review on the pull request and the log of the failing required
-check; read both before changing anything. A task that says "measure from a
-real CI log" means fetch one.
+Never run destructive host setup, the ignored sandbox tests or secure-host
+examples inside an existing sandbox, and do not broaden network access from
+one to make a check run.
+
+Reading forge data with the token a run was given is allowed: the item, its
+comments and review threads, check results, job logs and artifacts. Every
+forge write (comments, pushes, API mutations) goes through
+[safe outputs](safe-outputs.md). A fix run reads the latest review on the
+pull request and the log of the failing required check before changing
+anything; a task that says "measure from a real CI log" means fetch one.
 
 ## Code conventions
 
-Rust uses `anyhow::Result`, `Context` for useful failure messages, and
-`bail!`/`ensure!` for invalid input. Workspace lints forbid unsafe code and deny
-`unwrap_used`; unwraps are allowed in tests, not production code. Follow the
-existing small modules and named constants for limits, protocol values and
-environment keys. Extend case-table tests for acceptance/refusal boundaries
-(for example `policy.rs`, `config/compose.rs` and `session/budget.rs`) rather
-than duplicating test bodies. Rustfmt and warning-free Clippy are required.
-Tests must not use `include_str!` for files outside `crates/` or `egress/`;
-read those files at test time instead. The binary may also embed `skills/`
-and `workflow/review.md`, which the source digest covers; the
-`embedded_sources` test refuses anything else, and any include path that
-is not one plain string literal.
-Recent commits usually use `area: Imperative subject` (for example `run: Leave…`);
-explain the reason for a change, not just the diff, in its commit message.
-GitHub uses merged pull request titles in the release notes. Give PRs descriptive
-titles with an area prefix; do not edit `CHANGELOG.md` or add changelog fragments.
-A change to an interface [stable-interfaces.md](stable-interfaces.md) names
-also updates that page.
+- New logic goes in Rust. CI's `javascript` job lets JavaScript outside
+  `.github/actions/` and the corpus harness files it names only shrink. Keep
+  that allowance and the
+  [pinned upstream parity drivers](safe-outputs.md#upstream-javascript-disposition)
+  with their coverage until trusted caller evidence supports removing them;
+  they do not meet the 1.0 no-JavaScript bar.
+- Use `anyhow::Result`, `Context` for useful failure messages and
+  `bail!`/`ensure!` for invalid input. Unsafe code is forbidden and
+  `unwrap` is denied outside tests.
+- Keep modules small and use named constants for limits, protocol values and
+  environment keys. Extend existing case-table tests for acceptance and refusal
+  boundaries rather than duplicating test bodies.
+- Rustfmt and warning-free Clippy are required.
+- Build-time includes come only from what the release source digest covers
+  (`crates/`, `egress/`, `skills/`, `workflow/review.md`), which the
+  `embedded_sources` test enforces; tests read other files at run time.
+- A change to an interface [stable-interfaces.md](stable-interfaces.md) names
+  also updates that page.
+
+Commit subjects use `area: Imperative subject`, and the message explains why.
+Release notes come from merged pull request titles, so give each pull request
+a descriptive title with an area prefix; do not edit `CHANGELOG.md` or add changelog fragments.
 
 ## Security and scope
 
-Keep it simple: pass the "secure" gut check without extra machinery.
-Watch what [gh-aw](https://github.github.com/gh-aw/) does, and share ideas and
-code with it and other projects where we can, citing sources.
-Hardening is not specific to agents; code and documentation must also read
-correctly for deterministic jobs.
+When a change touches workflows, action pins, permissions, token placement,
+caller bounds or check code, explain its security consequences. Preserve the
+[job and token separation](workflow.md) and the
+[safe-output contract](safe-outputs.md):
 
-Explain security consequences whenever touching workflows, action pins,
-permissions, token placement, caller bounds or check code. Preserve the
-[job/token separation](workflow.md) and [safe-output contract](safe-outputs.md):
-`policy` and `check` have read-only repository access; `agent` has read access
-and OIDC permission, but the agent, the runner's user, has at most a read-only
-forge token and never the OIDC request credential, beside which `run` refuses
-to start. Only `apply` consumes `SAFE_OUTPUTS_PAT`,
-explicitly passed even for an environment secret. If empty it falls back to
-the job token, whether or not an apply environment is configured.
-`activate`, `notify` and `conclude` inherit caller permissions and can write
-labels/status; none may execute agent-produced code. Release/pin publishing
-and CI end-to-end cleanup also have write-capable jobs: review their permissions.
+| Job | What it may hold |
+| --- | --- |
+| `policy`, `check` | read-only repository access |
+| `agent` | read access and OIDC permission; the agent, the runner's user, gets at most a read-only forge token and never the OIDC request credential: `run` refuses to start if that credential is present |
+| `apply` | the only consumer of `SAFE_OUTPUTS_PAT`, passed explicitly; when empty it falls back to the job token, whether or not an apply environment is configured |
+| `activate`, `notify`, `conclude` | caller permissions for labels and status; none runs agent-produced code |
 
-The boundaries include `src/policy.rs`, `src/check/`,
-`src/redact.rs`, `src/run/handback.rs`, upload/probe code,
-`src/event/`, sandbox setup/helper/network/check code and `egress/` policy,
-all under the agentic-job crate unless a root path is given, all of
-`crates/secure-host/` (`files.rs` and the egress proxy among it), and
-`crates/safe-outputs/`'s `contract.rs`, `bounds.rs`, `check/`
-(especially patch parsing) and `apply/` (publishing and its git push). Keep size/count/path/type
+Release, pin publishing and end-to-end cleanup jobs can also write; review
+their permissions on any change.
+
+These paths are security boundaries. Keep their size, count, path and type
 limits, no-follow regular-file reads and fail-closed refusals intact.
-See the host's [threat model](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/threat-model.md)
-and [probe coverage](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/probes.md),
-and the agent's [host](sandbox.md) and [check](sandbox-check.md).
 
-Do not edit generated `safe-outputs/validation.json` by hand or vendor gh-aw;
-use its generator against the pinned source when updating it. Do not weaken
-bounds, pins or tests to make a change pass. Keep changes task-scoped: no
-unrelated formatting, build artifacts, binary files, symlinks, submodules,
-new executables, mode changes or credentials. A run's brief defines protected
-paths and output limits; this guide does not grant exceptions to them.
-Do not leave generated litter such as `__pycache__` in a patch.
+| Crate | Boundary code |
+| --- | --- |
+| `crates/agentic-job` | `src/policy.rs`, `src/check/`, `src/redact.rs`, `src/run/handback.rs`, `src/event/`, upload and probe code, sandbox setup, helper, network and check code |
+| `crates/secure-host` | all of it, including `files.rs` and the egress proxy |
+| `crates/safe-outputs` | `contract.rs`, `bounds.rs`, `check/` (patch parsing above all) and `apply/` (publishing and its push) |
+| repository root | `egress/` policy |
+
+The agent's [host](sandbox.md) and [check](sandbox-check.md) pages link the
+host's threat model and probe coverage.
+
+Do not weaken bounds, pins or tests to make a change pass. Do not edit the
+generated `safe-outputs/validation.json` by hand or vendor gh-aw; run its
+generator against the pinned source. Keep changes task-scoped: no unrelated
+formatting, build artifacts, binaries, symlinks, submodules, new executables,
+mode changes, credentials or generated litter such as `__pycache__`. A run's
+brief sets protected paths and output limits, and this guide grants no
+exceptions to them.
 
 Agent hand-back expectations are in [AGENTS.md](../AGENTS.md#hand-back).
