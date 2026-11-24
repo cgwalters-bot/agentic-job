@@ -191,7 +191,52 @@ automatic job token already has write access to that repository.
 | `TRIAL_SCRIPTED` | `true`; accepts only `implement` on the default branch. |
 | `TRIAL_RUNNER` | JSON runner labels for a trusted isolated runner with pinned `agentic-job`, Bash, Git and jq. |
 | `TRIAL_FORGEJO_URL` | Forgejo instance URL. |
-| `AGENT_BOUNDS` | Absolute path to runner-provisioned bounds, not writable by jobs. Admit the public target and base, set `[forgejo].push_repo` to the separate fork, and bound `[forgejo.outputs]` to one `create_pull_request`. |
+| `AGENT_BOUNDS` | Absolute path to runner-provisioned bounds, not writable by jobs; the runner may also [pin their digest](#bounds-the-runner-pins). Admit the public target and base, set `[forgejo].push_repo` to the separate fork, and bound `[forgejo.outputs]` to one `create_pull_request`. |
 
 Success means the one-file patch and draft request passed check, not that
 a pull request was opened.
+
+## Bounds the runner pins
+
+The bounds limit what a run may ask for, so a job must not be able to
+choose them. A persistent runner keeps the file on its host, owned by
+another user and read-only to jobs, and passes its absolute path.
+
+An ephemeral job container, such as a one-job Kubernetes pod, mounts nothing
+from the runner, and admission policy may allow only an `emptyDir` volume.
+There, bake the bounds into the job image at an absolute path and pass that
+path. `policy` given `--allow-sha256 HEX` beside `--allow FILE` refuses any
+file whose SHA-256 (as `sha256sum` prints it) differs, so neither a job nor
+a repository variable naming another path can substitute other bounds.
+Set the digest in the runner's own configuration, never in a
+repository variable or secret that a job's token or a repository admin can
+change: on GitHub, an environment variable of the self-hosted runner
+service; on GitLab, the runner's `environment` setting in `config.toml`; on
+Forgejo, `runner.envs` in the runner's configuration file, which Forgejo
+Runner copies into each job's environment (a variable set only on the
+runner process or pod is not). For the [Forgejo trial](#scripted-forgejo-trial)
+with an image that holds the bounds at `/etc/agentic-job/bounds.toml`, set
+`AGENT_BOUNDS` to that path, `TRIAL_RUNNER` to `["agentic-job"]`, and
+configure the runner with the image pinned by digest, since it also
+supplies the `agentic-job` that checks the pin:
+
+```yaml
+runner:
+  labels:
+    - "agentic-job:docker://registry.example/agentic-job-trial@sha256:<image digest>"
+  envs:
+    AGENT_BOUNDS_SHA256: <sha256sum of /etc/agentic-job/bounds.toml>
+```
+
+The caller's workflow, on the protected default branch, passes that
+variable as `--allow-sha256`; the [Forgejo trial](../workflow/forgejo/dispatch.yml)
+does when it is set, and other callers of `policy` need the same flag.
+A runner without the variable runs unpinned, so set it on every runner the
+workflow's labels can select. A changed bounds file then needs a new digest
+from the runner's operator, not just a push.
+
+The trial does not fetch bounds: `AGENT_BOUNDS` is always a path, since
+a repository-chosen URL would make the runner send requests on its
+network whatever the digest says. `--allow-sha256` is off unless given
+and checks only `--allow`; `--org-allow` can only narrow what `--allow`
+admits.

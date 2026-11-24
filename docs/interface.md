@@ -47,7 +47,7 @@ use `external-fetch`, `policy --external-receipt` with `--output-repo`, and
 
 | Input | Contents |
 | --- | --- |
-| `policy --allow FILE` | Caller-owned [bounds](safe-outputs.md#the-bounds-and-the-policy): allowed clone hosts, repositories and base branches, output types and counts, and patch size and file limits. |
+| `policy --allow FILE` | Caller-owned [bounds](safe-outputs.md#the-bounds-and-the-policy): allowed clone hosts, repositories and base branches, output types and counts, and patch size and file limits. With `--allow-sha256 HEX`, refused unless it has that [pinned digest](dispatch.md#bounds-the-runner-pins). |
 | `run --policy FILE` | The approved request written by `policy`. |
 | `run --task FILE` | The instructions for the agent. |
 | `run --meta FILE` | CI metadata (JSON), copied into `summary.json`. Include `run_id`, which names the patch. |

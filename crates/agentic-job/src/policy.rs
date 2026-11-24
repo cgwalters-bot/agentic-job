@@ -86,6 +86,9 @@ const GITHUB_HOST: &str = "github.com";
 /// `--outputs all`: every type the bounds list.
 const ALL_OUTPUTS: &str = "all";
 
+/// Hex digits in a SHA-256, as `--allow-sha256` takes it.
+const SHA256_HEX_LEN: usize = 64;
+
 /// `--max-outputs max`: as many as the bounds allow.
 const MAX_OUTPUTS: &str = "max";
 
@@ -123,6 +126,10 @@ pub struct Args {
     /// The caller's bounds file
     #[arg(long, value_name = "FILE")]
     pub allow: PathBuf,
+    /// The SHA-256 `--allow` must have, in hex as `sha256sum` prints it:
+    /// a runner pins it where jobs read the bounds from their own image
+    #[arg(long, value_name = "HEX")]
+    pub allow_sha256: Option<String>,
     /// Optional organization bounds; both files must admit the request
     #[arg(long, value_name = "FILE")]
     pub org_allow: Option<PathBuf>,
@@ -238,15 +245,43 @@ impl Load for Policy {
 
 impl Load for Bounds {
     fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading the bounds file {}", path.display()))?;
-        let bounds: Self = toml::from_str(&text)
-            .with_context(|| format!("parsing the bounds file {}", path.display()))?;
-        bounds
-            .validate()
-            .with_context(|| format!("in the bounds file {}", path.display()))?;
-        Ok(bounds)
+        load_bounds(path, None)
     }
+}
+
+/// Reads a bounds file, refusing it unless its bytes have the SHA-256
+/// given in hex. A runner pins the digest in its own configuration where
+/// its jobs read the bounds from their image, so a job cannot widen them:
+/// it would have to change the runner's configuration, not just the file.
+fn load_bounds(path: &Path, sha256: Option<&str>) -> Result<Bounds> {
+    if let Some(expected) = sha256 {
+        ensure!(
+            expected.len() == SHA256_HEX_LEN
+                && expected
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "--allow-sha256 is not {SHA256_HEX_LEN} lowercase hex digits: {expected:?}"
+        );
+    }
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading the bounds file {}", path.display()))?;
+    if let Some(expected) = sha256 {
+        let actual = crate::external::sha256(&bytes);
+        let actual = actual.strip_prefix("sha256:").unwrap_or(&actual);
+        ensure!(
+            actual == expected,
+            "the bounds file {} has SHA-256 {actual}, not the pinned {expected}",
+            path.display()
+        );
+    }
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("reading the bounds file {}", path.display()))?;
+    let bounds: Bounds = toml::from_str(&text)
+        .with_context(|| format!("parsing the bounds file {}", path.display()))?;
+    bounds
+        .validate()
+        .with_context(|| format!("in the bounds file {}", path.display()))?;
+    Ok(bounds)
 }
 
 /// Compiling one run's request, as the command line gives it, within a
@@ -1027,7 +1062,7 @@ fn exempt(
 }
 
 pub fn run(args: &Args) -> Result<Exit> {
-    let bounds = Bounds::load(&args.allow)?;
+    let bounds = load_bounds(&args.allow, args.allow_sha256.as_deref())?;
     let org_bounds = args.org_allow.as_deref().map(Bounds::load).transpose()?;
     dispatch_admission(bounds.dedupe || org_bounds.as_ref().is_some_and(|b| b.dedupe))?;
     let mut fetch = context::forge();

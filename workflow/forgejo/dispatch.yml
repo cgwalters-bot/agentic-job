@@ -77,7 +77,10 @@ jobs:
         shell: bash
         run: |
           clone_url="${FORGEJO_URL%/}/$TARGET_REPO"
-          agentic-job policy --allow "$AGENT_BOUNDS" --repo "$TARGET_REPO" --base "$TARGET_BASE" \
+          # AGENT_BOUNDS_SHA256, when the runner's `runner.envs` sets it, holds
+          # the bounds file to the runner operator's digest.
+          agentic-job policy --allow "$AGENT_BOUNDS" ${AGENT_BOUNDS_SHA256:+--allow-sha256 "$AGENT_BOUNDS_SHA256"} \
+            --repo "$TARGET_REPO" --base "$TARGET_BASE" \
             --clone-url "$clone_url" --kind branch --outputs create_pull_request --max-outputs 1 > "$RUNNER_TEMP/policy.json"
           # Forgejo's automatic job credential can write to the dispatch repository.
           push_repo=$(jq -er '.push_repo | strings | select(length > 0)' "$RUNNER_TEMP/policy.json")

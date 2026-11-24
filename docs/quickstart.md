@@ -208,7 +208,10 @@ substitute a provider key; GitLab has no supported inference registration path.
    default branch. Set `TRIAL_RUNNER` to its runner labels as JSON (for example
    `["agentic-job"]`), `TRIAL_FORGEJO_URL` to the instance URL, `AGENT_BOUNDS`
    to the absolute path of the runner-owned [bounds file](dispatch.md#scripted-forgejo-trial),
-   and `TRIAL_SCRIPTED` to `true`. Admit one `create_pull_request` and one patch
+   and `TRIAL_SCRIPTED` to `true`. For ephemeral job containers, bake the
+   bounds into the job image and pin their `sha256sum` digest as
+   `AGENT_BOUNDS_SHA256` under `runner.envs` in the runner's configuration,
+   not as a repository variable ([pinned bounds](dispatch.md#bounds-the-runner-pins)). Admit one `create_pull_request` and one patch
    file; omit `allow_http` for HTTPS. Do not give the dispatch repository or
    its runners a publishing PAT: a runner label does not authorize a workflow
    or ref, and Forgejo's automatic token can write to the dispatch repository.

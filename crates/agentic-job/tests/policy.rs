@@ -340,6 +340,44 @@ fn policy(allow: &Path, change: &[(&str, &str)]) -> Output {
         .expect("running agentic-job")
 }
 
+/// `--allow-sha256` admits only the bounds file with that digest, checked
+/// on the bytes that are parsed; a malformed pin is refused before the
+/// file is read.
+#[test]
+fn pinned_bounds_digest() {
+    let digest: String = ring::digest::digest(
+        &ring::digest::SHA256,
+        &std::fs::read(data("allow.toml")).unwrap(),
+    )
+    .as_ref()
+    .iter()
+    .map(|b| format!("{b:02x}"))
+    .collect();
+    let other = "0".repeat(64);
+    // The bounds file, the pin, the exit status and a part of the refusal.
+    for (file, pin, code, refusal) in [
+        ("allow.toml", digest.as_str(), 0, ""),
+        ("allow.toml", other.as_str(), 2, "not the pinned"),
+        ("allow.toml", &digest.to_uppercase(), 2, "lowercase hex"),
+        ("allow.toml", &digest[1..], 2, "lowercase hex"),
+        ("allow.toml", "", 2, "lowercase hex"),
+        ("absent.toml", "z", 2, "lowercase hex"),
+    ] {
+        let output = Command::new(BIN)
+            .arg("policy")
+            .arg("--allow")
+            .arg(data(file))
+            .args(["--allow-sha256", pin])
+            .args(REQUEST.iter().flat_map(|(flag, value)| [*flag, *value]))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(code), "{pin:?}: {stderr}");
+        assert!(stderr.contains(refusal), "{pin:?}: {stderr}");
+        assert_eq!(output.stdout.is_empty(), code != 0, "{pin:?}");
+    }
+}
+
 #[test]
 fn organization_bounds_cli() {
     for (file, code) in [("allow.toml", 0), ("absent.toml", 2)] {

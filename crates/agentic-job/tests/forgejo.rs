@@ -809,7 +809,24 @@ fn scripted_dispatch(forge: &Forge, dir: &Path) {
     assert!(temp.join("policy.json").exists(), "{redirected:?}");
     assert!(!temp.join("handback").exists(), "{redirected:?}");
 
-    assert_success("Forgejo producer", &run("produce"));
+    // Bounds held to the pin the runner's configuration sets.
+    let bounds = std::fs::read(dir.join("publishing.toml")).unwrap();
+    let digest: String = ring::digest::digest(&ring::digest::SHA256, &bounds)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let refused = run_with("produce", &[("AGENT_BOUNDS_SHA256", "0".repeat(64))]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("not the pinned"),
+        "{refused:?}"
+    );
+    assert!(!temp.join("handback").exists(), "{refused:?}");
+    assert_success(
+        "Forgejo producer",
+        &run_with("produce", &[("AGENT_BOUNDS_SHA256", digest)]),
+    );
 
     let patch = temp.join("handback/aw-agent-run-450.patch");
     let original = std::fs::read(&patch).unwrap();
