@@ -2,502 +2,228 @@
 
 > This text is LLM generated.
 
-This page names what a caller may rely on across releases once 1.0 is
-cut. Until then nothing is promised, and a 0.x release may change any
-of it; [GitHub Releases](https://github.com/cgwalters-forge/agentic-job/releases)
+This page lists what a caller can rely on across releases. Each entry
+links to the page that documents it in full.
+
+## The promise
+
+Before 1.0, nothing is promised: a 0.x release may change anything here.
+[GitHub Releases](https://github.com/cgwalters-forge/agentic-job/releases)
 say what each release changed.
-From 1.0, a stable interface is removed, renamed or given a different
-meaning only in a new major version, and a release that deprecates one
-says so in its release notes first. New optional inputs, keys, types and
-fields may come in any release.
 
-Everything not named here is internal and may change in any release:
-the other workflows' and actions' inputs, job and step names, artifact
-names and their contents (`policy.json`, `summary.json`, `applied.json`
-and the rest), the agent's brief, the built-in skills, and the
-`agentic-job` commands other than through the files below.
+From 1.0, a stable interface is removed, renamed or given a new meaning
+only in a new major version. A release that deprecates one says so in its
+release notes first. New optional inputs, keys, request types and fields
+may come in any release.
 
-Standalone `run` accepts `[host] isolation = "external"` and uses it by default
-on detected GitLab containers. Explicit configuration takes precedence; otherwise
-uncertain environments and GitHub Actions default to `managed`. This does not add
-a reusable-workflow input. Summaries and hand-back metadata distinguish declared
-from detected delegation, not proof of host controls; see
-[external host isolation](gitlab.md#explicit-external-host-isolation).
+Unlike [gh-aw](https://github.github.com/gh-aw/reference/releases/), there is
+no compiled lock file or runtime version check: your pin is the compatibility
+boundary. Pin the workflows and the binary to a release or commit
+([versions to pin](workflow.md#versions-to-pin)), and upgrade them together.
+Configuration files refuse keys they do not know, except a few that their
+pages name as accepted and ignored. So an older pin refuses a file that uses a
+key added in a later release. From 1.0, a file that works with one release
+keeps working with the next release in the same major version.
 
-The opt-in [external correlation interface](dispatch.md#binary-correlation-interface)
-is currently internal: `policy.yml`'s `external-receipt` input and
-`external-run-id` output, `check.yml`'s `detection-result` output, the
-dispatch record/receipt, their GitLab forms, and the binary fetch/release
-commands with `external-fetch --forge`. These do
-not add an external mode to the stable complete reusable workflow, enable
-a caller, or change hosted defaults.
+Where a page documents the values a stable input or key takes, such as
+`base: pr:N` ([dispatch](dispatch.md)) or `status-comment-mode`'s `edit` and
+`add`, those values are stable too.
+
+Everything not listed here is internal and may change in any release. That
+includes the inputs of the other workflows and actions (`policy.yml`,
+`check.yml`, `apply.yml` and the rest), job and step names, artifact names and
+contents (`policy.json`, `summary.json`, `applied.json` and so on), the agent's
+brief, the built-in skills, and `agentic-job` commands except as described
+below. Interfaces marked experimental on their own pages, such as the
+standalone `safe-outputs` CLI's context and receipt and the
+[external correlation interface](dispatch.md#binary-correlation-interface),
+are not stable either.
+
+## What is stable
+
+| Interface | Forges | Reference |
+| --- | --- | --- |
+| [The reusable workflow](#the-reusable-workflow): inputs, secrets, `exit` and `failure-class` | GitHub | [workflow](workflow.md#a-caller) |
+| [The review workflow's dispatch](#the-review-workflows-dispatch) | GitHub | [review](review.md#dispatched-reviews) |
+| [Configuration files](#configuration-files): bounds, runner and secure-host | GitHub, GitLab, Forgejo | [files read](interface.md#files-read) |
+| [Safe-output requests](#safe-output-requests) and which forge publishes which | GitHub, GitLab, Forgejo | [safe outputs](safe-outputs.md) |
+| [Hand-back files](#hand-back-files) an agent or job leaves | GitHub, GitLab, Forgejo | [what the agent does](safe-outputs.md#what-the-agent-does) |
+| [Publishing from your own CI](#publishing-from-your-own-ci): `apply --forge`, its target and status flags, and its token variables | GitLab, Forgejo | [publishing to GitLab](safe-outputs.md#publishing-to-gitlab), [publishing to Forgejo](safe-outputs.md#publishing-to-forgejo) |
+
+## Publishing from your own CI
+
+On GitLab and Forgejo you run `agentic-job policy`, `check` and `apply` from
+your own CI; see [GitLab CI](gitlab.md) and [Forgejo](quickstart.md#forgejo).
+Besides the files and request types below, these parts of
+`agentic-job apply --forge gitlab|forgejo` are stable, with the `check`
+flags they depend on:
+
+| Part | Names |
+| --- | --- |
+| Where to publish | `--server`, `--repo`, `--policy`, `--checked`, `--run-url`, `--push-repo` |
+| The caller's comment target | `--comment-target`; on GitLab also `--comment-target-kind` (`issue` or `pull-request`) and `--run-summary`, which posts what `check --run-summary FILE` accepted |
+| Inline review comments | `check --comment-repo`, `--comment-target` and `--review-head` |
+| The caller's commit status | `--status` and `--status-sha`, which set the status named `agentic-job`; on GitLab also `--status-ref` and `--status-pipeline-id` |
+| The write token | `FORGEJO_TOKEN` or `GITLAB_TOKEN`; or, when `APPLY_ROLE_BINDINGS` is nonempty, `STATUS_TOKEN`, `REVIEW_TOKEN`, `PUSH_TOKEN` and `PUBLICATION_TOKEN` with no fallback ([Forgejo and GitLab roles](safe-outputs.md#forgejo-and-gitlab-roles)) |
 
 ## The reusable workflow
 
-Repository paths in GitLab bounds and the `policy`, `check` and `apply` CLI
-path accept two or more components (`group/subgroup/project`). GitHub and
-Forgejo require exactly `owner/name`. Components use ASCII letters, digits,
-`_`, `.` and `-`, with no empty or dot-only components. Fork ownership checks
-exclude the target's entire top-level GitLab group, since CI variables inherit
-recursively into subgroups. Repository bounds
-and explicit GitLab selection still apply; this does not enable a new output.
+Call [`.github/workflows/agentic-job.yml`](../.github/workflows/agentic-job.yml)
+with `workflow_call`. Each input's `description:` field and
+[a caller](workflow.md#a-caller) say what it does.
 
-The secure-host split preserves `/secure-host` and `/agentic-job` in the
-image, both installed executable names, the host `agentic-job` compatibility
-shim and the warned `[sandbox]` alias for `[host]`. Source/release support
-is not effective deployment: the forwarder still selects the legacy v0.6.9
-image. CI records that baseline separately from standalone executable and
-action-call acceptance; see [published acceptance](secure-host.md#published-standalone-acceptance-2070)
-for exact revisions and pending adoption/E2E dependencies (#2070/#2656).
+| Group | Inputs |
+| --- | --- |
+| The run | `id`, `task`, `task-artifact`, `repo`, `base`, `kind`, `outputs`, `max-outputs`, `allow`, `config`, `context`, `push-item`, `proposals-artifact`, `bind-continuation` |
+| Reviews and events | `review`, `advisory`, `review-task`, `review-item`, `review-shared-task`, `review-head`, `event` |
+| The agent | `agent`, `model`, `agent-config-repo`, `agent-config-ref`, `agent-config-path`, `agent-skills`, `agent-user`, `github-reads`, `runner-gate`, `packages`, `npm`, `setup`, `egress-write-policy`, `session`, `idle-minutes` |
+| Runners and the binary | `runner`, `agent-runner`, `build-binary` |
+| Inference | `inference-url`, `inference-register` (`github-oidc`, `plain` or `token-file`), `inference-audience`, `inference-token-file` |
+| Limits | `timeout`, `max-requests`, `max-tasks`, `budget-usd` |
+| Applying | `output-repo`, `item-repo`, `apply-environment`, `apply-partial`, `apply-staged`, `require-safe-outputs-pat`, `comment-target`, `issue`, `notify`, `status-comment`, `status-comment-mode`, `title-prefix`, `branch-prefix`, `artifact-prefix`, `role-bindings` |
 
-Runner-only migration note (5 November 2026): `agent-user: runner` is the
-only accepted value. The `sandbox` option, superseded by #2989, was removed in
-[#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991) and is
-refused; it is no escape for private, child-agent or credentialed
-inference/MCP launch. A session (`session: true`) runs with the runner as
-the agent ([session runs](../specs/session.md)). See [removed keys](interface.md#removed-keys-and-runner-mode-refusals).
+`agent-user` accepts only `runner`; removed values are refused
+([removed keys](interface.md#removed-keys-and-runner-mode-refusals)).
+`runner` and `agent-runner` default to `"ubuntu-26.04"`.
+`runner-gate` is off by default ([launch gate](secure-host.md#the-runner-only-launch-gate)).
 
-[`.github/workflows/agentic-job.yml`](../.github/workflows/agentic-job.yml),
-called with `workflow_call`. Its `description:` fields and
-[workflow.md](workflow.md#a-caller) document each input.
+These inputs are not stable: `budget` (use `budget-usd`); `fake-profile`,
+`expect-check-refusal` and `secure-host-image-artifact-id`, which exist for
+this repository's tests; and `inference-provider` and
+`inference-register: api-key`, which are parsed but refused
+([a provider API key](inference.md#a-provider-api-key)).
 
-Inputs:
+| Secret | Use |
+| --- | --- |
+| `SAFE_OUTPUTS_PAT` | The token the apply job writes with. Pass it explicitly, not with `inherit` ([the apply job and its token](workflow.md#the-apply-job-and-its-token)). |
+| `STATUS_TOKEN`, `REVIEW_TOKEN`, `PUSH_TOKEN`, `PUBLICATION_TOKEN` | One token per role when `role-bindings` is set; there is then no fallback to `SAFE_OUTPUTS_PAT` ([role credentials](workflow.md#caller-configured-role-credentials)). |
 
-- the run: `id`, `task`, `task-artifact`, `repo`, `base`, `kind`,
-  `outputs`, `max-outputs`, `allow`, `config`, `context`, `push-item`,
-  `proposals-artifact`, `bind-continuation`;
-- reviews and events: `review`, `advisory`, `review-task`, `review-item`,
-  [`review-shared-task`](review.md#shared-code-review-task), `review-head`, `event`;
+The secrets `INFERENCE_API_KEY` and `MCP_TOKEN` are declared for
+compatibility but reach no job, and are not stable.
 
-- the agent: `agent`, `model`, `agent-config-repo`, `agent-config-ref`,
-  `agent-config-path`, `agent-skills`, `agent-user` (only `runner` since
-  #2989), `github-reads`, `runner-gate` (off by default;
-  [launch gate](secure-host.md#the-runner-only-launch-gate)),
-  `packages`, `npm`, `setup`, `egress-write-policy`, `session`,
-  `idle-minutes`;
-- runners and the binary: `runner`, `agent-runner`, `build-binary`;
-- inference: `inference-url`, `inference-register` (`github-oidc`,
-  `plain`, `token-file`), `inference-audience`, `inference-token-file`;
-- limits: `timeout`, `max-requests`, `max-tasks`, `budget-usd`;
-- applying: `output-repo`, `item-repo`, `apply-environment`,
-  `apply-partial`, `apply-staged`, `require-safe-outputs-pat`,
-  `comment-target`, `issue`, `notify`, `status-comment`, `status-comment-mode`,
-  `title-prefix`, `branch-prefix`, `artifact-prefix`, `role-bindings`.
+The repository variable `SOURCE_BUILD_ARTIFACTS=true`, off by default, runs
+the binary from main's latest attested build instead of a release, and
+`SOURCE_BUILD_COMMIT=FULL_SHA` holds it to one commit
+([where the binary comes from](workflow.md#where-the-binary-comes-from)).
+Review calls ignore both and always run the binary for the called workflow's
+source, so changing them does not roll back a review.
 
-The optional repository variable `SOURCE_BUILD_ARTIFACTS=true` selects the latest
-successful main push's attested `pin.yml` workflow artifact in policy and dispatch
-(off by default). `SOURCE_BUILD_COMMIT=FULL_SHA` restricts that selection for hand
-rollback; the artifact must still be retained. Unlike legacy source-addressed
-fetching, this deliberately permits a binary newer than the workflow checkout.
-Review calls (`review: true`, or dispatch kind `review`) ignore both variables
-and always run the binary for the called source.
-It replaces the unused opt-in `SOURCE_BUILD_OCI` transport. It does not change
-`build-binary`, version pins or the trusted publisher identity. See
-[binary distribution](workflow.md#where-the-binary-comes-from).
+### Why a run failed
 
-`advisory` is off by default and requires the restricted event-review contract
-in [head-bound advisory publication](safe-outputs.md#head-bound-advisory-publication).
-It publishes prose or nothing, never a review verdict/status or classifier result.
-All workflow pieces must use a release containing the input at the same pin.
+Two outputs say how a run that did not end well ended
+([why a run failed](workflow.md#why-a-run-failed)). `exit` is the run's exit
+state: 0, 1, 3, 4 or 124 ([exit states](interface.md#exit-states)). An error
+of `run` itself, such as a launch gate refusal before the agent starts,
+has `exit` 2 and no `failure-class`. The job log says why; retrying a gate
+refusal on the same host will fail again.
+`failure-class` is empty or one of these words:
 
-`bind-continuation` defaults to `false`. With a local admitted `push-item`, it
-records trusted repository/PR/head/run/attempt context, and check and apply
-refuse raw and checked uploads from any other run attempt, without enabling
-unchanged completion or readiness. A bound run is re-run with all its jobs, not
-only failed ones. Legacy callers are unchanged. See the
-[continuation contract](safe-outputs.md#unchanged-completion-remains-unavailable).
-The internal CLI-only `policy --continuation-verification JSON` can pin an
-independent Actions verifier and nonempty required jobs in that context. An
-explicit bounded unchanged candidate can then produce `unchanged_completion` in
-the checked report, but no reusable-workflow input enables it and apply does not
-consume it or enable unchanged readiness. Legacy identity-only callers are unchanged.
+| Word | Meaning | Requeue? |
+| --- | --- | --- |
+| `timeout` | The run reached its time limit. | read the summary |
+| `budget` | The run went over its budget. | read the summary |
+| `stall` | A turn sent nothing for the stall timeout, twice. | read the summary |
+| `agent_exit` | The agent's process exited. | read the summary |
+| `inference_rate_limited` | The inference service rate-limited the run. | yes, after a wait |
+| `inference_overloaded` | The inference service was overloaded. | yes, after a wait |
+| `inference_unreachable` | The inference service could not be reached. | yes, after a wait |
+| `inference_quota` | The inference account ran out of quota. | no |
+| `inference_unauthorized` | The inference service refused the credential. | no |
+| `control_unreachable` | The host check before the run could not reach a host outside the runner, so the agent never started; `exit` is 4. | a bounded number of times |
 
-Secrets: `SAFE_OUTPUTS_PAT`, which a caller should pass explicitly
-rather than by `inherit`
-([the apply job and its token](workflow.md#the-apply-job-and-its-token)).
-It also serves the optional early token check and legacy status comments,
-never the agent or check job.
-Optional `STATUS_TOKEN`, `REVIEW_TOKEN`, `PUSH_TOKEN` and `PUBLICATION_TOKEN`
-bind the four fixed roles when `role-bindings` is nonempty; there is no legacy
-fallback in that mode. The JSON binds every role to a positive `actor_id` and
-optional positive `app_id`, not token names or agent-selected identities
-([role credentials](workflow.md#caller-configured-role-credentials)).
+The word is fixed, but it is read from what the agent says and prints, so an
+agent can make a run end `inference_rate_limited`. Bound how often you
+requeue one item, as with any retry. A new word may come
+in any release. Treat a word you do not know as a failure to look at, not
+one to retry.
 
-Both `runner` and `agent-runner` default to the JSON string
-`"ubuntu-26.04"`. Explicit labels and runner groups still resolve in the
-calling repository; architecture-specific and special runners are not remapped.
-
-Outputs `exit` and `failure-class` say how a run that did not end well
-ended ([why a run failed](workflow.md#why-a-run-failed)). `exit` is
-`agentic-job run`'s state (0, 1, 3, 4, 124), or 4 when the host check
-before it failed only to reach a host outside the runner, so the agent
-never started. It is 2, with no `failure-class`, on an error of `run`
-itself, such as a [launch gate](secure-host.md#the-runner-only-launch-gate)
-refusal before the agent starts: the job log says why, and a gate refusal
-recurs on a retry on the same host. `failure-class` is empty or one fixed word: `timeout`,
-`budget`, `stall`, `agent_exit`, `inference_rate_limited`,
-`inference_overloaded`, `inference_unreachable`, `inference_quota`,
-`inference_unauthorized`, or `control_unreachable` for that host check.
-A new word may come in any release; a caller treats one it does not know
-as a failure to look at, not to requeue.
-
-For the host-only `control_unreachable` failure, the run action also emits
-a failure annotation beginning `agentic-job run ended with exit state 4`
-followed by a space, `(control_unreachable):` and host diagnostics. This is the
-existing scheduler not-started contract, including when the outer composite
-step fails; ordinary host failures and success do not emit this annotation.
-The host check still fails closed without starting the agent.
-
-`status-comment` preserves opening whole-line hidden caller comments, except
-tool-owned `agentic-job-` and `agent-board-maintain-plan` markers; see the
-[status provenance contract](workflow.md#optional-threat-detection).
-With `notify: comment` and a notified numeric item, checked no-write-only
-(`noop`, `missing_tool`, `missing_data`) reasons up to 1000 UTF-16 units are
-inline; longer sanitized reports are collapsed in the same status comment.
-The rendered report budget is 48,000 UTF-8 bytes and the total body budget is
-60,000 bytes, including escaping and all markers. Overflow explicitly links the
-retained checked-outputs artifact. Noops do not become general publisher writes;
-notification opt-outs and blocked/missing-data exceptions are unchanged
-([outcomes](workflow.md#what-the-apply-job-does-before-it-writes)).
-
-`status-comment` remains a numeric owned same-item comment ID, never an enum.
-`status-comment-mode` is separately validated as `edit` (default, one item status)
-or `add` (one run status, edited on completion/retry); a numeric ID takes precedence.
-In `add` mode, lookup requires the matching run ID in the final run/status trailer,
-not a marker quoted earlier in the comment.
-With `notify: comment`, actionable outcomes update status and also add one
-run-keyed notice: checked `missing_data` with `data_type: "operator-question"`
-and nonblank reason, an unexpected checked refusal requiring correction/policy
-decision, or an applied reviewable result. Routine progress and retryable
-infrastructure failures stay status-only. See the [classification and caller
-contract](workflow.md#quiet-status-and-actionable-notices), including agent-board's
-separate controller integration and the prohibition on overwriting round claims.
-
-Not stable: `budget`, deprecated in favour of `budget-usd`;
-`fake-profile`, `expect-check-refusal` and
-`secure-host-image-artifact-id`, which exist for this repository's
-tests; `inference-provider` and `inference-register: api-key`, which parse but
-are refused by runner admission (GitHub billing implies `api-key`); and the
-compatibility secrets `INFERENCE_API_KEY` and `MCP_TOKEN`, which are declared
-but forwarded to no job
-([refused for now](inference.md#a-provider-api-key)).
-
-## Dispatch stacking
-
-For a public implement run, `base: pr:N` selects an open PR in the target
-repository. The caller opts in with `AGENTIC_JOB_STACK_AUTHOR`, permits the
-resolved branch in `bases`, and enables native `create_pull_request` publication;
-the ordinary branch form of `base` is unchanged.
-See [dispatch](dispatch.md) for admission and publication rules.
+For `control_unreachable`, the run step also fails with an error annotation
+that begins `agentic-job run ended with exit state 4 (control_unreachable):`.
+A scheduler can match that prefix to tell a run that never started.
 
 ## The review workflow's dispatch
 
-Review requests may opt into `add_labels` beside the verdict using the existing
-safe-output configuration: `max = 1`, exactly one `allowed` spelling, fixed to
-the reviewed repository and PR. Use total `max-outputs: '2'` without inline
-findings or `'12'` with up to ten findings. Without that explicit allowance,
-escalation is off. Classifiers remain verdict-only. The request's only fields
-are `type`, `repo`, `item_number` and the exact singleton `labels` array.
-The general `add_labels` checker now also refuses unsupported raw fields, before
-collection can hide them (GitLab retains its kind-specific target-number field).
-`policy.yml` forwards the effective bound as `review-label-bound`; check and
-submit receive it as trusted `REVIEW_LABEL_BOUND` JSON, with `REVIEW_REPO` on
-`review verdict` supplying the fixed repository. `apply.yml` accepts an optional
-trusted `review-url` from submit: nonempty suppresses the already-posted verdict
-but retains the checked label for apply. No label creates a merge lock or
-changes rulesets. See [review escalation](review.md#bounded-security-escalation).
-
 [`.github/workflows/review.yml`](../.github/workflows/review.yml) takes the
-`workflow_dispatch` and `workflow_call` string inputs `pr`, `head` and
-`pool`, and names a dispatched run `review OWNER/REPO#PR HEAD (POOL)`,
-which a scheduler reads back; the repository variables `REVIEW_POOLS` and
+`workflow_dispatch` and `workflow_call` string inputs `pr`, `head` and `pool`.
+A dispatched run is named `review OWNER/REPO#PR HEAD (POOL)`, which a
+scheduler can read back. The repository variables `REVIEW_POOLS` and
 `REVIEW_RECORD_ONLY` configure it ([dispatched reviews](review.md#dispatched-reviews)).
-
-For a composed caller, `policy.yml` takes the trusted, default-off
-`review-draft-classifier` boolean. An admitted exact-head classifier dispatch
-returns `review-draft-classifier: 'true'` and includes `dispatch-review.json`
-in the policy artifact. `check.yml` takes both through its existing `policy`
-input, not through proposal inputs. See the [classifier handoff](review.md#checked-handoff-to-a-wrapper)
-for caller inputs and submission requirements.
 
 ## Configuration files
 
-Job TOML can opt into `agent.subagents = [{ name, model, description }]`
-and `limits.max-worker-tasks`, independently of the review/other
-`limits.max-tasks` allowance. Workers are off by default and require a
-proxy-wide `limits.max-requests` cap and models advertised on the run's
-inference route ([worker subagents](skills.md#worker-subagents)).
+All three files are TOML.
 
-The opt-in native `document` output adds `[github.outputs.document]` with
-`max = 1` and optional `document = { public = false, gist_ids = [] }`, plus
-`document` in `native_handlers`. Its JSONL fields are `title`, Markdown `files`,
-three-line `summary` and optional `gist_id`; visibility and update authority are
-caller-owned. See [durable documents](safe-outputs.md#durable-findings-documents)
-for limits, ownership, token requirements and revision records.
+| File | Given as | Contents |
+| --- | --- | --- |
+| Bounds | the workflow's `allow` input; `agentic-job policy --allow`, `event --allow` | What a run may write and where ([the bounds and the policy](safe-outputs.md#the-bounds-and-the-policy)) |
+| Runner configuration | the workflow's `config` input; `agentic-job config --from`, `run --config` | `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`, `[limits]`, `[session]`, `[commit]`, `[preflight]` ([files read](interface.md#files-read)) |
+| Secure-host configuration | the secure-host action's `config` input; `agentic-job config --host` | `[host]`, `[egress]` and `[setup]` of the runner configuration, nothing else ([secure-host](secure-host.md)) |
 
-Each is TOML, and a key the binary does not know is refused. A file that
-uses a key added in a later release is therefore refused by an older
-pin; from 1.0, a file that works with one release keeps working with
-the next in the same major version.
+The bounds file has these top-level keys: `hosts`, `allow_http`, `repos`,
+`bases`, `private`, `max_outputs`, `max_patch_bytes`, `max_patch_files`,
+`protected`, `commit_author`, `native_handlers` and `dedupe`, the table
+`[unprotected_files]`, and exactly one forge section: `[github]`, `[gitlab]`
+or `[forgejo]`, each with its `outputs.TYPE` tables.
 
-- **The bounds file**, the workflow's `allow` input
-  (`agentic-job policy --allow`, `agentic-job event --allow`): top-level
-  `hosts`, `allow_http`, `repos`, `bases`, `private`, `max_outputs`,
-  `max_patch_bytes`, `max_patch_files`, `protected`, `commit_author`,
-  `native_handlers` and `dedupe`, the table `[unprotected_files]`, and
-  exactly one forge section: `[github]` (`[github.outputs.TYPE]`,
-  `[github.trigger]`, `[github.memory]`, `[github.test_evidence]` and
-  `[github.secondary_pull_request]`), `[forgejo]`
-  (`[forgejo.outputs.TYPE]` and `push_repo`) or `[gitlab]`
-  (`[gitlab.outputs.TYPE]` and `push_repo`)
-  ([the bounds and the policy](safe-outputs.md#the-bounds-and-the-policy),
-  [events](events.md)). `max_patch_bytes` and `max_patch_files` are optional;
-  omission imposes no caller limit, without overriding organization bounds
-  or artifact read ceilings. `repos` accepts existing string globs and opt-in
-  `{org = "ORG", forks = false}` rules on GitHub, checked against live owner,
-  fork and archived metadata at policy time. Rules may require `properties`
-  (a table of exact string values) and `topics` (an array of exact names).
-  `forks = true` requires both to be nonempty and the live fork's parent to be
-  known; metadata failures refuse admission. `[unprotected_files].repos`
-  accepts exact checkout repository names (no globs) and the same organization
-  rules for primary patches whose `--output-repo` is the checkout itself.
-  Nonmatches, other destinations and metadata failures leave protections
-  in place without refusing an otherwise-admitted run. A secondary pull
-  request's exemption accepts only its own exact repository name.
-  `allowed_domains` is accepted and ignored.
-  `[github.outputs] own-branch-repos` optionally lists repository patterns
-  accepting new PR branches and fix pushes without a per-repository file;
-  it defaults to empty ([acceptance policy](safe-outputs.md#pushing-to-a-pull-requests-branch)).
-  `[github.outputs] in-repo-pull-requests = true` (off by default, requires
-  `own-branch-repos`) opens a new PR from the run's `dispatch/` branch of an
-  accepted output repository instead of the fork.
-  `[github.outputs] stack-steps` is experimental, not a stable interface;
-  it defaults to zero and enables no workflow publication
-  ([stack groundwork](safe-outputs.md#stacked-proposals-library-groundwork-only)).
-  `[gitlab.outputs] own-branch-repos` likewise lets merge request branches
-  go to the target project itself.
-- **The runner configuration**, the workflow's `config` input
-  (`agentic-job config --from`, `sandbox setup --config`, `run --config`): the tables
-  `[host]`, `[egress]`, `[setup]`, `[inference]`, `[agent]`,
-  `[limits]`, `[session]`, `[commit]` and `[preflight]`
-  ([files read](interface.md#files-read)).
-  `run --config FILE` supports server configurations outside the workflow;
-  it defaults to `config::ROOT_COPY` (`/etc/agentic-job/config.toml`), the
-  root-owned setup copy. Either path gets the same parsing and run validation.
-  `run` refuses a file writable by its effective uid unless
-  `--allow-writable-config` is explicitly passed (off by default). That flag
-  acknowledges agent changes to later runs' limits, inference routing and
-  session access; it does not bypass validation. Prefer a trusted read-only
-  mount, with trusted source and path, rather than owner-changeable mode bits.
-  This startup guard is not same-uid isolation; see the
-  [trust assumptions](interface.md#files-read).
-  `agentic-job config --no-session` refuses an effective `session.listen = true`,
-  including one inherited from the file; review policy always uses it.
-  `[preflight]` has `kvm` (boolean), `libvirt` (only `"session"`, which
-  needs `kvm`) and the positive integers `vcpus` (at most 4096),
-  `memory-gib` (65536) and `disk-gib` (1048576), each off unless set; `config --host` leaves it out
-  ([capability preflight](dispatch.md#capability-preflight)).
-  `[host]` (with `[host.check]` and `[host.prepared]`) was `[sandbox]`
-  before #2071. `[sandbox]`, and a `sandbox.KEY` setting of `config`,
-  are still read as a deprecated alias, with the same keys, defaults and
-  checks and a warning on standard error. A file that has both tables is
-  refused, even when either is empty. The alias stays at least until the
-  release after the one whose image the secure-host forwarder pins and
-  which reads `[host]` (#2656). Its removal will be listed as breaking
-  in the release notes first. `config` writes `[host]`, except in a host's
-  file for that pinned image (`config --host` with no
-  `[host.prepared]`), which reads only `[sandbox]`.
-  `[commit] allow-base-secret-lines` is an optional boolean, default false;
-  it permits exact public-base secret-shaped patch lines within the same file,
-  never known run secrets ([safe outputs](safe-outputs.md#public-base-secret-evidence)).
-  `[commit] replay-redacted-endpoints` is an optional boolean, default false;
-  it enables bounded old-side endpoint replay for primary native GitHub pull
-  requests using trusted endpoint fingerprints and an independently fetched
-  declared base. Added values remain placeholders; unsupported carriers fail
-  closed ([safe outputs](safe-outputs.md#endpoint-redacted-patch-replay)).
-  `[inference] allow-base-address-lines` is an optional boolean, default false;
-  it is now a legacy no-op. Hand-backs always replace inference endpoint literals
-  with `<inference-address>`. Separate agent-facing inference and MCP proxy
-  tokens are also replaced; upstream credential and private-key refusals remain
-  and retain work privately on the operator's host
-  ([inference](inference.md#what-run-does)).
-  `[inference] stop-long-retry-after` is an optional boolean, default false;
-  it requires `front` or `api-key` and stops a long upstream 429 followed
-  by 60 seconds of ACP silence ([inference](inference.md#a-provider-api-key)).
-  `[session] nudges` is an optional boolean, default false; it sends the
-  agent two messages at times derived from `limits.timeout-minutes`
-  ([nudges on the clock](harness.md#nudges-on-the-clock)).
-  `[session] bind` is an optional `ADDRESS:PORT`, default empty (the
-  tailnet); with `listen` it moves the bridge there for an attach gateway,
-  which `run` then admits only with the attach secret of its environment's
-  `AGENTIC_JOB_ATTACH_TOKEN`
-  ([an attach gateway](interactive.md#an-attach-gateway)).
-  The keys of the removed sandbox user (`host.create-user`, `user`,
-  `groups`, `allow-existing-user`, `filesystem-view`,
-  `host.check.before-agent` and `setup.tools`) are refused by name
-  since #2989; `host.check.control-url`, `fetch-repo`, `allow-sockets`
-  and `allow-tcp-ports` are accepted and ignored.
-- **The secure-host configuration**, the action's `config` input
-  (`agentic-job config --host`, `secure-host config`): `[host]`
-  (or `[sandbox]`, as above), `[egress]` and `[setup]` of the runner
-  configuration, and nothing else ([secure-host](secure-host.md)). Until
-  #2656 moves its pin, the forwarder runs an image that reads only
-  `[sandbox]`, so a file given to it keeps that name. The secure-host
-  binary also reads a job's whole file, which an agent job passes it with
-  `[host.prepared]`: it holds its own tables to their keys and leaves
-  the rest to the program that wrote the file. With no `config`, the forwarder selects
-  its Ubuntu 26.04 or RHEL 10 / CentOS Stream 10 cloud file by exact
-  `ID` and supported `VERSION_ID` (never `ID_LIKE`); an unsupported host
-  has no default. An explicit file replaces the selected default whole.
+Repository names are `owner/name` on GitHub and Forgejo. On GitLab they may
+have more components, as in `group/subgroup/project`. A GitLab fork must
+be outside the target's top-level group
+([publishing to GitLab](safe-outputs.md#publishing-to-gitlab)).
 
-## Safe outputs
+`agentic-job config --no-session` refuses a runner configuration whose
+effective `session.listen` is true, including one inherited from the file.
 
-The extracted component's standalone `safe-outputs check` and `apply` CLI is
-documented in [safe outputs](safe-outputs.md#standalone-cli). It uses the same
-request JSONL, not an agentic-job run/checkpoint. Its context and receipt are
-currently experimental, not stable interfaces. Existing workflow check/apply
-inputs and agentic-job commands are unchanged.
-Explicit `--forge forgejo` on both standalone commands supports new comments and
-non-writing reports through the shared Forgejo checker/planner/publisher, with
-whole-batch refusal of other operations and unknown comment fields. Its trusted
-context contains the effective policy, server, fixed item/kind and run URL;
-receipts bind forge, context and input. This context is experimental
-([Forgejo example](safe-outputs.md#standalone-forgejo-comments)).
+`[host]` was called `[sandbox]` before #2071. `[sandbox]`, and a `sandbox.KEY`
+setting of `config`, are still read with a warning, and a file with both
+tables is refused. The alias stays at least until the release after the first
+one whose image the secure-host forwarder pins and which reads `[host]`
+(#2656). Until then `config --host` without `[host.prepared]` writes
+`[sandbox]`. Removing the alias will be listed as a breaking change in the
+release notes first.
 
-Explicit `--forge gitlab` on both standalone commands uses the existing GitLab
-policy, planner and publisher, with caller-owned context and patch-bound
-receipts. GitHub comments remain the default; the GitLab standalone context
-is also experimental ([GitLab CI example](safe-outputs.md#standalone-gitlab-ci)).
+The keys of the removed sandbox user are refused by name
+([removed keys](interface.md#removed-keys-and-runner-mode-refusals)).
+
+## Safe-output requests
 
 A run hands back requests in gh-aw's
 [safe-output format](https://github.github.com/gh-aw/reference/safe-outputs/):
-one JSON object a line, its `type` and that type's fields. The types and
-their collector fields are those of gh-aw at the pinned commit, as
-[`validation.json`](../safe-outputs/validation.json) records and
-`agentic-job collect` checks. On GitHub, apply accepts every type the
-bounds can allow, subject to the stricter per-operation target, field and
-limit checks in [safe outputs](safe-outputs.md). The validation table alone
-is not the full acceptance contract:
+one JSON object per line, with a `type` and that type's fields. The types
+gh-aw defines, and their fields, follow gh-aw at the pinned commit, as
+recorded in [`validation.json`](../safe-outputs/validation.json); `document`
+is agentic-job's own. The bounds decide which
+types a run may use, and each type's page in [safe outputs](safe-outputs.md)
+gives its own target and field checks.
 
-`create_pull_request`, `create_issue`, `create_discussion`,
-`add_comment`, `close_issue`, `close_pull_request`, `add_labels`,
-`remove_labels`, `update_issue`, `update_pull_request`,
-`mark_pull_request_as_ready_for_review`, `push_to_pull_request_branch`,
-`add_reviewer`, `assign_to_user`, `link_sub_issue`, `hide_comment`,
-`update_project`, `create_check_run`,
-`create_pull_request_review_comment`,
-`reply_to_pull_request_review_comment`,
-`resolve_pull_request_review_thread`, `noop`, `missing_tool` and
-`missing_data`.
+| Type | GitHub | GitLab | Forgejo |
+| --- | --- | --- | --- |
+| `add_comment`, `create_pull_request`, `push_to_pull_request_branch`, `create_pull_request_review_comment`, `create_issue`, `close_issue`, `close_pull_request`, `add_labels`, `remove_labels` | yes | yes | yes |
+| `noop`, `missing_tool`, `missing_data` | no write | no write | no write |
+| `create_discussion`, `update_issue`, `update_pull_request`, `mark_pull_request_as_ready_for_review`, `add_reviewer`, `assign_to_user`, `link_sub_issue`, `hide_comment`, `update_project`, `create_check_run`, `reply_to_pull_request_review_comment`, `resolve_pull_request_review_thread` | yes | refused | refused |
+| `document`, where `native_handlers` lists it ([durable findings documents](safe-outputs.md#durable-findings-documents)) | yes, native only | refused | refused |
 
-The bounds' `native_handlers` may have `add_comment`,
-`create_pull_request`, `add_labels`, `remove_labels`, `close_issue`,
-`close_pull_request`, `push_to_pull_request_branch`, `create_issue` and
-`create_pull_request_review_comment` published by agentic-job's own handlers instead of
-gh-aw's, which send the same requests
-([agentic-job's own handlers](safe-outputs.md#agentic-jobs-own-handlers)),
-except that a `create_issue` bound with `comment_on_duplicate = true`
-comments on an open issue of the same title instead
-([proposing follow-up issues](safe-outputs.md#proposing-follow-up-issues)).
+On GitLab, `add_labels` and `remove_labels` name their item with exactly one
+of `issue_number` or `pull_request_number`, not `item_number`. See
+[publishing to GitLab](safe-outputs.md#publishing-to-gitlab) and
+[publishing to Forgejo](safe-outputs.md#publishing-to-forgejo).
 
-Off GitHub, `agentic-job apply --forge forgejo` publishes
-`add_comment`, `create_pull_request`, `push_to_pull_request_branch`,
-`create_pull_request_review_comment`, `create_issue`, `add_labels`, `remove_labels`, `close_issue` and
-`close_pull_request`, writes nothing for `noop`, `missing_tool` and
-`missing_data`, and refuses the rest
-([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo)). With
-`--status` and `--status-sha` it also sets the caller's commit status,
-context `agentic-job`; no request type sets one.
-Forgejo label preflight follows batch order per item, so an authorized
-remove-then-add exclusive-label transition works in one batch; live
-pre-write checks remain in place. Repository label listings accept up to
-1000 labels and refuse overflow before writes.
-`agentic-job apply --forge gitlab` publishes `add_comment`, to the
-caller's `--comment-target` of the `--comment-target-kind` it names,
-`create_pull_request`, `push_to_pull_request_branch`, `create_pull_request_review_comment`, `create_issue`,
-`close_issue`, `close_pull_request`, and `add_labels` and
-`remove_labels`, which there name their item by exactly one of
-`issue_number` and `pull_request_number`, never `item_number`; it writes
-nothing for the three no-write types, and refuses the rest. With
-`--status` and `--status-sha` it sets the caller's commit status, name
-`agentic-job`, `failure` and `error` both as GitLab's `failed`, with
-distinct descriptions. With `--run-summary` it posts the run summary
-that `check --run-summary FILE` sanitized into the report as a note on
-the comment target before the status.
-GitLab statuses require GitLab 18.5+ and trusted `--status-ref` and
-`--status-pipeline-id` for an existing pipeline matching the project, SHA
-and ref, unarchived and without CI configuration errors; legacy status
-calls lacking these refuse before writes. Only the
-greatest job ID in that context can suppress an identical full status;
-another run's pending/running job refuses. Listing is bounded and POSTs
-are not retried automatically
-([publishing to GitLab](safe-outputs.md#publishing-to-gitlab)). On
-GitLab, `agentic-job collect` takes those two fields for the label types
-and refuses an `issue_number` or `pull_request_number` a type does not
-take there, rather than drop it.
-
-Both read their token from `FORGEJO_TOKEN` or `GITLAB_TOKEN` unless
-`APPLY_ROLE_BINDINGS` is nonempty. Then it takes the workflow's JSON
-of four positive `actor_id`s, with no `app_id`, and `STATUS_TOKEN`,
-`REVIEW_TOKEN`, `PUSH_TOKEN` and `PUBLICATION_TOKEN`, each of which must
-authenticate as its actor; there is no fallback in that mode. Within
-that mode, an identical GitLab status suppresses a write only if the
-status role's actor set it
-([Forgejo and GitLab roles](safe-outputs.md#forgejo-and-gitlab-roles)).
-
-For `create_pull_request_review_comment`, both non-GitHub publishers require
-the type listed with a `max` in bounds. Check requires the trusted caller's
-`--comment-repo`, `--comment-target` and `--review-head` and records
-`inline_target: {repo, number, head}` in its report; apply requires the same
-fixed target. Only single-line `path`, `line`, optional `side` (`RIGHT` by
-default), and `body` anchors are mapped. Multiline fields are refused.
-Apply validates the current PR/MR identity, head and diff before any write
-and rechecks before posting. See [neutral inline comments](safe-outputs.md#neutral-inline-comments).
+On GitHub, the bounds' `native_handlers` may list types that agentic-job
+publishes with its own handlers instead of gh-aw's
+([agentic-job's own handlers](safe-outputs.md#agentic-jobs-own-handlers)).
 
 ## Hand-back files
 
-A run stopped before its first model request (five minutes with a known zero
-proxy count) exits 4, the retryable not-started state. Its collected
-`outcome.json` records the failure in `summary` and `stopped_early`, even if
-the agent left a success claim. No such deadline applies without a count.
-A task's turn that sends nothing for the agent's configured `stall-timeout`
-is cancelled and retried once on the same session; a second stall fails
-with failure kind `stall`. An open subagent task does not exempt the turn,
-but a running tool such as a build does. Any agent update resets the wait.
-
-What a producer leaves for `run` to take
+An agent leaves these under its home directory for `run` to collect
 ([what the agent does](safe-outputs.md#what-the-agent-does)):
 
-- `out/safe-outputs.jsonl` under the agent's home: the requests above,
-  at most 1 MiB and 1000 nonblank lines. Capture refuses an over-limit file
-  whole, with its change or replacement series; it does not retain a prefix.
-  See [capture limits](safe-outputs.md#what-the-agent-does).
-- `out/outcome.json`, at most 64 KiB: `summary`, `tests` (each a
-  `command`, `exit_code` and `duration_s`), `stopped_early` (null or why),
-  and, where `ready_when_complete` asks for one, `checkpoint` (`complete`,
-  `done`, `left`, `next`). An open checkpoint keeps work draft; malformed
-  checkpoint fences in a PR body or push message refuse only under that bound
-  ([ready or draft](safe-outputs.md#ready-or-draft)).
-- An opt-in `out/replacement.json` series may start at the unique merge base
-  of the policy-pinned PR head and target snapshot, as well as the admitted
-  target-branch snapshots. Apply proves the base from trusted history; a
-  fork PR uses its upstream target, not the fork's default branch
-  ([replacement series](safe-outputs.md#the-bounds-and-the-policy)).
-  With `[github.outputs] upstream-pull-request-base = true` (off by default),
-  a fork-side PR uses a unique open same-author, same-head PR in its forge-reported
-  parent to resolve that target. This opts into parent history outside the
-  checked mails on the fork's branch. `handback replace` requires the replayed final tree
-  to equal the producer's intended `HEAD` tree before writing the series.
-- Where the bounds have `[github.test_evidence]`, `out/test-evidence.json`,
-  schema `agentic-job/test-evidence/v1`, and its logs
-  `out/test-evidence-N.log`
-  ([test evidence](safe-outputs.md#repeated-test-evidence)). Opted-in pull
-  request briefs and the full handback guide explain the bounds and v1
-  base/head/tree binding. With a checked pull request patch but no evidence,
-  the report adds `test_evidence_missing: true` and apply adds a fixed
-  no-repeated-test-acceptance draft note; unconfigured drafts stay unchanged.
+| File | Contents |
+| --- | --- |
+| `out/safe-outputs.jsonl` | The requests above: at most 1 MiB and 1000 nonblank lines. A file over a limit is refused whole. |
+| `out/outcome.json` | At most 64 KiB: `summary`, `tests` (each with `command`, `exit_code` and `duration_s`), `stopped_early` (null or why), and, where the bounds' `ready_when_complete` asks for one, `checkpoint` (`complete`, `done`, `left`, `next`). An open checkpoint keeps the work a draft ([ready or draft](safe-outputs.md#ready-or-draft)). |
+| `out/replacement.json` | Optional: a series of commits that replaces a pull request's branch ([replacing the complete series](safe-outputs.md#replacing-the-complete-series)). |
+| `out/test-evidence.json` and `out/test-evidence-N.log` | Only where the bounds have `[github.test_evidence]`: schema `agentic-job/test-evidence/v1` ([repeated test evidence](safe-outputs.md#repeated-test-evidence)). |
 
-A job other than the agent's hands back through `proposals-artifact`:
-an artifact holding `outputs.jsonl`, and optionally `base.json` and one
-`aw-BRANCH.patch`
+A job other than the agent hands back through the workflow's
+`proposals-artifact` input: an artifact holding `outputs.jsonl`, and
+optionally `base.json` and one `aw-BRANCH.patch`
 ([proposals from a non-agent job](workflow.md#proposals-from-a-non-agent-job)).

@@ -3305,6 +3305,10 @@ for `noop`, `missing_tool` and `missing_data`:
   project as its `target_project_id`. The fork must be GitLab's fork of
   that project (`forked_from_project`), and private unless the project
   is public and the run is not private. A draft is a `Draft:` title.
+  Policy refuses a `push_repo` in the project's top-level group, at any
+  depth, because subgroups inherit that group's CI variables: for
+  `group/team/project`, `group/bot/project` is refused and
+  `bot/project` is eligible.
   With [`own-branch-repos`](#pushing-to-a-pull-requests-branch) accepting
   the project, and no `push_repo`, the branch and merge request go to the
   project itself instead; fixes pushed to an open merge request's branch alike.
