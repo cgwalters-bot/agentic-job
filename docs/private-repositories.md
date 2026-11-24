@@ -2,206 +2,84 @@
 
 > This text is LLM generated.
 
-Runner-mode runs are **public-only**, not privately opt-in. The policy parser
-retains private-run contracts, but `run --runner-home` refuses private targets
-and the reusable agent job refuses private/unknown callers and targets even
-with `private = true`. Do not compose a second-user job to bypass this refusal.
-The second user was removed in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991).
-The remainder is a **legacy policy/reference design**,
-not supported runner-only deployment instructions. The private-digest fixture
-tests policy and output bounds, not current runner-mode launch acceptance.
+agentic-job supports public repositories only. On GitHub, the reusable
+workflows refuse a private caller and any target, agent configuration,
+context or item repository they cannot confirm to be public; the
+`private = true` bounds key does not lift that refusal today. On GitLab
+and Forgejo, the caller's own pipeline or workflow is the only
+visibility check, so keep one.
 
-Historically, runs were public-only by default. The public-only admission check stops private
-source and configuration from becoming public run evidence. API errors, unknown
-visibility and internal repositories are refused, not treated as public. A
-caller can opt one kind of private run in: its own private repository as the
-target, with `private = true` in every bounds file, the egress domain allowlist
-on the agent machine and its runner's logs kept private. Such a run hands back
-comments, reviews and other non-patch outputs, not a patch or a project
-update. The run is refused if any checked condition below fails.
+gh-aw runs in private repositories, with explicit authentication for
+cross-repository access
+([using gh-aw at scale](https://github.com/github/gh-aw/blob/v1.2.2/docs/src/content/docs/guides/using-at-scale.mdx#L42-L48)).
+agentic-job does not, because a run publishes what the agent saw and the
+agent shares its user with the job that runs it
+([limitations](limitations.md)).
 
-## What is published today
+## What is checked
 
-The reusable workflow checks target, agent-configuration and item repository
-visibility on the policy machine; context resolution independently requires
-public metadata. The run action checks target and agent-configuration visibility
-again before artifact upload. When GitHub rate-limits that check, it waits for
-the time GitHub names and checks every repository again, at most three times per
-run and 15 minutes of waiting in all; each API call can add up to a minute more.
-Any other failure refuses the run. This second check cannot recall material already
-sent to inference, printed in a job log or written to a summary if visibility
-changes during execution. The standalone CLI's bounds checks are not a private
-workflow admission guarantee.
+| Forge | Check | What happens |
+| --- | --- | --- |
+| GitHub | `policy.yml`, before the agent starts | The target, agent configuration, context and item repositories must be reported public. Internal, unknown visibility and API errors refuse the run. |
+| GitHub | The agent job's admission step | Refuses a private or unknown caller, and a policy marked private. |
+| GitHub | `run`'s action, before upload | Checks the target and agent configuration again. A rate-limited check waits and retries a bounded number of times, then refuses; any other failure refuses. |
+| GitLab | The project's own pipeline | The [GitLab example](gitlab.md) checks the project's `visibility == "public"` before `policy`, which covers caller and target because they are the same project there. Keep that check if you adapt it. |
+| Forgejo | The caller's workflow | Nothing checks visibility for you. Name only public repositories, as in the [Forgejo quickstart](try-forgejo.md). |
 
-The digest regression suite executes the policy workflow's visibility step
-with fixture API responses for the target, agent-configuration and item
-repositories. Missing or contradictory visibility fields, non-boolean
-`private`, internal visibility, malformed responses and API failures must
-refuse a public caller's run. Even public-looking metadata from a failed API
-call is not admission evidence. A confirmed-public control must pass. These
-are offline admission tests, not proof of a live private deployment.
+`agentic-job run` also refuses a policy that `policy --private` marked
+private, on any forge. The standalone CLI does not query a target's
+visibility itself.
 
-The [run evidence guide](workflow.md#what-a-run-leaves) lists the artifacts and
-retention periods. The agent job prints a condensed transcript to its Actions
-log and writes a rendered session/job summary. `agent-run` retains summaries,
-the condensed log and outcome for 90 days; `agent-transcript` retains the fuller
-transcript, tool output, agent logs and egress evidence for 30 days. Proposed
-patches and safe-output requests are retained in `safe-outputs` for 30 days.
-Policy, checked-output and applied-result artifacts record decisions and
-destinations. Applying outputs creates durable forge objects such as PRs,
-comments and reviews, potentially in a different repository.
+The check before upload cannot recall what was already sent to inference
+or printed to a job log if a repository becomes private while the agent
+works.
 
-On a public caller these are public run evidence (artifact downloads may require
-authentication). A private caller's Actions access controls do not make a run
-safe on their own: the target, caller, output repository, runner operator and
-inference service can be different trust domains. Runner provisioning/diagnostic
-logs are another publication surface; some runner providers publish them
-separately from Actions. Shorter artifact retention does not retract logs,
-downloads or already-applied outputs.
+## Why runs are public only
 
-## What a private run would leak
+Everything a run leaves is readable by whoever can read the caller's CI:
+the job log with the condensed transcript, the summary, artifacts with the
+fuller transcript, tool output and egress evidence, and the published
+outputs ([what a run leaves](workflow.md#what-a-run-leaves)). On a public
+caller that is anyone. Shorter retention does not retract a log, a
+download or a published comment.
 
-A hostile job can copy source, configuration, filenames and issue text into
-tool output, reasoning, summaries, patches or requested comments. Current
-[redaction](workflow.md#github-reads-from-the-agent) removes known credential
-values; it is not a private-source classifier. Source transformed, encoded or
-split by a hostile process cannot be made safe by ordinary secret masking.
-The agent also sends context to inference, whose access and retention policy
-must be part of the confidentiality decision.
+A private caller's access controls would not be enough on their own:
 
-Network write restrictions alone do not stop exfiltration: a GET path can carry
-private bytes to an attacker. The shipped reads-anywhere policy permits that
-unless the destination is otherwise denied. Even an allowed shared service or
-attacker-controlled subdomain can receive those bytes. Runner-user processes,
-direct endpoints and local services must not provide a bypass around the
-agent's proxy policy.
+| Channel | Why it can disclose source |
+| --- | --- |
+| Run evidence | A hostile agent can copy source into reasoning, tool output, summaries or requested comments. [Redaction](workflow.md#github-reads-from-the-agent) removes known credential values; it does not recognize source. |
+| Network reads | A GET's path or query can carry bytes to any host the egress policy allows, so write rules alone do not stop exfiltration. |
+| CI service writes | The agent runs as the runner's user, which can write to the CI service, for example another repository's artifacts, with a token of its own ([secure host](secure-host.md)). |
+| Runner logs | Some runner providers publish provisioning and diagnostic logs outside the forge. |
+| Inference | The model service receives the context, under its own access and retention policy. |
 
 ## Opting in
 
-No run takes a private target now, whatever the bounds say: since the
-sandbox user was removed
-([#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989)) the
-agent is the runner's user, with no second user between it and `run`,
-and `run` refuses a private policy. What follows is what the binary
-admitted for a caller that composed its own agent job with a sandbox
-user, kept for a private run's next design.
+The bounds key `private = true` is off by default. Setting it, in the
+caller's bounds file and the organization's if there is one, changes what
+`agentic-job policy --private` admits, but `run` still refuses the result:
 
-Add `private = true` at the top level of the caller's bounds file, and of the
-organization's if there is one; both must set it. Then a run is admitted with a
-private target only if all of these hold, each checked where it is enforced:
+| `policy --private` requires or refuses | Why |
+| --- | --- |
+| Every bounds file sets `private = true` | Neither the caller nor the organization alone can opt the other in. |
+| The target is the calling repository | Its evidence stays with that repository's audience. |
+| Outputs and the item are in the target | Comments do not land in another, possibly public, repository. |
+| No `create_pull_request` or `push_to_pull_request_branch` on GitHub | Apply pushes through a fork it checks without a credential. GitLab and Forgejo admit `create_pull_request`, asked for by name, when every bounds file names the same `push_repo`; apply then pushes only to that fork, and only if it is private ([GitLab](safe-outputs.md#publishing-to-gitlab), [Forgejo](safe-outputs.md#publishing-to-forgejo)). |
+| No `update_project` | A project's audience is not the repository's. |
 
-- **Evidence stays with the repository's audience.** The policy job admits a
-  target that is not public only if the API reports it `private` and it is
-  the calling repository. Its Actions logs, summaries and artifacts are then
-  visible only to its collaborators. `agentic-job policy --private` refuses
-  the run unless every bounds file opts in. It also requires the output
-  repository to be the target, so that comments and status do not land in
-  another, possibly public, repository; the workflow accepts no `item-repo`
-  for a private run. It refuses `create_pull_request` and
-  `push_to_pull_request_branch`: apply pushes a patch through a fork, which
-  it checks without a credential, so a private fork is out of its reach.
-  Off GitHub, every bounds file whose `[forgejo]` or `[gitlab]` section
-  names the same `push_repo` admits
-  `create_pull_request` when it is asked for by name (`all` leaves it
-  out). Forgejo's and GitLab's apply push only to that fork, and only if
-  the fork is private ([publishing to Forgejo](safe-outputs.md#publishing-to-forgejo),
-  [to GitLab](safe-outputs.md#publishing-to-gitlab)).
-  It also refuses `update_project`: a project's audience can read its
-  fields, and that audience is not limited to the repository's audience.
-  The run action repeats the visibility check before upload.
-- **The proxy limits where the source can go.** `run` refuses a private
-  policy unless the sandbox uses the egress proxy (`egress.proxy`) and the
-  policy file the proxy enforces sets `[egress] mode = "allowlist"`
-  ([domain allowlist](https://github.com/cgwalters-forge/actions/blob/main/secure-host/docs/egress.md#opt-in-domain-allowlist)), selected by
-  `egress.policy` in the caller's configuration. That file may contain only
-  `[[write]]` rules for git fetch's `POST` to paths ending in
-  `/git-upload-pack`: any other rule can send data to storage at its endpoint.
-  The shipped GraphQL rule, for example, would pass a mutation that another
-  token posts to a public issue, so `gh`'s GraphQL reads are unavailable;
-  REST reads (`gh api`) still work. Review every allowed domain, the inference
-  endpoint and any `egress.direct` endpoint as a place the source can go:
-  direct endpoints do not pass the proxy, and the check cannot judge them.
-- **One read credential, for the target only.** The agent configuration
-  and context repositories are cloned without a credential and stay
-  public-only. `run` refuses
-  a private policy without the job's read token (`github-reads`, the default).
-  It clones the target with a git credential helper scoped to the target's
-  clone URL. The helper reads the token from the sandbox user's token file. The
-  token is never in a command line, URL or configuration value. The job token
-  can read only the calling repository and expires with the job; no PAT is
-  added. Policy and check keep read-only access; only apply holds a write
-  credential.
-
-One condition cannot be checked: **the runner's own logs must not be public.**
-Use a runner whose provisioning and diagnostic logs only the repository's
-audience can read, such as the caller's own. Some providers publish theirs.
-The runner is a workflow input,
-so a caller that opts in should not let a dispatcher choose it. Inference
-access and retention are likewise the caller's decision.
-
-Organization and repository identities come from the caller's repository: the
-bounds files it owns and the repository the workflow runs in, never a workflow
-input a dispatcher can set. BPF host evidence and release binaries improve other
-boundaries; they do not make a private run safe on their own.
+Before its refusal, `run` also checks that a private policy has the
+egress proxy, a domain allowlist that keeps no write rule but git
+fetch's, and the job's read token, which is the only credential the
+target's clone gets. These checks stay for a future private-run design
+that puts a second user between the agent and the job; do not compose
+your own job to work around the refusal.
 
 ## A reference caller
 
-**Legacy example only:** this fixture is not supported private-run setup.
-
 [`.github/agentic-job/private-digest/`](../.github/agentic-job/private-digest/workflow.yml)
-composes the conditions above for one job: a digest posted as one comment on
-one issue of the private repository it runs in. It calls `policy.yml`,
-`check.yml` and `apply.yml` and has an agent job of its own, which ran the
-agent as the sandbox user behind the domain allowlist with the job's read
-token; with that user removed, its run step now fails on `run`'s refusal of
-a private target. It is not a workflow of this repository and nothing runs it here. A
-repository that adopts it fills in placeholders for the agentic-job commit,
-the issue and its own name. It also replaces a step that joins the inference
-proxy's network, which this repository cannot supply. Left as they are, the
-placeholders fail the run before the agent starts. `tests/private_digest.rs`
-holds it to this page: its bounds refuse a missing opt-in, outputs or an item
-in another repository, a patch and a project. Check refuses a comment anywhere
-but the issue, a second comment and any other output. Its egress policy is one
-`run` admits, and `policy.yml` refuses a public caller naming a private target.
-
-The collector-to-check regression also exercises the raw hand-back. Collection
-discards the unsupported `issue_number` alias; it does not treat it as a
-routing instruction or reject its conflicts. The surviving `pr_number`,
-`item_number` and `repo` fields are checked against the fixed destination.
-A body-only comment therefore uses the caller's digest issue, even when the
-raw output included discarded aliases naming other items. This is routing
-coverage, not proof of private-run admission or live publication.
-
-Body-size coverage runs the same path with a public policy. Collection keeps
-up to 65,000 UTF-16 code units (not bytes or Unicode scalar values), appending
-`[Content truncated due to length]` on overflow. A cut through a non-BMP
-character omits that character rather than emitting an invalid surrogate.
-Check accepts these truncated comments: its publication limits do not validate
-the digest's structured content. Keep structured digests below the collector
-limit and validate the collected body before publication; validation of only
-the raw Markdown cannot prove its trailing JSON block survives collection.
-The regression pins below/at/above cases for ASCII and non-BMP text, including
-the truncation notice, without changing the upstream-compatible collector.
-
-The host-configuration step resolves the egress policy against the caller
-checkout before handing it to the host image, which reads it from `/`.
-Container and subordinate-UID probes remain enabled even though the digest
-itself does not use containers. The configuration pins the official UBI minimal
-probe image by digest, and the allowlist admits `registry.access.redhat.com`
-for its manifests and layers. The pinned v0.6.4 host also expects successful
-package fetches when npm or cargo is installed, so `registry.npmjs.org`,
-`index.crates.io` and `static.crates.io` are allowed for those probes.
-No registry write rule is added. Like GitHub, these registries and their
-subdomains can receive private source in GET paths or queries: the adopter
-must approve those additional confidentiality destinations.
-Revisit the image pin and allowlist together if the registry's download route
-changes; a redirect outside the allowlist must fail closed.
-
-Three gates stay manual, since nothing the run can check establishes them.
-Before installing it, the operator confirms that the runner's provisioning
-and diagnostic logs are private to the repository's audience. They approve
-the inference service's access and retention, including the detection
-model `check.yml` sends the proposed comment to when
-`AGENTIC_JOB_DETECT_MODEL` is set. And the broker has to admit the
-caller's own workflow file, which its identity token names
-([inference](inference.md#which-workflows-a-broker-admits)).
+composes the conditions above for one digest comment on one issue of a
+private repository. It is kept as a test fixture, not as supported setup:
+its agent step now fails on `run`'s refusal. Its files say what each
+setting is for, including the placeholders to replace and the gates an
+adopter confirms by hand, and `crates/agentic-job/tests/private_digest.rs`
+holds it to the rules on this page.
