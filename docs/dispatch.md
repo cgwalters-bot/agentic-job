@@ -8,7 +8,7 @@ Dispatch a task against an existing issue or code change. The caller's
 | Forge | How to start | What to expect |
 | --- | --- | --- |
 | GitHub | [Run the dispatch workflow](#run-the-dispatch-workflow) from Actions or `gh`. | Scripted by default; supports real agents and publication. |
-| GitLab | [Run the deterministic pipeline](try-gitlab.md#run-the-deterministic-caller) on the protected default branch. | Posts a fixed issue note without an agent. |
+| GitLab | [Run the deterministic pipeline](quickstart.md#gitlab) on the protected default branch. | Posts a fixed issue note without an agent. |
 | Forgejo | [Run the Actions trial](#forgejo-actions-caller) on the default branch. | Checks a scripted patch; no agent or publication. |
 
 ## Run the dispatch workflow
@@ -179,7 +179,7 @@ Validation is not proof a test ran, and missing evidence does not block a draft.
 
 ## Forgejo Actions caller
 
-Use the [scripted Forgejo trial](try-forgejo.md) with a dispatch repository
+Use the [scripted Forgejo trial](quickstart.md#forgejo) with a dispatch repository
 distinct from both the public target and publisher's fork. Do not put a
 publishing token on any runner available to the dispatch repository: the
 automatic job token already has write access to that repository.

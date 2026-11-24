@@ -3,7 +3,7 @@
 > This text is LLM generated.
 
 `agentic-job` runs an agent in CI and checks its hand-back before publication.
-Start with [GitHub](try-it.md), [GitLab](try-gitlab.md), or [Forgejo](try-forgejo.md).
+Start with [GitHub](quickstart.md#github), [GitLab](quickstart.md#gitlab), or [Forgejo](quickstart.md#forgejo).
 
 ## Commands
 
@@ -14,7 +14,7 @@ flags. See [stable interfaces](stable-interfaces.md) for compatibility promises.
 | --- | --- | --- |
 | Inspect a finished run | `audit DIR [--json]` | Reads downloaded [artifacts](workflow.md#auditing-downloaded-artifacts) offline without executing or applying them. Findings alone do not cause a nonzero exit. |
 | Talk to a running agent | `session connect ENDPOINT [--json] [--since CURSOR]` | [Attach or reconnect](interactive.md#attaching-to-a-session), replaying retained messages after the cursor. Ctrl-C detaches; end of input ends the session. |
-| Validate a hand-back from inside a run | `handback check` | Check changes, requests and the outcome report. From a workstation, try the [credential-free example](try-it.md#1-check-a-local-hand-back-without-credentials) instead. |
+| Validate a hand-back from inside a run | `handback check` | Check changes, requests and the outcome report. From a workstation, try the [credential-free example](quickstart.md#check-a-local-hand-back) instead. |
 
 ### Compose a pipeline
 

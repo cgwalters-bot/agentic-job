@@ -1,35 +1,19 @@
-# Running policy, check and apply from GitLab CI
+# GitLab CI reference
 
 > This text is LLM generated.
 
-A GitLab caller can use the supported policy/check/apply path today:
-produce safe-output requests without a write credential, check them on a
-separate runner, then publish from a trusted job that alone holds the
-token. This guide uses a fixed, deterministic comment to demonstrate that
-path. It is not an end-to-end agent pipeline or a reusable CI component.
-
-**Not yet verified live.** The bounds and CI example below have local
-configuration and CLI tests against current source, not the pinned release
-or a live GitLab or Testing Farm run.
-[#2111](https://github.com/cgwalters-forge/agentic-job/issues/2111) tracks
-GitLab end-to-end proof. The downstream runs reported in
-[#2993](https://github.com/cgwalters-forge/agentic-job/issues/2993) used an
-older two-user/provider-key topology; they do not verify this guide or
-the runner-only boundary. The internal fork and runs are reported
-evidence, not independently reproduced here.
+For setup and the expected result, start with [GitLab in the Quickstart](quickstart.md#gitlab).
+This reference contains the configuration files for that pipeline and the
+constraints for adapting it.
 
 ## Prerequisites and unsupported cases
 
-Use a public project at `GROUP/PROJECT`, a protected default branch, and
-isolated, fresh runners for producer, check and apply. Keep that two-part
-project path for the pinned example below. Current source also supports
-nested subgroup paths and explicitly admitted same-project merge request
-branches ([GitLab publication](safe-outputs.md#publishing-to-gitlab)); the
-default publication path requires another owner's fork. Those source tests
-do not establish support in an older pinned binary or a live deployment.
-The trusted jobs need Linux x86-64, a POSIX shell, `curl`, `jq`,
-`sha256sum` and `git`; they need neither root nor systemd. Run only trusted
-CI configuration from the default branch, not merge-request code. Do not
+Current source supports nested subgroup paths and explicitly admitted
+same-project merge request branches, but the pinned example uses a two-part
+project path and does not open merge requests. By default, merge requests
+come from another owner's fork. See [GitLab publication](safe-outputs.md#publishing-to-gitlab).
+The trusted jobs need neither root nor systemd. Run only trusted CI
+configuration from the default branch, not merge-request code. Do not
 restore caches or execute scripts or binaries from producer artifacts in
 check or apply. The CI operator owns runner isolation, artifact provenance
 and token issuance. Fetching a producer pipeline's hand-back across
@@ -39,10 +23,8 @@ Its fetch, `external-fetch --forge gitlab` with a read-only
 offline only; its release gate refuses until GitLab detection is specified,
 so it cannot publish yet.
 
-**Agent inference on GitLab is unsupported pending
-[#2903](https://github.com/cgwalters-forge/agentic-job/issues/2903) and
-[#2989](https://github.com/cgwalters-forge/agentic-job/issues/2989).**
-GitLab has no supported registration proof for the broker.
+**Agent inference on GitLab is unsupported.** GitLab has no supported
+registration proof for the broker.
 `github-oidc` needs GitHub's identity; `plain` and `token-file` leave a
 bearer token readable by the runner's user. A provider API key, MCP
 credential, `inference.front`,
@@ -59,10 +41,7 @@ The pipeline below deliberately has no agent, inference configuration,
 registration or sandbox setup. Do not turn its producer into an agent
 job until those prerequisites have a supported path. Current broker
 inference still puts an agent-readable run token on the runner; it is
-not credentialless inference. External ownership of identity and lifecycle
-remains part of #2903, with the endpoint-only client and readiness gate
-tracked by [#2999](https://github.com/cgwalters-forge/agentic-job/issues/2999)
-and [#3000](https://github.com/cgwalters-forge/agentic-job/issues/3000).
+not credentialless inference.
 Putting the same bearer in another variable or same-UID supervisor memory
 is not that path. Read deployment addresses from runtime configuration or
 the environment, never copy them into code.
@@ -130,8 +109,8 @@ trusted runners that never execute agent-produced code.
 
 Any readiness check must delegate only host-control evidence (privileges,
 process isolation and local network enforcement), never its reachable
-credential refusals. External mode does not resolve #2903's inference
-identity/lifecycle work or establish a live GitLab deployment proof.
+credential refusals. External mode does not supply an inference identity or
+establish live GitLab deployment proof.
 
 ## Pinned release binaries
 
@@ -139,13 +118,15 @@ Each job downloads the static binary of one tagged release and checks it
 against a SHA-256 the caller keeps in its own `.gitlab-ci.yml`. The
 `.sha256` sidecar comes from the same place as the asset, so it proves
 nothing on its own. On a trusted workstation with `gh`, verify the
-release manifest's attestation first. Run these commands in the same shell:
+release manifest's attestation first. Replace `SOURCE_OWNER/SOURCE_REPO`
+with the [agentic-job source repository](../) and run both blocks in the same shell:
 
 ```sh
 set -eu
 tag=v0.6.13
-commit=$(gh api "repos/cgwalters-forge/agentic-job/commits/$tag" --jq .sha)
-from=https://github.com/cgwalters-forge/agentic-job/releases/download/$tag
+source_repo=SOURCE_OWNER/SOURCE_REPO
+commit=$(gh api "repos/$source_repo/commits/$tag" --jq .sha)
+from=https://github.com/$source_repo/releases/download/$tag
 curl -fsSL -O "$from/release.json" -O "$from/provenance.jsonl"
 ```
 
@@ -153,11 +134,11 @@ Bind both the attestation and manifest to that resolved tag commit:
 
 ```sh
 gh attestation verify release.json --bundle provenance.jsonl \
-  --repo cgwalters-forge/agentic-job \
-  --cert-identity https://github.com/cgwalters-forge/agentic-job/.github/workflows/release.yml@refs/heads/main \
+  --repo "$source_repo" \
+  --cert-identity "https://github.com/$source_repo/.github/workflows/release.yml@refs/heads/main" \
   --source-ref refs/heads/main --source-digest "$commit" --deny-self-hosted-runners
-jq -e --arg tag "$tag" --arg commit "$commit" \
-  '.repository == "cgwalters-forge/agentic-job" and .release == $tag and .commit == $commit
+jq -e --arg tag "$tag" --arg commit "$commit" --arg repo "$source_repo" \
+  '.repository == $repo and .release == $tag and .commit == $commit
   and .target == "x86_64-unknown-linux-musl"' release.json
 jq -r '.sha256["agentic-job"]' release.json
 ```
@@ -167,9 +148,6 @@ the all-zero value is a fail-closed placeholder, not a release checksum.
 Move the tag and digest together in a reviewed change. This follows
 [`binary.sh`](../secure-host/binary.sh)'s manifest verification
 ([release provenance](secure-host.md#where-the-binary-and-image-come-from)).
-Prefer release binaries to compiling on a small CI runner; the build
-stall in #2993 is reported downstream evidence, not a measured upstream
-regression.
 
 ## Bounds
 
@@ -199,13 +177,9 @@ add_comment = { max = 1 }
 
 ## Minimal deterministic pipeline
 
-This `.gitlab-ci.yml` posts a fixed comment on one issue. Replace the
-checksum, issue IID and bounds before running it from *Run pipeline* on
-the protected default branch. Restrict pipeline-variable overrides to
-trusted operators: they must not override pins, bounds or destinations.
-Provide fresh isolated runners tagged `agentic-job-trusted` and
-`agentic-job-producer`. The latter must have no publisher credential.
-For an existing pipeline, merge these stages and rules deliberately.
+Save this as `.gitlab-ci.yml`. Replace `SOURCE_OWNER/SOURCE_REPO` in the
+download URL with the same repository used for verification. For an existing
+pipeline, merge these stages and rules deliberately.
 
 Every trusted job fetches its own bounds and builds its own policy
 outside the artifact workspace. Only check accepts the producer's
@@ -228,7 +202,7 @@ variables:
     GIT_STRATEGY: clone
   before_script:
     - AJ=$(mktemp -d)
-    - curl -fsSL -o "$AJ/agentic-job" "https://github.com/cgwalters-forge/agentic-job/releases/download/$AGENTIC_JOB_RELEASE/agentic-job-x86_64-unknown-linux-musl"
+    - curl -fsSL -o "$AJ/agentic-job" "https://github.com/SOURCE_OWNER/SOURCE_REPO/releases/download/$AGENTIC_JOB_RELEASE/agentic-job-x86_64-unknown-linux-musl"
     - echo "$AGENTIC_JOB_SHA256  $AJ/agentic-job" | sha256sum -c -
     - chmod 0755 "$AJ/agentic-job"
     - curl -fsS "$CI_API_V4_URL/projects/$CI_PROJECT_ID" | jq -e '.visibility == "public"'
@@ -299,11 +273,9 @@ patch file, not an unchecked copy of the producer's workspace.
 
 ## Publisher secrets and lifecycle
 
-Set `GITLAB_TOKEN` to a dedicated bot token with only the access needed
-to post on the target project. Scope it to the `agentic-job-apply`
-environment, mark it protected and masked, and protect the default
-branch. With GitLab Premium, protect the environment too. Never put it
-in YAML, arguments, artifacts or logs; leave shell tracing disabled.
+With GitLab Premium, protect the publisher environment as well as the branch.
+Never put the token in YAML, arguments, artifacts or logs; leave shell
+tracing disabled.
 
 Audit project, group and instance variables: GitLab sends variables with
 the default `*` environment scope to every job. Neither producer nor
@@ -336,21 +308,23 @@ certificate. Installing the CA for curl alone does not fix apply.
 
 ## Diagnostics and summary publication
 
-[#2998](https://github.com/cgwalters-forge/agentic-job/pull/2998) implemented
-[#2994](https://github.com/cgwalters-forge/agentic-job/issues/2994)'s `/proc`
-diagnostics, described in
-[inference.md](inference.md#on-a-multi-user-guest). They observe process
+The [`/proc` diagnostics](inference.md#on-a-multi-user-guest) observe process
 visibility, not a same-user credential boundary. Stacking procfs or
 setting `hidepid` hides other UIDs, not the runner's own processes or
 supervisor memory; do not use it as a credential solution.
 
-[#2995](https://github.com/cgwalters-forge/agentic-job/issues/2995) is
-implemented by
-[#3002](https://github.com/cgwalters-forge/agentic-job/pull/3002) and included
-in the v0.6.13 pin above. Check can accept `--run-summary FILE` and apply can post that checked,
+Check can accept `--run-summary FILE` and apply can post that checked,
 sanitized summary with `--run-summary` and the caller's comment target.
 This is future integration for an agent caller, not enabled by this
 deterministic example. GitLab's artifact browser otherwise shows Markdown
 as plain text. See [summary publication and status targeting](safe-outputs.md#publishing-to-gitlab);
 commit statuses require GitLab 18.5 or later and the caller's exact ref,
 SHA and pipeline ID. A reusable component remains a later decision.
+
+## Publication fixture
+
+The [`gitlab` CI job](../.github/workflows/ci.yml) configures a disposable
+loopback GitLab CE for `just test-gitlab`. The [fixture](../crates/agentic-job/tests/gitlab.rs)
+checks that standalone apply opens a draft merge request from a bot's fork
+without changing the target branch. It does not run the example pipeline.
+Never point it at a shared or production instance.

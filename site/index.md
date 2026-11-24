@@ -10,7 +10,7 @@ agentic-job runs a coding agent in CI with no write token and no
 model key in its reach, and has another machine check what it
 produced before anything with a write token acts on it.
 
-[Get started](../docs/try-it.md), or read [how it works](../docs/workflow.md).
+[Get started](../docs/quickstart.md), or read [how it works](overview.md).
 
 ## Agent security is just CI security
 

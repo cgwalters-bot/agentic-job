@@ -68,5 +68,5 @@ does not replace those controls or review before merge.
 | Forge | Where to start |
 | --- | --- |
 | GitHub | Use the [reusable workflow](workflow.md) for agent runs and separate check and apply jobs. |
-| GitLab | The [deterministic pipeline](try-gitlab.md) shows policy, check and apply. Model-backed runs are not supported. |
-| Forgejo | The [scripted trial](try-forgejo.md) checks proposals but does not publish or run a model. Standalone publication is separate; do not give the dispatch job a publishing credential. |
+| GitLab | The [deterministic pipeline](quickstart.md#gitlab) shows policy, check and apply. Model-backed runs are not supported. |
+| Forgejo | The [scripted trial](quickstart.md#forgejo) checks proposals but does not publish or run a model. Standalone publication is separate; do not give the dispatch job a publishing credential. |

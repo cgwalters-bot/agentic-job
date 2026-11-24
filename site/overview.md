@@ -1,17 +1,24 @@
-# agentic-job
+# How it works
 
 > This text is LLM generated.
 
-This project takes as a core premise that [AI (LLMs) and CI should go together](https://blog.verbum.org/2026/08/21/agentic-ai-and-software-forges/);
-operational concerns (security, scalability, observability) for your agents should align with your regular deterministic CI.
-
-This project is heavily inspired by [GitHub Agentic Workflows](https://github.github.com/gh-aw/) but makes some different design choices.
+agentic-job runs untrusted steps in CI without giving them the credentials
+that publish changes. It applies the same separation to deterministic scripts
+and coding agents. Start with the [Quickstart](../docs/quickstart.md) to see
+what you can run on your forge.
 
 ## Core model
 
-An agent invocation starts as a forge-native runner (e.g. GitHub action workflow), can perform arbitrary read-only
-operations, and at the end can post output through a [safe outputs](https://github.github.com/gh-aw/reference/safe-outputs/) style
-model.
+1. **Policy** decides where the run may act and which outputs it may request.
+2. **Produce** runs the script or agent without publishing credentials. It leaves
+   a hand-back: requests for changes and, when needed, a patch.
+3. **Check** validates the hand-back against policy on a separate trusted runner.
+4. **Apply** publishes only admitted requests. It holds the publishing credential
+   and does not execute agent-produced code.
+
+This [safe-output model](../docs/safe-outputs.md) is inspired by
+[GitHub Agentic Workflows](https://github.github.com/gh-aw/). See the
+[comparison](../docs/background-ghaw.md) for the differences.
 
 The supported harnesses are Claude Code, opencode and Vibe, using
 [ACP (Agent Client Protocol)](https://agentclientprotocol.com/get-started/introduction).
@@ -19,30 +26,21 @@ See [agent harnesses](../docs/harness.md) for configuration.
 
 ## Host Security vs Agent Security
 
-Projects like [OpenShell](https://github.com/NVIDIA/OpenShell) and many others aim to constrain
-agents specifically. This project again takes the stance that we should secure CI in general,
-and agents are just one type of workload.
-
-The [`secure-host` action](../docs/secure-host.md) locks down a fresh
-supported GitHub Actions runner so that later steps cannot regain `sudo`.
-It is built from this workspace and also published through
-`cgwalters-forge/actions/secure-host`. Losing root does not protect
-credentials from another process running as the same user; see the
-[credential boundary](../docs/inference.md).
+On supported GitHub Actions runners, [`secure-host`](../docs/secure-host.md)
+prevents later steps from regaining `sudo`. Removing root access does not
+hide credentials from code running as the same user. For broker-backed
+agents, the provider key stays with the [inference broker](../docs/inference.md);
+the agent receives only a token for its own run.
 
 ## Try it
 
-Follow the [getting-started walkthrough](../docs/try-it.md) for a local
-safe-output check and a first scripted agent run on GitHub, then connect a
-real agent. GitLab currently supports the deterministic policy/check/apply
-example, **not agent inference**; its [guide](../docs/gitlab.md) names the
-remaining prerequisites and live-verification gaps.
+Use the [Quickstart](../docs/quickstart.md) to check a local hand-back, then
+try a scripted agent on GitHub, a fixed issue note on GitLab, or a check-only
+trial on Forgejo. Only GitHub has a supported model-backed workflow here.
 
 ## Documentation
 
-- [Workflow and deployment evidence](../docs/workflow.md), [events](../docs/events.md), [dispatch](../docs/dispatch.md) and [GitLab CI](../docs/gitlab.md).
-- [Safe outputs](../docs/safe-outputs.md), [host security](../docs/secure-host.md) and [known limitations](../docs/limitations.md).
-- [Agent harnesses](../docs/harness.md), [inference](../docs/inference.md), [MCP](../docs/mcp.md) and [skills](../docs/skills.md).
-- [Design and trust](../docs/requirements.md), [related projects](../docs/related-projects.md) and [interactive sessions](../docs/interactive.md).
-- [Project layout and license](../docs/layout.md), [stable interfaces](../docs/stable-interfaces.md) and [remaining work](../docs/plan.md).
-- [Contributing](../docs/contributing.md): design constraints, checks, code conventions and security boundaries.
+- **Guides:** [GitHub workflows](../docs/workflow.md), [dispatch](../docs/dispatch.md) and [inference](../docs/inference.md).
+- **Reference:** [CLI](../docs/interface.md), [safe outputs](../docs/safe-outputs.md), [GitLab CI](../docs/gitlab.md) and [limitations](../docs/limitations.md).
+- **Design notes:** [trust model](../docs/requirements.md) and [host security](../docs/secure-host.md).
+- **Contributing:** [project guidelines](../docs/contributing.md) and [layout](../docs/layout.md).

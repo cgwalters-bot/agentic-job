@@ -12,6 +12,9 @@ SOURCE = "https://forge.example/o/r/blob/abc/"
 # The repository files the site renders.
 SOURCES = [*PAGES, *(f"{DOCS}{p.name}" for p in sorted((ROOT / DOCS).glob("*.md")))]
 
+# Published onboarding routes still work but do not appear in the sidebar.
+LEGACY_QUICKSTART = {"try-it": "github", "try-gitlab": "gitlab", "try-forgejo": "forgejo"}
+
 
 class RepositoryLinksTest(unittest.TestCase):
     def test_rewrite(self):
@@ -91,13 +94,41 @@ class RepositoryLinksTest(unittest.TestCase):
             if not href.startswith("#")  # In-page table of contents.
         ]
         self.assertEqual(
-            routes[:5],
-            ["/", "/docs/try-it/", "/docs/workflow/", "/docs/try-gitlab/", "/docs/try-forgejo/"],
+            routes[:4],
+            ["/", "/docs/quickstart/", "/overview/", "/docs/workflow/"],
         )
         docs_routes = [
-            f"/{file.removesuffix('.md')}/" for file in SOURCES if file.startswith(DOCS)
+            f"/{file.removesuffix('.md')}/"
+            for file in SOURCES
+            if file.startswith(DOCS)
+            and file.removeprefix(DOCS).removesuffix(".md") not in LEGACY_QUICKSTART
         ]
-        self.assertCountEqual(routes, ["/", *docs_routes])
+        self.assertCountEqual(routes, ["/", "/overview/", *docs_routes])
+
+    def test_legacy_quickstart_links(self):
+        docs = ROOT / "site/dist/docs"
+        for route, forge in LEGACY_QUICKSTART.items():
+            with self.subTest(route=route):
+                page = (docs / route / "index.html").read_text()
+                self.assertIn(f'<a href="../quickstart/#{forge}">', page)
+
+        workflow = (docs / "workflow/index.html").read_text()
+        self.assertRegex(
+            workflow,
+            r'id="real-agent-checklist"[^\n]*\s*<h3 id="broker-configuration-for-custom-callers">',
+        )
+        self.assertRegex(
+            workflow,
+            r'id="first-run-walkthrough-8-november-2026"[^\n]*\s*<p>[^\n]*'
+            r'<a href="../quickstart/#github">',
+        )
+
+    def test_quickstart_forge_choices(self):
+        page = (ROOT / "site/dist/docs/quickstart/index.html").read_text()
+        headings = re.findall(r'<h2 id="(github|gitlab|forgejo)">', page)
+        self.assertEqual(headings, ["github", "gitlab", "forgejo"])
+        for forge in headings:
+            self.assertIn(f'<td><a href="#{forge}">', page)
 
     # Python-Markdown ends a list item at a nested list, or a paragraph or
     # code block after a blank line, indented less than 4 spaces; the forge

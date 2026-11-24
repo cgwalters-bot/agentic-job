@@ -24,7 +24,7 @@ agent shares its user with the job that runs it
 | GitHub | The agent job's admission step | Refuses a private or unknown caller, and a policy marked private. |
 | GitHub | `run`'s action, before upload | Checks the target and agent configuration again. A rate-limited check waits and retries a bounded number of times, then refuses; any other failure refuses. |
 | GitLab | The project's own pipeline | The [GitLab example](gitlab.md) checks the project's `visibility == "public"` before `policy`, which covers caller and target because they are the same project there. Keep that check if you adapt it. |
-| Forgejo | The caller's workflow | Nothing checks visibility for you. Name only public repositories, as in the [Forgejo quickstart](try-forgejo.md). |
+| Forgejo | The caller's workflow | Nothing checks visibility for you. Name only public repositories, as in the [Forgejo quickstart](quickstart.md#forgejo). |
 
 `agentic-job run` also refuses a policy that `policy --private` marked
 private, on any forge. The standalone CLI does not query a target's

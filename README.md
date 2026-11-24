@@ -9,7 +9,7 @@ with the same security and operational care as other CI workloads.
 **[Read the documentation](https://cgwalters-forge.github.io/agentic-job/)**
 or browse the [documentation in this checkout](site/overview.md).
 
-Getting started: [GitHub](docs/try-it.md), [GitLab](docs/try-gitlab.md),
-or [Forgejo](docs/try-forgejo.md).
+Follow the [Quickstart](docs/quickstart.md) to check outputs locally and run
+your first example on GitHub, GitLab or Forgejo.
 
 Licensed under either [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.

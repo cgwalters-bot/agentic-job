@@ -1,4 +1,4 @@
-# Generic GitHub-hosted ubuntu-26.04 configuration for docs/try-it.md.
+# Generic GitHub-hosted ubuntu-26.04 configuration for docs/quickstart.md.
 # The workflow supplies the agent and limits. No deployment-specific
 # repository packages, patch exceptions, inference addresses or identities.
 [host]

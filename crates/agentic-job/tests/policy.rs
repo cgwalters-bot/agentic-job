@@ -601,8 +601,9 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     use yaml_rust2::YamlLoader;
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let guide = std::fs::read_to_string(root.join("docs/try-it.md")).unwrap();
-    let section = guide.as_str();
+    let guide = std::fs::read_to_string(root.join("docs/quickstart.md")).unwrap();
+    let section = guide.split_once("\n## GitHub\n").unwrap().1;
+    let section = section.split_once("\n## GitLab\n").unwrap().0;
     let block = |fence: &str| {
         section
             .split(fence)
@@ -685,7 +686,7 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
         }
         assert_eq!(
             caller_yaml["jobs"]["run"]["uses"].as_str().unwrap(),
-            "cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@COMMIT"
+            "SOURCE_OWNER/SOURCE_REPO/.github/workflows/agentic-job.yml@COMMIT"
         );
         calls.push(caller_yaml);
     }
@@ -823,8 +824,8 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
     assert!(stderr.contains("limits.max-requests"), "{stderr}");
     // The changed caller, with synthetic stand-ins for its repository
     // variables and the workflow's registration default, keeps a positive
-    // cap. Composition accepts the scripted zero for it too, uncapped, as
-    // docs/workflow.md warns: the guide's change is what sets the cap.
+    // cap. Composition accepts the scripted zero for it too, uncapped:
+    // the Quickstart's change is what sets the cap.
     let vars = std::collections::HashMap::from([
         ("${{ vars.INFERENCE_URL }}", "http://192.0.2.1:8080"),
         ("${{ vars.INFERENCE_AUDIENCE }}", "example-audience"),
@@ -877,7 +878,7 @@ fn try_it_caller_fits_its_bounds_and_configuration() {
 #[test]
 fn documented_local_check_runs_and_refuses_an_out_of_bounds_request() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let guide = std::fs::read_to_string(root.join("docs/try-it.md")).unwrap();
+    let guide = std::fs::read_to_string(root.join("docs/quickstart.md")).unwrap();
     assert!(guide.contains("cargo build --locked -p agentic-job --bin agentic-job\nPATH=\"$PWD/target/debug:$PATH\" sh docs/examples/local.sh\n"));
     let temp = tempfile::tempdir().unwrap();
     let examples = temp.path().join("docs/examples");

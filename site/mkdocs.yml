@@ -9,38 +9,35 @@ site_url: !ENV [SITE_URL, ""]
 docs_dir: pages
 site_dir: dist
 
-# Keep overview.md available to existing links, but out of the sidebar:
-# index.md is the site's entry point.
 nav:
   - Home: index.md
   - Getting started:
-      - Quickstart: docs/try-it.md
-      - docs/workflow.md
-      - docs/try-gitlab.md
-      - docs/try-forgejo.md
-  - How it works:
+      - Quickstart: docs/quickstart.md
+      - How it works: overview.md
+  - Guides:
+      - GitHub workflows: docs/workflow.md
       - docs/harness.md
+      - docs/inference.md
+      - docs/events.md
+      - docs/dispatch.md
+      - docs/review.md
       - docs/interactive.md
+      - docs/private-repositories.md
+      - docs/mcp.md
+      - docs/skills.md
+      - docs/workflows-check.md
+  - Reference:
+      - docs/interface.md
+      - docs/safe-outputs.md
+      - docs/gitlab.md
+      - docs/stable-interfaces.md
+      - docs/limitations.md
+  - Design notes:
+      - docs/requirements.md
       - docs/sandbox.md
       - docs/secure-host.md
       - docs/sandbox-check.md
-      - docs/safe-outputs.md
-      - docs/review.md
-      - docs/dispatch.md
-      - docs/events.md
       - docs/workflow-ingress.md
-  - Reference:
-      - docs/interface.md
-      - docs/stable-interfaces.md
-      - docs/requirements.md
-      - docs/limitations.md
-      - docs/inference.md
-      - docs/mcp.md
-      - docs/skills.md
-      - docs/gitlab.md
-      - docs/private-repositories.md
-      - docs/workflows-check.md
-  - Design notes and comparisons:
       - docs/background-ghaw.md
       - docs/compiler.md
       - docs/related-projects.md
