@@ -200,7 +200,9 @@ substitute a provider key; GitLab has no supported inference registration path.
 1. Use a dedicated Forgejo Actions dispatch repository, a separate public
    target with an initialized base branch, and a bot fork distinct from the
    dispatch repository. Use a trusted, isolated runner with Bash, Git, jq
-   and a pinned `agentic-job` binary. It must reach Forgejo directly over HTTPS.
+   and a pinned `agentic-job` binary. It must reach Forgejo directly over HTTPS
+   or [plain HTTP inside a cluster](#plain-http-inside-a-cluster); the trial
+   reads the base anonymously without a proxy or redirects.
 2. Review and copy the [trial workflow](../workflow/forgejo/dispatch.yml) to
    `.forgejo/workflows/dispatch.yml` on the dispatch repository's protected
    default branch. Set `TRIAL_RUNNER` to its runner labels as JSON (for example
@@ -216,7 +218,31 @@ substitute a provider key; GitLab has no supported inference registration path.
    should admit one draft request and patch. Read the check step's log; the
    report and patch stay in the runner's temporary directory, not an uploaded artifact.
 
-The HTTPS Actions setup is not verified live. The trial does not publish or
-run a model. [Standalone Forgejo apply](safe-outputs.md#publishing-to-forgejo)
-is tested separately by a [fixture](../crates/agentic-job/tests/forgejo.rs) on a
-disposable instance, not through Actions.
+A trial on an Actions runner over HTTPS remains unverified. The trial does not
+publish or run a model. A [fixture](../crates/agentic-job/tests/forgejo.rs) tests
+[standalone Forgejo apply](safe-outputs.md#publishing-to-forgejo) separately on a
+disposable instance, not through Actions. The fixture also uses `run`'s Git
+command to clone over HTTPS through a loopback TLS front, with bounds that omit
+`allow_http`.
+
+### Plain HTTP inside a cluster
+
+If the runner cannot resolve Forgejo's HTTPS name (`Could not resolve host`)
+but can reach its HTTP service inside the cluster, set
+`TRIAL_FORGEJO_URL=http://forge.internal:3000` (substitute your service address).
+List the same host and port, without the scheme, in both bounds entries:
+
+```toml
+hosts = ["forge.internal:3000"]
+allow_http = ["forge.internal:3000"]
+```
+
+Use this only if the entire path stays on a network you trust. Anyone on that
+path can read or alter the clone, including the base the agent sees, and can
+read a private target's read token if one is sent. For an address reached over
+the internet, give Forgejo an HTTPS name the runner can resolve instead.
+
+Only listed hosts can be configured as plain-HTTP clone targets. `allow_http`
+cannot name `github.com` or its subdomains. If organization bounds also apply,
+they must allow HTTP for the same host. `policy` and `run` warn when they admit
+or make a plain-HTTP clone.

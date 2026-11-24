@@ -231,11 +231,20 @@ remove_labels = { max = 2, allowed = ["bug", "area/apply"], blocked = ["status/p
 /// What `policy` writes in DIR as NAME for this server's target, from
 /// bounds that name the bot's fork and allow OUTPUTS.
 fn policy(forge: &Forge, dir: &Path, name: &str, outputs: &str) -> PathBuf {
-    let authority = forge.server.strip_prefix("http://").unwrap();
+    policy_at(&forge.server, dir, name, outputs)
+}
+
+/// [`policy`] for the target at SERVER, whose bounds have `allow_http`
+/// only for an `http://` SERVER.
+fn policy_at(server: &str, dir: &Path, name: &str, outputs: &str) -> PathBuf {
+    let (authority, allow_http) = match server.strip_prefix("http://") {
+        Some(authority) => (authority, format!("allow_http = [\"{authority}\"]")),
+        None => (server.strip_prefix("https://").unwrap(), String::new()),
+    };
     let bounds = format!(
         r#"
 hosts = ["{authority}"]
-allow_http = ["{authority}"]
+{allow_http}
 repos = ["{ADMIN}/{NAME}"]
 bases = ["main"]
 max_outputs = 2
@@ -260,7 +269,7 @@ push_repo = "{BOT}/{NAME}"
         .arg("--allow")
         .arg(&allow)
         .args(["--repo", &format!("{ADMIN}/{NAME}")])
-        .args(["--clone-url", &format!("{}/{ADMIN}/{NAME}", forge.server)])
+        .args(["--clone-url", &format!("{server}/{ADMIN}/{NAME}")])
         .args(["--base", "main", "--kind", "branch"])
         .args(["--outputs", &types.join(",")])
         .args(["--max-outputs", "max"])
@@ -270,6 +279,88 @@ push_repo = "{BOT}/{NAME}"
     let path = dir.join(format!("{name}.json"));
     std::fs::write(&path, &output.stdout).unwrap();
     path
+}
+
+/// An HTTPS front for the forge on loopback, whose certificate only the
+/// file `ca` makes git trust: the service itself speaks plain HTTP.
+struct Https {
+    url: String,
+    ca: PathBuf,
+    /// Relays connections until it is dropped.
+    _runtime: tokio::runtime::Runtime,
+}
+
+fn https_front(forge: &Forge, dir: &Path) -> Https {
+    use tokio_rustls::rustls::{self, pki_types};
+    let key = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+    let ca = dir.join("front.pem");
+    std::fs::write(&ca, key.cert.pem()).unwrap();
+    let private = pki_types::PrivatePkcs8KeyDer::from(key.signing_key.serialize_der());
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![key.cert.der().clone()], private.into())
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+    let upstream = forge.server.strip_prefix("http://").unwrap().to_owned();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let url = format!("https://{}", listener.local_addr().unwrap());
+    runtime.spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let (acceptor, upstream) = (acceptor.clone(), upstream.clone());
+            tokio::spawn(async move {
+                let (Ok(mut client), Ok(mut server)) = (
+                    acceptor.accept(client).await,
+                    tokio::net::TcpStream::connect(&upstream).await,
+                ) else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            });
+        }
+    });
+    Https {
+        url,
+        ca,
+        _runtime: runtime,
+    }
+}
+
+/// The target's clone as `run` makes it, over HTTPS from bounds without
+/// `allow_http`: the path a forge with a TLS name takes, which the
+/// plain-HTTP service alone does not exercise. It must start at BASE.
+fn https_clone(forge: &Forge, dir: &Path, base: &str) {
+    let front = https_front(forge, dir);
+    let path = policy_at(&front.url, dir, "https", PUBLISHING);
+    let policy: agentic_job::policy::Policy =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(policy.allow_http.is_empty(), "{:?}", policy.allow_http);
+    let checkout = dir.join("https-clone");
+    let args = agentic_job::run::clone::target_clone_args(&policy, checkout.to_str().unwrap(), &[])
+        .unwrap();
+    assert!(args.contains(&"protocol.https.allow=always".to_owned()));
+    assert!(!args.iter().any(|arg| arg.starts_with("protocol.http.")));
+    let mut command = Command::new(&args[0]);
+    for name in PROXY_VARS {
+        command.env_remove(name);
+    }
+    let output = command
+        .args(&args[1..])
+        .env("GIT_SSL_CAINFO", &front.ca)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    assert_success("git clone over https", &output);
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_success("git rev-parse", &head);
+    assert_eq!(String::from_utf8(head.stdout).unwrap().trim(), base);
 }
 
 /// A checked upload in DIR, as check's job leaves it: a comment, and a
@@ -792,6 +883,8 @@ fn apply_publishes_to_forgejo() {
     let base = main["commit"]["id"].as_str().unwrap();
 
     let dir = tempfile::tempdir().unwrap();
+    // Here, not in a test of its own: a container makes its admin once.
+    https_clone(&forge, dir.path(), base);
     let publishing = policy(&forge, dir.path(), "publishing", PUBLISHING);
     let footer = format!("\n\n> Generated by [agentic-job]({RUN_URL})");
     let neutralized = format!("@\u{200b}{ADMIN}");

@@ -246,6 +246,22 @@ fn clone_args<'a>(
     argv
 }
 
+/// The command [`clone`] clones the policy's target into DIR with, git
+/// configured with CREDENTIAL. Public so that a forge fixture can make
+/// the clone a run makes without a sandbox.
+#[doc(hidden)]
+pub fn target_clone_args(policy: &Policy, dir: &str, credential: &[String]) -> Result<Vec<String>> {
+    check(policy)?;
+    let url = base_url(policy);
+    let transports = target_transports(policy);
+    check_url_in(&url, transports)?;
+    // A push's head is fetched by its commit afterwards; see [`clone`].
+    let push = policy.safe_outputs.push_to_pull_request_branch.as_ref();
+    let branch = push.is_none().then_some(policy.base.as_str());
+    let args = clone_args(&url, branch, DEPTH, dir, credential, transports);
+    Ok(args.into_iter().map(str::to_owned).collect())
+}
+
 /// The arguments of a fetch of COMMIT from the clone in DIR's origin,
 /// with the clone's TRANSPORTS.
 fn fetch_args<'a>(
@@ -296,23 +312,11 @@ pub fn git_clone(
     dir: &str,
     credential: &[String],
 ) -> Result<()> {
-    git_clone_in(sandbox, url, branch, depth, dir, credential, TRANSPORTS)
-}
-
-fn git_clone_in(
-    sandbox: &Sandbox,
-    url: &str,
-    branch: Option<&str>,
-    depth: &str,
-    dir: &str,
-    credential: &[String],
-    transports: &[&str],
-) -> Result<()> {
-    check_url_in(url, transports)?;
+    check_url(url)?;
     branch.map(check_ref).transpose()?;
     sandbox
         .checked(
-            &clone_args(url, branch, depth, dir, credential, transports),
+            &clone_args(url, branch, depth, dir, credential, TRANSPORTS),
             b"",
             MAX_GIT_OUTPUT,
         )
@@ -395,15 +399,11 @@ pub fn clone(sandbox: &Sandbox, policy: &Policy) -> Result<Checkout> {
             }
         );
     }
-    git_clone_in(
-        sandbox,
-        &base_url(policy),
-        push.is_none().then_some(policy.base.as_str()),
-        DEPTH,
-        dir_text,
-        &credential,
-        transports,
-    )?;
+    let argv = target_clone_args(policy, dir_text, &credential)?;
+    let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+    sandbox
+        .checked(&argv, b"", MAX_GIT_OUTPUT)
+        .with_context(|| format!("cloning {}", base_url(policy)))?;
     // Read as the sandbox user, like everything in the checkout: it is
     // the agent's from here on.
     let git = |args: &[&str]| -> Result<String> {
