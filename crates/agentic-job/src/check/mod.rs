@@ -669,6 +669,7 @@ fn verdict_of(
     // The run's own checks, where the library's order puts them: before
     // a replacement's, so that memory goes with either.
     let mut checkpoint = None;
+    let mut request_error = None;
     let mut memory = None;
     let lifecycle = |request: Option<&Map<String, Value>>| {
         let mut errors = Vec::new();
@@ -676,13 +677,15 @@ fn verdict_of(
         // `ready_when_complete` opens every pull request as a draft anyway.
         if let Some(item) = request.filter(|_| policy.safe_outputs.ready_when_complete()) {
             let output = item_type(item);
-            let key = if output == PUSH_TO_PULL_REQUEST_BRANCH {
-                "message"
-            } else {
-                "body"
-            };
+            let push = output == PUSH_TO_PULL_REQUEST_BRANCH;
+            let key = if push { "message" } else { "body" };
             match checkpoint::find(item.get(key).and_then(Value::as_str).unwrap_or_default()) {
                 Ok(found) => checkpoint = found,
+                // A replacement's request is read below, before collection
+                // can cut through its checkpoint, and its last commit decides.
+                Err(err) if push && handback.replacement.is_some() => {
+                    request_error = Some(format!("the {output}'s {key}: {err:#}"));
+                }
                 Err(err) => errors.push(format!("the {output}'s {key}: {err:#}")),
             }
         }
@@ -730,6 +733,9 @@ fn verdict_of(
             Ok(head) => checkpoint = head,
             Err(err) => checked.errors.push(format!("{err:#}")),
         }
+    } else {
+        // Refused for something else: report it with the rest.
+        checked.errors.extend(request_error);
     }
     if let Some(bytes) = contents.get(unchanged::FILE) {
         let candidate = (|| -> Result<()> {

@@ -3943,11 +3943,17 @@ mod tests {
     #[test]
     fn a_replacement_cannot_lose_the_outcomes_checkpoint_to_truncation() {
         for kind in [PUSH_TO_PULL_REQUEST_BRANCH, "push-to-pull-request-branch"] {
-            replacement_checkpoint_truncation(kind);
+            // Collection drops the whole checkpoint, or cuts through it.
+            for length in [65_000, 64_970] {
+                for head_open in [false, true] {
+                    replacement_checkpoint_truncation(kind, length, head_open);
+                }
+            }
         }
     }
 
-    fn replacement_checkpoint_truncation(kind: &str) {
+    fn replacement_checkpoint_truncation(kind: &str, length: usize, head_open: bool) {
+        let case = format!("{kind}, {length}, head open: {head_open}");
         let (home, mut policy, mail) = replacement_home();
         policy
             .safe_outputs
@@ -3955,35 +3961,51 @@ mod tests {
             .as_mut()
             .unwrap()
             .ready_when_complete = true;
+        let outcome = json!({"summary": "Partial.", "checkpoint":
+            {"complete": false, "done": "parser", "left": "tests", "next": "add tests"}});
+        let open = open_checkpoint(&object(outcome.clone())).unwrap();
+        let mail = if head_open {
+            mail.replacen("\n\n---\n", &format!("\n\n{}\n\n---\n", open.markdown()), 1)
+        } else {
+            mail
+        };
         let series = json!({"base_commit": home.checkout.base_commit, "commits": [mail]});
         std::fs::write(home.path(REPLACEMENT_PATH), series.to_string()).unwrap();
-        let item = json!({"type": kind, "message": "a".repeat(65_000)});
+        let item = json!({"type": kind, "message": "a".repeat(length)});
         std::fs::write(home.path(AGENT_OUTPUTS), format!("{item}\n")).unwrap();
-        std::fs::write(home.path(AGENT_OUTCOME), r#"{"summary":"Partial.","checkpoint":{"complete":false,"done":"parser","left":"tests","next":"add tests"}}"#).unwrap();
+        std::fs::write(home.path(AGENT_OUTCOME), outcome.to_string()).unwrap();
 
         let change = home.collect(&policy, &config::Commit::default());
-        assert!(change.dropped.is_none(), "{:?}", change.dropped);
+        assert!(change.dropped.is_none(), "{case}: {:?}", change.dropped);
         let collected = crate::collect::collect_dir(&home.path("safe-outputs"), &policy).unwrap();
-        assert!(
-            !collected.items[0]["message"]
-                .as_str()
-                .unwrap()
-                .contains(checkpoint::FENCE)
-        );
+        let message = collected.items[0]["message"].as_str().unwrap();
+        if length == 65_000 {
+            assert!(!message.contains(checkpoint::FENCE), "{case}");
+        } else {
+            assert!(
+                message.contains(checkpoint::FENCE) && checkpoint::find(message).is_err(),
+                "{case}"
+            );
+        }
         let collected_path = home.path("collected.json");
         std::fs::write(&collected_path, serde_json::to_vec(&collected).unwrap()).unwrap();
         let verdict =
             check::check_run_outputs(&home.path("safe-outputs"), &collected_path, &policy, RUN_ID)
                 .unwrap();
-        assert!(!verdict.ok);
-        assert!(
-            verdict
-                .errors
-                .iter()
-                .any(|err| err.contains("last replacement commit does not")),
-            "{:?}",
-            verdict.errors
-        );
+        if head_open {
+            assert!(verdict.ok, "{case}: {:?}", verdict.errors);
+            assert_eq!(verdict.checkpoint.as_ref(), Some(&open), "{case}");
+        } else {
+            assert!(!verdict.ok, "{case}");
+            assert!(
+                verdict
+                    .errors
+                    .iter()
+                    .any(|err| err.contains("last replacement commit does not")),
+                "{case}: {:?}",
+                verdict.errors
+            );
+        }
     }
 
     /// What `$(git format-patch ...)` leaves: the mail without its final

@@ -108,15 +108,12 @@ pub fn find(text: &str) -> Result<Option<Checkpoint>> {
     Ok(found)
 }
 
-/// Read the push request before collection can truncate its checkpoint.
+/// Read the push request before collection can truncate its checkpoint,
+/// framed as the collector frames it.
 pub(super) fn push_declares_open(outputs: &[u8]) -> Result<bool> {
-    for line in outputs.split(|&b| b == b'\n') {
-        let Ok(item) = serde_json::from_slice::<serde_json::Value>(line) else {
-            continue; // Malformed requests are the collector's to refuse.
-        };
-        if item["type"].as_str().is_some_and(|kind| {
-            kind.replace('-', "_") == crate::policy::PUSH_TO_PULL_REQUEST_BRANCH
-        }) && let Some(message) = item["message"].as_str()
+    for request in safe_outputs::decode::decode(outputs)? {
+        if request.kind.replace('-', "_") == crate::policy::PUSH_TO_PULL_REQUEST_BRANCH
+            && let Some(message) = request.object.get("message").and_then(|m| m.as_str())
             && find(message)
                 .context("the original push request's checkpoint")?
                 .is_some()
@@ -183,6 +180,59 @@ mod tests {
 
     const GOOD: &str =
         r#"{"reason": "budget", "done": "the parser", "left": "tests", "next": "add tests"}"#;
+
+    #[test]
+    fn push_requests_are_framed_as_the_collector_frames_them() {
+        let line = |kind: &str, message: String| {
+            serde_json::json!({"type": kind, "message": message}).to_string()
+        };
+        let open = format!("Partial.\n\n{FENCE}\n{GOOD}\n```");
+        let cases: &[(&str, String, Result<bool, &str>)] = &[
+            (
+                "plain",
+                line("push_to_pull_request_branch", "Done.".into()),
+                Ok(false),
+            ),
+            (
+                "open",
+                line("push_to_pull_request_branch", open.clone()),
+                Ok(true),
+            ),
+            (
+                "dashed",
+                line("push-to-pull-request-branch", open.clone()),
+                Ok(true),
+            ),
+            (
+                "other type",
+                line("create_pull_request", open.clone()),
+                Ok(false),
+            ),
+            (
+                "leading BOM",
+                format!(
+                    "\u{feff}{}",
+                    line("push_to_pull_request_branch", open.clone())
+                ),
+                Ok(true),
+            ),
+            (
+                "malformed",
+                line("push_to_pull_request_branch", format!("{open}\n\n{open}")),
+                Err("more than one checkpoint"),
+            ),
+            ("not JSON", "{".into(), Err("not JSON")),
+        ];
+        for (name, outputs, want) in cases {
+            match (push_declares_open(format!("{outputs}\n").as_bytes()), want) {
+                (Ok(got), Ok(want)) => assert_eq!(got, *want, "{name}"),
+                (Err(err), Err(want)) => {
+                    assert!(format!("{err:#}").contains(want), "{name}: {err:#}");
+                }
+                (got, _) => panic!("{name}: {got:?}"),
+            }
+        }
+    }
 
     #[test]
     fn checkpoints_are_read_strictly() {
