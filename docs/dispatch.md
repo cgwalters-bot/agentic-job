@@ -99,6 +99,7 @@ Set these GitHub repository variables on the caller, not in the dispatch:
 | `AGENT_RUNNER`, `AGENT_CONFIG` | Disposable runner labels as JSON and an optional runner TOML path (defaults to pinned hosted config). |
 | `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | Optional public repository and directory for opencode or Vibe configuration, not runner TOML. |
 | `INFERENCE_URL`, `INFERENCE_AUDIENCE` | Reachable broker URL and its configured GitHub OIDC audience. No provider API key on the runner. |
+| `RUNNER_GATE` | `true` (in any case) to start the agent only through the [launch gate](secure-host.md#the-runner-only-launch-gate), without the job's read token. No hosted runner passes it yet. |
 
 Confirm [broker admission](inference.md#which-workflows-a-broker-admits),
 budgets and reachability from registration and agent jobs. For private

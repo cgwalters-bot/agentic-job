@@ -2476,6 +2476,7 @@ fn run_uses_policy_binary_captures_exit_and_gates_partial_results() {
             &[
                 ("JOB_DIR", path(dir.path())),
                 ("RUNNER_HOME", path(&home)),
+                ("RUNNER_GATE", "false"),
                 ("REVIEW_HEAD", "review-head"),
                 ("STATE", &exit.to_string()),
                 ("RECORD", path(&record)),
@@ -2617,6 +2618,7 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
             dir.path(),
             &[
                 ("JOB_DIR", path(dir.path())),
+                ("RUNNER_GATE", "false"),
                 ("GITHUB_OUTPUT", path(&output)),
                 ("GITHUB_STEP_SUMMARY", path(&dir.path().join("summary"))),
             ],
@@ -2665,6 +2667,7 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
             dir.path(),
             &[
                 ("JOB_DIR", path(dir.path())),
+                ("RUNNER_GATE", "false"),
                 ("GITHUB_OUTPUT", path(&output)),
                 ("GITHUB_STEP_SUMMARY", path(&dir.path().join("summary"))),
             ],
@@ -2711,6 +2714,7 @@ fn run_only_publishes_scalar_budget_and_safe_secret_locations() {
             dir.path(),
             &[
                 ("JOB_DIR", path(dir.path())),
+                ("RUNNER_GATE", "false"),
                 ("GITHUB_OUTPUT", path(&output)),
                 ("GITHUB_STEP_SUMMARY", path(&summary)),
             ],
@@ -2770,6 +2774,7 @@ open('writer-finished', 'w').close()
         &[
             ("PATH", &search),
             ("JOB_DIR", path(dir.path())),
+            ("RUNNER_GATE", "false"),
             ("GITHUB_OUTPUT", path(&output)),
             ("GITHUB_STEP_SUMMARY", path(&summary)),
         ],
@@ -3244,6 +3249,7 @@ fn wrapper_forwards_policy_settings_without_reinterpretation() {
         "github-reads",
         "secure-host-image-artifact-id",
         "agent-user",
+        "runner-gate",
     ];
     let inputs = |doc: &yaml_rust2::Yaml| {
         doc["on"]["workflow_call"]["inputs"]
@@ -4841,6 +4847,7 @@ printf 200
                 consumer.path(),
                 &[
                     ("JOB_DIR", home),
+                    ("RUNNER_GATE", "false"),
                     ("MODE", mode),
                     ("GITHUB_OUTPUT", path(&outputs)),
                 ],
@@ -8072,6 +8079,96 @@ fn the_agent_is_the_runners_user_and_no_run_asks_for_the_sandbox_user() {
         !root().join(".github/agentic-job/e2e/sandbox.sh").exists(),
         "the sandbox user's end-to-end setup is gone"
     );
+}
+
+/// The launch gate is opt-in until a hosted runner passes it: each input
+/// defaults off, the run step passes `--runner-gate` only for `true`, and
+/// dispatch turns it on, without the read token the gate refuses, only for
+/// a caller whose `RUNNER_GATE` is `true`.
+#[test]
+fn the_runner_gate_is_opt_in() {
+    let call_input = |file: &str| {
+        definition(file)["on"]["workflow_call"]["inputs"]["runner-gate"]["default"].as_bool()
+    };
+    assert_eq!(call_input("agentic-job.yml"), Some(false));
+    assert_eq!(call_input("agent.yml"), Some(false));
+    let action = definition("run/action.yml");
+    assert_eq!(
+        action["inputs"]["runner-gate"]["default"].as_str(),
+        Some("false")
+    );
+    // The whole run step, with a stand-in that records its arguments:
+    // anything but `true` or `false` stops the step before it.
+    for (value, gated) in [
+        ("true", Some(true)),
+        ("false", Some(false)),
+        ("True", None),
+        ("", None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("record");
+        executable(
+            &dir.path().join("agentic-job"),
+            "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"$RECORD\"\n",
+        );
+        let result = run_step(
+            "run/action.yml",
+            "Run the agent",
+            dir.path(),
+            &[
+                ("JOB_DIR", path(dir.path())),
+                ("RUNNER_HOME", path(&dir.path().join("agent-home"))),
+                ("RUNNER_GATE", value),
+                ("RECORD", path(&record)),
+                ("GITHUB_OUTPUT", path(&dir.path().join("output"))),
+                ("GITHUB_STEP_SUMMARY", path(&dir.path().join("summary"))),
+            ],
+        );
+        assert_eq!(
+            result.status.success(),
+            gated.is_some(),
+            "{value:?}: {result:?}"
+        );
+        let args = std::fs::read_to_string(&record).ok();
+        assert_eq!(
+            args.map(|args| args.lines().any(|arg| arg == "--runner-gate")),
+            gated,
+            "{value:?}"
+        );
+    }
+    let passes = Regex::new(r"(?m)^ +runner-gate: (.+)$").unwrap();
+    for (file, passed) in [
+        ("agentic-job.yml", &["${{ inputs.runner-gate }}"][..]),
+        ("agent.yml", &["${{ inputs.runner-gate }}"]),
+        (
+            "dispatch.yml",
+            &["${{ !inputs.scripted && vars.RUNNER_GATE == 'true' }}"],
+        ),
+        ("review.yml", &[]),
+        ("example-compose.yml", &[]),
+        ("example.yml", &[]),
+        ("ci.yml", &[]),
+    ] {
+        let text = workflow(file);
+        let values: Vec<&str> = passes
+            .captures_iter(&text)
+            .map(|value| value.get(1).unwrap().as_str())
+            .collect();
+        assert_eq!(values, passed, "{file}");
+    }
+    // Dispatch never pairs the gate with the read token it refuses.
+    let with = &definition("dispatch.yml")["jobs"]["run"]["with"];
+    for scripted in [false, true] {
+        for variable in [None, Some("true"), Some("TRUE"), Some("false"), Some("yes")] {
+            let mut context = vec![("inputs.scripted", Expr::Bool(scripted))];
+            context.extend(variable.map(|value| ("vars.RUNNER_GATE", Expr::text(value))));
+            let got = ["runner-gate", "github-reads"]
+                .map(|input| evaluate(expression(&with[input]), &context).truthy());
+            let gated =
+                !scripted && variable.is_some_and(|value| value.eq_ignore_ascii_case("true"));
+            assert_eq!(got, [gated, !gated], "{scripted} {variable:?}");
+        }
+    }
 }
 
 /// What the guard leaves out is src/apply/applied.rs's to test; this is

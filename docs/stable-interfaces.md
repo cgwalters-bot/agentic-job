@@ -71,7 +71,8 @@ Inputs:
 
 - the agent: `agent`, `model`, `agent-config-repo`, `agent-config-ref`,
   `agent-config-path`, `agent-skills`, `agent-user` (only `runner` since
-  #2989), `github-reads`,
+  #2989), `github-reads`, `runner-gate` (off by default;
+  [launch gate](secure-host.md#the-runner-only-launch-gate)),
   `packages`, `npm`, `setup`, `egress-write-policy`, `session`,
   `idle-minutes`;
 - runners and the binary: `runner`, `agent-runner`, `build-binary`;
@@ -130,7 +131,10 @@ Outputs `exit` and `failure-class` say how a run that did not end well
 ended ([why a run failed](workflow.md#why-a-run-failed)). `exit` is
 `agentic-job run`'s state (0, 1, 3, 4, 124), or 4 when the host check
 before it failed only to reach a host outside the runner, so the agent
-never started. `failure-class` is empty or one fixed word: `timeout`,
+never started. It is 2, with no `failure-class`, on an error of `run`
+itself, such as a [launch gate](secure-host.md#the-runner-only-launch-gate)
+refusal before the agent starts: the job log says why, and a gate refusal
+recurs on a retry on the same host. `failure-class` is empty or one fixed word: `timeout`,
 `budget`, `stall`, `agent_exit`, `inference_rate_limited`,
 `inference_overloaded`, `inference_unreachable`, `inference_quota`,
 `inference_unauthorized`, or `control_unreachable` for that host check.

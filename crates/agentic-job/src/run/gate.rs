@@ -1,6 +1,7 @@
 //! `run --runner-gate`: what `run --runner-home` shows of the host before
 //! it starts an agent that is the runner's own user, refusing to start
-//! it otherwise. Off by default.
+//! it otherwise. Off by default, here and in the run action and reusable
+//! workflows that pass it on.
 //!
 //! Such an agent is one more process of the uid of `run`, of the runner
 //! and of every step of the job. Clearing its environment does not hide
@@ -411,8 +412,8 @@ fn environment(known: &Known, pid: u32) -> Vec<String> {
             if name == agent::GITHUB_TOKEN_VAR {
                 format!(
                     "{name}, the agent's GitHub token, is in run's environment: a hardened run \
-                     gives the agent none (the run action's github-token input) until one can be \
-                     put in from outside its uid"
+                     gives the agent none (the run action's github-token input, the workflow's \
+                     github-reads: false) until one can be put in from outside its uid"
                 )
             } else {
                 format!(

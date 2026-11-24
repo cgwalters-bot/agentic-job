@@ -48,6 +48,13 @@ on:
           `sandbox` is refused: the second user went with agentic-job#2989
         type: string
         default: runner
+      runner-gate:
+        description: >-
+          Refuse to start the agent while the host shows a credential within its uid's reach or
+          egress not held (run/action.yml's `runner-gate`, docs/secure-host.md). Needs
+          `github-reads: false`
+        type: boolean
+        default: false
     # The agent is the runner's user, as every step after secure-host is,
     # and can read whatever the job holds: so the job holds nothing but
     # the run token, which is the agent's to use anyway, and the network
@@ -251,4 +258,5 @@ jobs:
         with:
           runner-home: ${{ format('{0}/agent-home', runner.temp) }}
           github-token: ${{ inputs.github-reads && github.token || '' }}
+          runner-gate: ${{ inputs.runner-gate }}
           inference-run-token: ${{ secrets.INFERENCE_RUN_TOKEN }}

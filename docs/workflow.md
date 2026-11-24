@@ -419,8 +419,8 @@ agent. The pieces are:
 | [`apply.yml`](../.github/workflows/apply.yml) | the `apply` and `conclude` jobs | `SAFE_OUTPUTS_PAT` or the call's job token, which also needs `actions: read`; both jobs keep the call's grant, `id-token` included |
 
 Every setting is an input of `policy.yml` (the same inputs as
-`agentic-job.yml`, without `agent-runner`, `github-reads` and
-`agent-user`, which are the agent job's, and
+`agentic-job.yml`, without `agent-runner`, `github-reads`, `agent-user`
+and `runner-gate`, which are the agent job's, and
 `secure-host-image-artifact-id`, which selects its test image), and check and apply take the policy call's
 outputs as they are, with `toJSON(needs.policy.outputs)`: what is
 checked and applied is what that call decided. The agent job passes

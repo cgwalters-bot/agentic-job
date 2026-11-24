@@ -358,6 +358,13 @@ on:
           docs/requirements.md#actors-and-trust
         type: string
         default: runner
+      runner-gate:
+        description: >-
+          Refuse to start the agent while its host shows a credential within the runner uid's
+          reach (`github-reads` among them) or egress not held to the write policy
+          (docs/secure-host.md#the-runner-only-launch-gate). Off until a hosted runner passes it
+        type: boolean
+        default: false
       secure-host-image-artifact-id:
         description: >-
           For testing an unreleased secure-host image: the ID of an artifact of the calling run
@@ -601,6 +608,7 @@ jobs:
       github-reads: ${{ inputs.github-reads }}
       secure-host-image-artifact-id: ${{ inputs.secure-host-image-artifact-id }}
       agent-user: ${{ inputs.agent-user }}
+      runner-gate: ${{ inputs.runner-gate }}
 
   check:
     needs: [policy, agent]

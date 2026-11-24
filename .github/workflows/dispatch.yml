@@ -238,6 +238,11 @@ jobs:
       # A named runner's labels and configuration come from AGENT_RUNNERS,
       # which `agentic-job dispatch` checked above, never from the input.
       agent-runner: ${{ inputs.scripted && '"ubuntu-26.04"' || needs.target.outputs.runner || vars.AGENT_RUNNER || '"ubuntu-26.04"' }}
+      # The launch gate, for a caller whose RUNNER_GATE is `true` (compared
+      # case-insensitively); it refuses the job's read token, so such a run
+      # gets none. Scripted CI's hosted runner cannot pass it yet.
+      runner-gate: ${{ !inputs.scripted && vars.RUNNER_GATE == 'true' }}
+      github-reads: ${{ inputs.scripted || vars.RUNNER_GATE != 'true' }}
       # The caller's runner configuration, else this repository's own for
       # hosted ubuntu-26.04 at the pinned commit: policy.yml checks this
       # source out at .agentic-job-source, so no caller keeps a copy of it.

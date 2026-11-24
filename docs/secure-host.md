@@ -381,10 +381,15 @@ is refused a POST, and its hand-back is uploaded and applied.
 An agent that is the runner's user can do whatever any process of that uid
 can. Clearing its environment does not stop it reading `run`'s
 `/proc/PID/environ`, and `hidepid` separates uids only. The run action's
-`runner-gate: true` input (`run --runner-gate`, off by default) therefore
-checks the host as that uid before the agent starts. `run` refuses to start
-the agent unless every check passes, and lists each missing control without
-printing a value:
+`runner-gate` input (`run --runner-gate`) therefore checks the host as that
+uid before the agent starts. It is off by default, in `run` and in the
+reusable workflows' `runner-gate` input; `dispatch.yml` turns it on, and
+gives the agent no read token, for a caller whose `RUNNER_GATE` variable is
+`true`. A refusal is not worth retrying on the same host: `run` exits 2
+before writing any output, so the run action's `exit` is 2 with no
+`failure-class` or summary ([outputs](stable-interfaces.md)). `run`
+refuses to start the agent unless every check passes, and lists each
+missing control in the job log without printing a value:
 
 - No variable of `run`'s environment is set whose name, in any case, looks
   like a credential (`*_TOKEN`, `*_KEY`, `*_APIKEY`, `*_SECRET`,
@@ -510,8 +515,9 @@ needs Yama scope **3**, not setup's scope 1 default; this cannot be undone
 until reboot, and currently needs IPv6 disabled at boot. It must have no subordinate uid allocations (so rootless
 container configurations with those allocations cannot pass yet), must
 check out with `persist-credentials: false`, and must keep the
-runner's registration out of the uid's reach. The reusable workflow has no
-input for the gate yet, and no CI job runs a hosted runner through it.
+runner's registration out of the uid's reach. With the default
+`github-reads: true`, the reusable workflow gives the agent its job token,
+which the gate refuses: a gated caller also sets `github-reads: false`.
 The default runner-read protection hides a running Worker's executable
 from `run`, so the gate currently refuses that hosted configuration even
 if its registration is isolated. A fallback installation path is not proof
@@ -526,7 +532,8 @@ This remains draft readiness work for #3000: successful fresh-host launch,
 individual missing-control tests and a complete inventory of local credential
 proxies and opaque settings credentials remain acceptance work. The gate is
 off by default; no existing caller is silently enrolled and no supported
-hosted passing configuration is claimed.
+hosted passing configuration is claimed. Turning it on by default waits for
+one hosted configuration that passes, with a caller migration.
 
 ## Inputs and outputs
 

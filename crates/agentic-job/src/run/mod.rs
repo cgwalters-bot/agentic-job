@@ -173,7 +173,9 @@ pub struct Args {
     pub runner_home: Option<PathBuf>,
     /// With --runner-home, refuse to start the agent unless the host shows
     /// that no credential but the agent's own is within its uid's reach and
-    /// that its uid is held to the egress write policy ([`gate`])
+    /// that its uid is held to the egress write policy
+    /// (docs/secure-host.md#the-runner-only-launch-gate). The run action
+    /// passes it when its `runner-gate` input is true
     #[arg(long, requires = "runner_home")]
     pub runner_gate: bool,
 }

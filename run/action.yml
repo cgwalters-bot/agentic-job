@@ -25,7 +25,8 @@ inputs:
       inventory finds no credential but its own run token within its uid's reach, and the uid
       is held to the egress write policy (`agentic-job run --runner-gate`,
       docs/secure-host.md). Currently refuses allocated subordinate uids. Needs Yama scope 3,
-      discarded core dumps, live HTTP(S) policy controls and no `github-token`
+      discarded core dumps, live HTTP(S) policy controls and no `github-token`. Off by default
+      until a hosted runner passes it; any value but `true` or `false` stops the step
     default: "false"
   github-token:
     description: >-
@@ -266,7 +267,11 @@ runs:
         # there, and that is the pinned release's, not this commit's.
         binary=$JOB_DIR/agentic-job
         chmod 0755 "$binary"
-        [ "$RUNNER_GATE" != true ] || set -- "$@" --runner-gate
+        case $RUNNER_GATE in
+          true) set -- "$@" --runner-gate ;;
+          false) ;;
+          *) echo '::error::runner-gate must be true or false'; exit 1 ;;
+        esac
         "$binary" run --runner-home "$RUNNER_HOME" --policy "$JOB_DIR/policy.json" --task "$JOB_DIR/task.md" --meta "$JOB_DIR/meta.json" --out "$JOB_DIR/out" "$@" || state=$?
         echo '::endgroup::'
         echo "exit=$state" >> "$GITHUB_OUTPUT"
