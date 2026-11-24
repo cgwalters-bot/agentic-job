@@ -1,26 +1,32 @@
-# MCP and the runner-only boundary
+# MCP
 
 > This text is LLM generated.
 
 ## Current status
 
-`run --runner-home` refuses `[mcp.NAME]`. A remote server's credential in
-`run`'s environment or memory is readable by the same-UID agent. The reusable
-workflow declares `MCP_TOKEN` for compatibility but passes it to no job.
-Do not send it to an agent job of your own or revive the second-user path.
-The second user was removed in [#2991](https://github.com/cgwalters-forge/agentic-job/pull/2991);
-the local-proxy code that remains is not support for runner-only credential
-isolation.
+Model Context Protocol (MCP) lets an agent call tools provided by a server.
+**agentic-job does not support managed MCP servers in runner mode.** Leave
+`[mcp.NAME]` out of your configuration. Workflow admission rejects it before
+setup, and standalone `run --runner-home` rejects it before starting the agent,
+even without a credential.
 
-An agent can start a credential-free local MCP process with its own tools.
-That process has the agent's authority, not a new trusted boundary. MCP results
-are untrusted text and may contain prompt injection.
+The reusable workflow declares `MCP_TOKEN` for compatibility but does not
+pass it to any job. Do not supply an MCP credential to an agent job: the agent
+runs as the same OS user as `run` and can read credentials held by that user.
 
 ## Configuration
 
-This schema-valid example is a **launch refusal example**, not a way to enable
-credentialed MCP. `runner-setup.py admit` refuses it before setup; standalone
-`run --runner-home` refuses it too:
+`agentic-job config` still accepts one legacy `[mcp.NAME]` table. Parsing
+success does not mean the run can start.
+
+| Field | Accepted by the parser |
+| --- | --- |
+| `url` | HTTPS URL, including on loopback, with no user information or fragment. |
+| `secret` | The literal name `MCP_TOKEN`, not a credential value. |
+| `allowed` | 1–64 distinct, exact tool names; no wildcard. |
+
+This example parses but is **refused at launch**. No credential is needed to
+reproduce the refusal.
 
 ```toml
 [agent]
@@ -29,42 +35,19 @@ name = "fake"
 timeout-minutes = 5
 max-requests = 0
 uncapped = true
-[mcp.tracker]
+[mcp.example]
 url = "https://mcp.example.com/mcp"
 secret = "MCP_TOKEN"
 allowed = ["search_issues", "get_issue"]
 ```
 
-Configuration parsing still accepts one server and 1–64 exact tool names.
-It requires HTTPS (even on loopback), no URL user/password/fragment, and only
-the secret name `MCP_TOKEN`. Parsing does not establish a usable launch path.
-No real credential is needed to test the refusal.
+## Use a local tool
 
-## What `run` does
+If your agent supports it, use the agent's own tools to start a local MCP
+process that needs no credentials. The process runs with the agent's authority;
+it is not a separate trust boundary or a managed integration.
 
-In runner mode it refuses local credentialed MCP, before starting the agent.
-The retained legacy proxy implements a tools-only JSON-RPC allowlist:
-`initialize`, initialized/cancelled notifications, `ping`, `tools/list`,
-allowed `tools/call`, and answers to server pings. It refuses resources,
-prompts, completions, sampling and batches, and bounds upstream responses to
-8 MiB. Those tests describe a legacy implementation, not a same-UID secret
-holder that can safely be enabled.
-
-## Future external route
-
-[Broker#61](https://github.com/cgwalters-bot/praxis-credential-broker/issues/61)
-owns a bounded external MCP route, after
-[broker#60](https://github.com/cgwalters-bot/praxis-credential-broker/issues/60)'s
-approved credentialless identity/lifecycle contract. Neither source-address
-research nor a Praxis example proves deployed peer preservation, method parity,
-expiry or revocation. The agentic-job consumer is follow-up work; do not assume
-that #2999 restores MCP. No new local proxy is planned here.
-
-## What it does not give
-
-An allowed tool can send everything in its arguments to the remote server.
-A write-capable tool bypasses safe outputs, and detection does not inspect MCP
-traffic. Future admission must retain trusted upstream selection, tool/method
-and response bounds, negative controls and credential nondisclosure. The
-[hardening epic](https://github.com/cgwalters-forge/tracker/issues/1311)
-tracks that acceptance.
+Treat tool results as untrusted data: they may contain prompt injection. A
+tool can pass its inputs to a remote service; don't send data that service
+shouldn't receive. Use [safe outputs](safe-outputs.md) for forge writes so
+they go through the check job. Direct tool calls do not go through that check.

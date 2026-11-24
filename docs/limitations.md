@@ -44,8 +44,7 @@ tests do not prove Kubernetes Pod Security or a live GitLab inference deployment
   caps what it spends.
 - The agent still holds a read-only forge token and a broker run token
   ([which tokens reach what](workflow.md#which-tokens-reach-what)); this is
-  not credentialless operation. Credentialed MCP is refused in runner mode;
-  the external proxy route is [future work](mcp.md#future-external-route).
+  not credentialless operation. [Credentialed MCP is refused in runner mode](mcp.md#current-status).
 - The [GitLab path](gitlab.md) covers policy/check/apply, not a supported live
   agent pipeline. [Forgejo publishing](safe-outputs.md#publishing-to-forgejo)
   supports a subset of GitHub outputs; the linked guide lists the supported types.
