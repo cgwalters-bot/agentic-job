@@ -37,7 +37,7 @@ test:
 
 # Under 1 second; local fixtures, no forge or inference credentials.
 proxy-test:
-    python3 -m unittest discover -s egress -v
+    python3 -B -m unittest discover -s crates/secure-host/egress -v
 
 # 4 seconds including download; CI's markdownlint-cli2-action uses the same glob/config.
 markdown-lint:

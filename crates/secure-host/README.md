@@ -1,0 +1,134 @@
+# secure-host
+
+> This text is LLM generated.
+
+Host hardening for CI jobs that execute untrusted build scripts, dependencies
+or pull requests. This crate provides the `secure-host` CLI and a Rust library;
+it does not run a coding agent or require an inference service.
+
+**Use only on a fresh disposable host.** Setup changes users, sudo, services,
+firewalls, trust stores and kernel policy. It is not a container sandbox, and
+it does not separate successive steps of a job from one another. Read the
+[threat model](THREAT-MODEL.md) before adopting it.
+
+## Build and test
+
+Linux, Rust 1.88 or newer (edition 2024), a C compiler/linker, clang,
+Python 3.11+ and Bash are required. From this directory in an independent
+checkout:
+
+```sh
+cargo build
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+python3 -B -m unittest discover -s egress -v
+clang -std=c11 -O2 -Wall -Wextra -Werror bpf/world_write_policy_test.c -o target/world-write-test
+target/world-write-test
+bash bpf/build.sh target/world_write.bpf.o
+```
+
+The last command builds the world-write policy object from
+[`bpf/`](bpf/); the test before it checks the policy's predicate natively.
+
+Cargo creates a lockfile on the first build; retain it and use `--locked` for
+subsequent builds. Ordinary tests need no root and use loopback services or
+fixtures. They do **not** prove the privileged hardening paths. Tests requiring
+a prepared host must run only on a fresh disposable VM.
+
+Cargo needs registry access on a cold cache. The host crate only emits
+informational `Secure-host setup stage` / `Secure-host check stage` timings
+(`Sandbox ...` in the `legacy-runtime` layout);
+summary adapters and their fixed consumer commands belong to consumers, not
+this library. Timing never substitutes for a passing probe.
+
+## Host interface
+
+Admission accepts Ubuntu 26.04, RHEL 10 (including minor releases) and exact
+CentOS Stream 10. Admission is not runtime proof on every distribution: the
+world-write policy has hosted Ubuntu evidence, not RHEL/CentOS runtime proof.
+
+`secure-host --help` lists commands; `secure-host COMMAND --help` lists every
+argument. Host configuration is TOML: `[host]`, `[egress]` and `[setup]`.
+The authoritative keys, defaults and validation are in
+[`config.rs`](src/config.rs); `[setup]` accepts `packages`, not a script.
+`secure-host config --from FILE` composes a configuration, and `supported`
+checks the host without changing it.
+
+`cargo build` does not install the CLI: run it by its path, and give sudo
+that path rather than relying on sudo's search path. On a fresh supported
+host, with the object built above from the same trusted checkout, a minimal
+`host.toml` is:
+
+```toml
+[host]
+deny-runner-reads = false
+
+[setup]
+# Setup always loads its network rules with nft.
+packages = ["nftables"]
+```
+
+```sh
+cargo build --release --locked &&
+bash bpf/build.sh target/world_write.bpf.o &&
+sudo ./target/release/secure-host world-write target/world_write.bpf.o &&
+sudo ./target/release/secure-host setup --config host.toml &&
+./target/release/secure-host check
+```
+
+Each step runs only if the one before it succeeded. If any step fails, discard
+the host: a partially prepared host is not ready, and rerunning the sequence
+does not repair it.
+
+This minimal sequence leaves the runner-read rule off, so the configuration
+turns it off explicitly. For a GitHub runner with
+`host.deny-runner-reads = true`, instead load the object with
+`--deny-runner-reads`. If the loader was not started by the Worker (for
+example, from a root container), also pass `--sole-worker`, which requires
+exactly one Worker on the host. The ordinary `check` command does not probe
+this rule; use the disposable-host confinement probes for runtime evidence.
+
+Setup does not load the BPF policy for you; it refuses missing policy pins.
+The loader needs kernel BTF, BPF privileges and bpftool. Set
+`host.runner-user` to the existing non-root job user when setup is not called
+through that user's sudo. Without a GitHub Runner.Worker, set
+`host.deny-runner-reads = false` for image setup; the image loader otherwise
+requires exactly one Worker to exempt. `check` fails closed when a required
+probe fails. It does not certify the job's outputs.
+
+Egress write filtering remains opt-in (`egress.write-policy = true`); without
+it a later step can send data to public endpoints. No new hardening control
+or default is introduced by this extraction preparation.
+
+## Compatibility and publication
+
+This directory is the future repository root. [EXTRACTION.md](EXTRACTION.md)
+describes history-preserving extraction and the standalone CI template.
+Publication, release attestation and action adoption are separate steps;
+this preparation does not publish an image or change the deployed action.
+
+Standalone builds use `/etc/secure-host/` for root's configuration and network
+rules, `/usr/local/libexec/secure-host` for the restricted helper,
+`/usr/local/lib/secure-host/` for the BPF object and
+`/sys/fs/bpf/secure-host-world-write` for its pins. Sudo, polkit, resolver,
+trust-store and check-record names use the same neutral prefix.
+
+The opt-in `legacy-runtime` Cargo feature selects the previous consumer's
+complete layout, including its host binary alias. The in-tree consumer enables
+it because its action still pins that layout's released image. Cargo unifies
+dependency features: workspace builds including that consumer therefore build
+the compatibility layout too. Build this crate independently (as above, or
+`cargo build -p secure-host` without the consumer) for the neutral layout.
+CLI compatibility aliases remain accepted but are not required by standalone
+setup. No layout is selected from job-controlled environment or configuration,
+and no missing file or pin falls back to another layout.
+
+Do not upgrade an already hardened host between layouts: the image, the
+loader and setup refuse a host with either layout's configuration directory or
+policy pins from an earlier run, before changing anything. The image looks
+before it installs its binary over the host's. On fresh disposable
+hosts, migrate the image, its action and all consumers together, then remove
+the consumer's feature opt-in. Never reuse an old layout's check record as
+evidence for a new one. Publication and privileged deployment remain separate
+from this source preparation.

@@ -24,6 +24,7 @@ const REPOSITORY: &str = "example-org/tool";
 const TARGET: &str = "x86_64-unknown-linux-musl";
 const NAMES: [&str; 3] = ["agentic-job", "fake-agent", "secure-host"];
 const OBJECT: &str = "world_write.bpf.o";
+const OBJECT_RECIPE: &str = "crates/secure-host/bpf/build.sh";
 const BYTES: &str = "binary";
 
 const NOW: i64 = 1_700_000_000;
@@ -184,7 +185,8 @@ fn bin() -> &'static Path {
     .path()
 }
 
-/// A source with every part of BUILT_FROM, and this binary.sh in it.
+/// A source with every part of BUILT_FROM, and this binary.sh and the
+/// policy object's recipe in it.
 fn tree() -> TempDir {
     let root = tempdir("source-");
     for name in built_from() {
@@ -195,6 +197,15 @@ fn tree() -> TempDir {
         }
     }
     fs::copy(script(), root.path().join("secure-host/binary.sh")).unwrap();
+    let recipe = root.path().join(OBJECT_RECIPE);
+    fs::create_dir_all(recipe.parent().unwrap()).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(OBJECT_RECIPE),
+        recipe,
+    )
+    .unwrap();
     root
 }
 
@@ -320,12 +331,12 @@ fn digest_is_of_content_modes_and_names_and_nothing_else() {
         ),
         (
             "a new file",
-            |root| write(&root.join("egress/new.py"), ""),
+            |root| write(&root.join("crates/secure-host/egress/new.py"), ""),
             true,
         ),
         (
             "a dotfile",
-            |root| write(&root.join("egress/.new"), ""),
+            |root| write(&root.join("crates/secure-host/egress/.new"), ""),
             true,
         ),
         (
@@ -399,16 +410,16 @@ fn digest_is_of_the_listing_binary_sh_documents() {
     write(&root.join("crates/a/b"), "b");
     write(&root.join("crates/a.c"), "c");
     chmod(&root.join("crates/a.c"), 0o755);
-    symlink("../x", root.join("egress/l")).unwrap();
+    symlink("../x", root.join("crates/l")).unwrap();
     let file = |path: &str| sha256(fs::read(root.join(path)).unwrap());
     let listing = [
         format!("f {} Cargo.lock", file("Cargo.lock")),
         format!("f {} Cargo.toml", file("Cargo.toml")),
         format!("f {} crates/a/b", file("crates/a/b")),
         format!("x {} crates/a.c", file("crates/a.c")),
+        format!("l {} crates/l", sha256("../x")),
+        format!("f {} {OBJECT_RECIPE}", file(OBJECT_RECIPE)),
         format!("f {} crates/src/lib.rs", file("crates/src/lib.rs")),
-        format!("l {} egress/l", sha256("../x")),
-        format!("f {} egress/src/lib.rs", file("egress/src/lib.rs")),
         format!("f {} skills/src/lib.rs", file("skills/src/lib.rs")),
         format!("f {} workflow/review.md", file("workflow/review.md")),
         format!("f {} secure-host/binary.sh", file("secure-host/binary.sh")),
@@ -419,7 +430,6 @@ fn digest_is_of_the_listing_binary_sh_documents() {
             "Cargo.lock",
             "Cargo.toml",
             "crates",
-            "egress",
             "skills",
             "workflow/review.md",
             "secure-host/binary.sh"
@@ -464,7 +474,7 @@ fn link_target_is_all_of_it_and_a_name_with_a_newline_has_no_digest() {
 #[test]
 fn source_with_a_part_missing_has_no_digest() {
     let root = tree();
-    fs::rename(root.path().join("egress"), root.path().join("elsewhere")).unwrap();
+    fs::rename(root.path().join("skills"), root.path().join("elsewhere")).unwrap();
     let result = run(
         root.path(),
         &["digest", "--root", s(root.path())],
@@ -475,7 +485,7 @@ fn source_with_a_part_missing_has_no_digest() {
     assert!(
         matches(
             &result.stderr,
-            "egress is neither a file, a link nor a directory"
+            "skills is neither a file, a link nor a directory"
         ),
         "{}",
         result.stderr
@@ -1053,7 +1063,7 @@ fn requested_build_fetches_nothing_and_installs_only_the_compilers_missing() {
         result.log,
         [
             format!(
-                "clang -O2 -g -target bpfel -Wall -Wextra -Werror -c {}/crates/agentic-job/bpf/world_write.bpf.c -o {}/{OBJECT}",
+                "clang -O2 -g -target bpfel -Wall -Wextra -Werror -c {}/crates/secure-host/bpf/world_write.bpf.c -o {}/{OBJECT}",
                 s(root),
                 s(&out)
             ),

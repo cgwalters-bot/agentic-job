@@ -29,7 +29,8 @@ use anyhow::{Context, Result};
 use crate::files;
 
 /// The file, in the directory `TEMP_VAR` names.
-pub const FILE_NAME: &str = "agentic-job-sandbox-checked";
+pub const FILE_NAME: &str =
+    crate::runtime::name("secure-host-sandbox-checked", "agentic-job-sandbox-checked");
 
 const TEMP_VAR: &str = "RUNNER_TEMP";
 
@@ -245,11 +246,9 @@ mod tests {
 
     #[test]
     fn the_record_is_in_the_jobs_temporary_directory() {
+        let expected = format!("/w/_temp/{FILE_NAME}");
         for (temp, path) in [
-            (
-                Some("/w/_temp"),
-                Some("/w/_temp/agentic-job-sandbox-checked"),
-            ),
+            (Some("/w/_temp"), Some(expected.as_str())),
             (Some("relative"), None),
             (Some(""), None),
             (None, None),

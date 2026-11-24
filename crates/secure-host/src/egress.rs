@@ -30,15 +30,15 @@ use crate::proxy::policy::{ECOSYSTEMS, Policy, normalize_host};
 
 /// The addon and what it needs, as they are in `egress/`: the binary
 /// carries them, since it is all a runner gets.
-const ADDON: &str = include_str!("../../../egress/addon.py");
+const ADDON: &str = include_str!("../egress/addon.py");
 
-const POLICY_PY: &str = include_str!("../../../egress/policy.py");
+const POLICY_PY: &str = include_str!("../egress/policy.py");
 
-const POLICY_TOML: &str = include_str!("../../../egress/policy.toml");
+const POLICY_TOML: &str = include_str!("../egress/policy.toml");
 
 /// mitmproxy and everything it depends on, each at one version and with
 /// the hashes of its files: generated from `egress/requirements.in`.
-const REQUIREMENTS: &str = include_str!("../../../egress/requirements.txt");
+const REQUIREMENTS: &str = include_str!("../egress/requirements.txt");
 
 pub const EGRESS_USER: &str = "egress-proxy";
 
@@ -56,11 +56,17 @@ pub const TRANSPARENT_PORT: u16 = 3129;
 /// directory and command, or RHEL's.
 const SYSTEM_TRUST: &[(&str, &str)] = &[
     (
-        "/usr/local/share/ca-certificates/agentic-job-egress-proxy.crt",
+        crate::runtime::name(
+            "/usr/local/share/ca-certificates/secure-host-egress-proxy.crt",
+            "/usr/local/share/ca-certificates/agentic-job-egress-proxy.crt",
+        ),
         "update-ca-certificates",
     ),
     (
-        "/etc/pki/ca-trust/source/anchors/agentic-job-egress-proxy.pem",
+        crate::runtime::name(
+            "/etc/pki/ca-trust/source/anchors/secure-host-egress-proxy.pem",
+            "/etc/pki/ca-trust/source/anchors/agentic-job-egress-proxy.pem",
+        ),
         "update-ca-trust",
     ),
 ];
@@ -1329,7 +1335,7 @@ mod tests {
     /// names.
     #[test]
     fn every_requirement_is_pinned_with_hashes() {
-        const DIRECT: &str = include_str!("../../../egress/requirements.in");
+        const DIRECT: &str = include_str!("../egress/requirements.in");
         let is_entry = |line: &&str| !line.starts_with(['#', ' ']) && !line.is_empty();
         let lines: Vec<&str> = REQUIREMENTS.lines().collect();
         let entries: Vec<&str> = lines.iter().copied().filter(is_entry).collect();

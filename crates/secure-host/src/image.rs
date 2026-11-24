@@ -47,8 +47,12 @@ const IMAGE_OBJECT: &str = "/world_write.bpf.o";
 /// call it (`agentic-job sandbox check`).
 pub const HOST_BINARY: &str = "/usr/local/bin/secure-host";
 pub const HOST_ALIAS: &str = "/usr/local/bin/agentic-job";
-const HOST_OBJECT_DIR: &str = "/usr/local/lib/agentic-job";
-const HOST_OBJECT: &str = "/usr/local/lib/agentic-job/world_write.bpf.o";
+const HOST_OBJECT_DIR: &str =
+    crate::runtime::name("/usr/local/lib/secure-host", "/usr/local/lib/agentic-job");
+const HOST_OBJECT: &str = crate::runtime::name(
+    "/usr/local/lib/secure-host/world_write.bpf.o",
+    "/usr/local/lib/agentic-job/world_write.bpf.o",
+);
 /// util-linux's, on Ubuntu and RHEL alike.
 const NSENTER: &str = "/usr/bin/nsenter";
 /// Every namespace of the host's init but the user namespace, which a
@@ -173,25 +177,84 @@ pub fn run(config: &Path) -> Result<()> {
         platform::supported_file(Path::new(platform::OS_RELEASE)),
         platform::REFUSAL
     );
+    refuse_prepared_host()?;
     let steps = host_steps(config, &image, deny_runner_reads(config)?)?;
     install(&mut binary, HOST_BINARY, 0o755)?;
-    install(&mut binary, HOST_ALIAS, 0o755)?;
+    if cfg!(feature = "legacy-runtime") {
+        install(&mut binary, HOST_ALIAS, 0o755)?;
+    }
     fs::create_dir_all(HOST_OBJECT_DIR).with_context(|| format!("creating {HOST_OBJECT_DIR}"))?;
     install(&mut object, HOST_OBJECT, 0o644)?;
     for args in steps {
-        // The container's environment (`container=podman`, its HOME and
-        // hostname) is not the host's; root's fixed path is all it gets.
-        let status = Command::new(NSENTER)
-            .args(&args)
-            .env_clear()
-            .env("PATH", host::root_path())
-            .env("HOME", "/root")
-            .stdin(Stdio::null())
-            .status()
-            .with_context(|| format!("starting {NSENTER}"))?;
+        let status = nsenter(&args)?;
         ensure!(status.success(), "{NSENTER} {}: {status}", args.join(" "));
     }
-    println!("secure-host: the host is set up; {HOST_BINARY} and {HOST_ALIAS} are installed");
+    println!("secure-host: the host is set up; {HOST_BINARY} is installed");
+    Ok(())
+}
+
+/// Runs the host's nsenter with ARGS. The container's environment
+/// (`container=podman`, its HOME and hostname) is not the host's; root's
+/// fixed path is all it gets.
+fn nsenter<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<std::process::ExitStatus> {
+    nsenter_command(args)
+        .status()
+        .with_context(|| format!("starting {NSENTER}"))
+}
+
+fn nsenter_command<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Command {
+    let mut command = Command::new(NSENTER);
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", host::root_path())
+        .env("HOME", "/root")
+        .stdin(Stdio::null());
+    command
+}
+
+/// Refuses a host either layout prepared, before the install over its
+/// binary: the loader and setup would refuse it only after that, leaving
+/// a binary that reads another layout's files. Looked for in the host's
+/// mount namespace, whose bpffs holds the pins. A marker is absent only
+/// when `find` ran there, listed its directory and printed nothing:
+/// nsenter fails with the same status as `test` for a missing path, so
+/// any failure, of entry or of the listing, is a refusal. `find` runs as
+/// root, so it is the host's own, by its path and root's alone.
+fn refuse_prepared_host() -> Result<()> {
+    let find = host::trusted_program("find")?;
+    let find = find.to_str().context("the path of find is text")?;
+    for marker in crate::runtime::markers() {
+        let (dir, name) = marker
+            .rsplit_once('/')
+            .with_context(|| format!("{marker} has no directory"))?;
+        let args = [
+            "--target",
+            "1",
+            "--mount",
+            "--",
+            find,
+            dir,
+            "-mindepth",
+            "1",
+            "-maxdepth",
+            "1",
+            "-name",
+            name,
+            "-print",
+        ];
+        let out = nsenter_command(&args)
+            .stderr(Stdio::inherit())
+            .output()
+            .with_context(|| format!("starting {NSENTER}"))?;
+        ensure!(
+            out.status.success(),
+            "{NSENTER} {}: {}: cannot tell that this host is a fresh one",
+            args.join(" "),
+            out.status
+        );
+        ensure!(out.stdout.is_empty(), crate::runtime::refusal(marker));
+    }
     Ok(())
 }
 

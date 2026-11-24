@@ -62,91 +62,79 @@ pub fn supported_file(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|text| supported(&text))
 }
 
+/// The admission table, which another parser of os-release that must agree
+/// with [`supported`] (a caller's bootstrap script) is tested against too.
+#[cfg(any(test, feature = "test-support"))]
+pub mod cases {
+    /// `ID`, `VERSION_ID` and whether [`super::supported`] admits them.
+    pub const RELEASES: &[(&str, &str, bool)] = &[
+        ("ubuntu", "26.04", true),
+        ("ubuntu", "24.04", false),
+        ("ubuntu", "22.04", false),
+        ("ubuntu", "26.10", false),
+        ("ubuntu", "26.04.1", false),
+        ("rhel", "10", true),
+        ("rhel", "10.0", true),
+        ("rhel", "10.2", true),
+        ("rhel", "9.6", false),
+        ("rhel", "11", false),
+        ("rhel", "100", false),
+        ("rhel", "10.", false),
+        ("centos", "10", true),
+        ("centos", "9", false),
+        ("centos", "10.0", false),
+        ("centos", "11", false),
+        ("rocky", "10", false),
+        ("almalinux", "10", false),
+        ("fedora", "44", false),
+        ("debian", "13", false),
+    ];
+
+    /// Each of [`RELEASES`] as a release file, its fields unquoted and in
+    /// either quotes, beside fields that are no evidence of support.
+    pub fn release_files() -> impl Iterator<Item = (&'static str, String, bool)> {
+        RELEASES.iter().flat_map(|&(id, version, expected)| {
+            ["", "\"", "'"].map(|quote| {
+                let text = format!(
+                    "# release\nNAME=\"Example Linux\"\nID={quote}{id}{quote}\nVERSION_ID={quote}{version}{quote}\nID_LIKE=\"ubuntu rhel\"\n"
+                );
+                (id, text, expected)
+            })
+        })
+    }
+
+    /// Release files with a missing, ambiguous or shell-like field, which
+    /// are refused.
+    pub const MALFORMED: &[&str] = &[
+        "",
+        "ID=ubuntu\n",
+        "VERSION_ID=\"26.04\"\n",
+        "ID_LIKE=ubuntu\nVERSION_ID=\"26.04\"\n",
+        "ID=ubuntu\nID=rhel\nVERSION_ID=\"26.04\"\n",
+        "ID=ubuntu\nVERSION_ID=\"26.04\"\nVERSION_ID=\"24.04\"\n",
+        "ID=\"ubuntu\nVERSION_ID=\"26.04\"\n",
+        "ID=$(printf ubuntu)\nVERSION_ID=\"26.04\"\n",
+        "ID=ubuntu\nVERSION_ID=\"$VERSION\"\n",
+        "ID=ubuntu\r\nVERSION_ID=26.04\r\n",
+        "ID=ubuntu\nVERSION_ID=\"26.04'\n",
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn support_is_by_id_and_release_not_id_like() {
-        let cases = [
-            ("ubuntu", "26.04", true),
-            ("ubuntu", "24.04", false),
-            ("ubuntu", "22.04", false),
-            ("ubuntu", "26.10", false),
-            ("ubuntu", "26.04.1", false),
-            ("rhel", "10", true),
-            ("rhel", "10.0", true),
-            ("rhel", "10.2", true),
-            ("rhel", "9.6", false),
-            ("rhel", "11", false),
-            ("rhel", "100", false),
-            ("rhel", "10.", false),
-            ("centos", "10", true),
-            ("centos", "9", false),
-            ("centos", "10.0", false),
-            ("centos", "11", false),
-            ("rocky", "10", false),
-            ("almalinux", "10", false),
-            ("fedora", "44", false),
-            ("debian", "13", false),
-        ];
-        for (id, version, expected) in cases {
-            for quote in ["", "\"", "'"] {
-                let text = format!(
-                    "# release\nNAME=\"Example Linux\"\nID={quote}{id}{quote}\nVERSION_ID={quote}{version}{quote}\nID_LIKE=\"ubuntu rhel\"\n"
-                );
-                assert_eq!(supported(&text), expected, "{id} {version} {quote}");
-                let selected = default_config(&text);
-                assert_eq!(selected.status.success(), expected, "{text}");
-                let config = if id == "ubuntu" {
-                    "hosted.toml"
-                } else {
-                    "rhel-cloud.toml"
-                };
-                assert_eq!(
-                    String::from_utf8(selected.stdout).unwrap().trim(),
-                    if expected { config } else { "" },
-                    "{text}"
-                );
-            }
+        for (_, text, expected) in cases::release_files() {
+            assert_eq!(supported(&text), expected, "{text}");
         }
-    }
-
-    // The action must choose before it has a Rust binary. Exercise its bootstrap
-    // selector with the admission table so its independent parser cannot drift.
-    fn default_config(text: &str) -> std::process::Output {
-        let dir = tempfile::tempdir().unwrap();
-        let release = dir.path().join("os-release");
-        std::fs::write(&release, text).unwrap();
-        std::process::Command::new("bash")
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../secure-host/default-config.sh"
-            ))
-            .arg(release)
-            .output()
-            .unwrap()
     }
 
     #[test]
     fn missing_ambiguous_and_shell_fields_fail_closed() {
-        for text in [
-            "",
-            "ID=ubuntu\n",
-            "VERSION_ID=\"26.04\"\n",
-            "ID_LIKE=ubuntu\nVERSION_ID=\"26.04\"\n",
-            "ID=ubuntu\nID=rhel\nVERSION_ID=\"26.04\"\n",
-            "ID=ubuntu\nVERSION_ID=\"26.04\"\nVERSION_ID=\"24.04\"\n",
-            "ID=\"ubuntu\nVERSION_ID=\"26.04\"\n",
-            "ID=$(printf ubuntu)\nVERSION_ID=\"26.04\"\n",
-            "ID=ubuntu\nVERSION_ID=\"$VERSION\"\n",
-            "ID=ubuntu\r\nVERSION_ID=26.04\r\n",
-            "ID=ubuntu\nVERSION_ID=\"26.04'\n",
-        ] {
+        for text in cases::MALFORMED {
             assert!(!supported(text), "{text:?}");
-            let selected = default_config(text);
-            assert!(!selected.status.success(), "{text:?}");
-            assert!(selected.stdout.is_empty(), "{text:?}");
         }
     }
 

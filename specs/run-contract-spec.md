@@ -105,7 +105,7 @@ Enforcement: [workflows.rs](../crates/agentic-job/tests/workflows.rs),
 [tests/run.rs](../crates/agentic-job/tests/run.rs),
 `a_change_is_handed_back_and_the_check_accepts_it` and
 `a_run_as_its_own_user_in_the_home_given` (runner mode);
-[test_policy.py](../egress/test_policy.py), `test_requests`; and CI's
+[test_policy.py](../crates/secure-host/egress/test_policy.py), `test_requests`; and CI's
 `e2e-full`, whose scripted agent asks for its comment only after a read with
 the token succeeded and GitHub refused it a GraphQL write.
 

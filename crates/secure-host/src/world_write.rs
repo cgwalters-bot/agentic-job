@@ -30,7 +30,8 @@ use crate::{host, platform, worker_diagnostics};
 
 /// Where the loader pins the world-write policy: a link for each of its
 /// programs, and its map.
-pub const WORLD_WRITE_PIN: &str = "/sys/fs/bpf/agentic-job-world-write";
+pub const WORLD_WRITE_PIN: &str =
+    crate::runtime::name(crate::runtime::PIN_DIRS[0], crate::runtime::PIN_DIRS[1]);
 
 /// The policy's programs, each pinned as a link under `WORLD_WRITE_PIN/links`.
 pub const WORLD_WRITE_LINKS: &[&str] = &[
@@ -500,6 +501,9 @@ pub fn load(object: &Path, deny_runner_reads: bool, sole_worker: bool) -> Result
         platform::REFUSAL
     );
     ensure!(host::is_root(), "world-write loading requires root");
+    // Before the first change: a host either layout prepared is refused,
+    // its setup included, which only ever comes after the loader.
+    crate::runtime::refuse_prepared(crate::runtime::markers())?;
     ensure!(
         fs::symlink_metadata(object).is_ok_and(|meta| meta.is_file()),
         "policy object {} is not a regular file",

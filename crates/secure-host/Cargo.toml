@@ -37,5 +37,9 @@ toml = "1"
 webpki-roots = "1"
 
 [features]
+# Compatibility with consumers still pinned to the old deployed host image.
+# Select the whole layout at build time; never fall back between root paths.
+legacy-runtime = []
+
 # Test helpers for crates that depend on this one, as a dev-dependency.
 test-support = []

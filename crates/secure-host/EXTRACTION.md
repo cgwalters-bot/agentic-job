@@ -1,0 +1,51 @@
+# Extracting this repository
+
+> This text is LLM generated.
+
+Run this only after the preparation commit merges, in a **fresh clone**, never
+in a development checkout. The destination is the empty public repository
+`cgwalters-forge/secure-host`. This run prepares the tree, not the publication.
+
+```sh
+git clone --no-local https://github.com/cgwalters-forge/agentic-job secure-host-export
+test "$(git -C secure-host-export rev-parse --is-shallow-repository)" = false
+git -C secure-host-export filter-repo \
+  --path crates/secure-host/ --path egress/ \
+  --path crates/agentic-job/bpf/ \
+  --path LICENSE --path LICENSE-MIT --path LICENSE-APACHE \
+  --path-rename crates/secure-host/ci/ci.yml:.github/workflows/ci.yml \
+  --path-rename crates/agentic-job/bpf/:bpf/ \
+  --path-rename crates/secure-host/:
+```
+
+The old `egress/` path is deliberately retained: before this preparation its
+files lived there. At the tip they now live inside the crate, which is mapped
+to the root. Both eras consequently become `egress/` in the extracted history.
+The world-write policy's old `crates/agentic-job/bpf/` similarly becomes `bpf/`. This keeps
+history since the crate split; `filter-repo` does not automatically follow
+renames back into older mixed-purpose source files.
+
+The three license files are retained from the source repository. Inspect the
+tip and `git log -- egress/ src/ bpf/` before publishing. In the export checkout,
+run the README's build/test commands; there must be no parent workspace.
+Generate and retain the export's own `Cargo.lock` before publishing, then
+repeat build, Clippy and tests with `--locked`. The parent workspace's
+lockfile is not exported: it includes unrelated consumers.
+
+`ci/ci.yml` is the standalone CI workflow. The specific rename **before** the
+crate-directory rename installs it as `.github/workflows/ci.yml` in the export;
+do not reverse those arguments. This avoids a nested `.github/` path in the
+preparation checkout. The workflow grants only `contents: read`, persists no checkout token,
+has a 15-minute bound and performs no privileged host mutation or publication.
+It builds/tests this source, not the deployed image. Release signing, image
+publication and privileged runtime CI still need their own reviewed setup.
+
+The action remains in its existing repository for now; the forwarding action,
+its default-configuration selector and binary fetcher outside this directory
+are not exported. Existing callers
+continue using the existing release. The exported crate's default layout is
+neutral; `legacy-runtime` is only for consumers still pinned to the old layout.
+Verify both `cargo test --locked` and `cargo test --locked --features legacy-runtime`
+in the export. Migrate callers, the action and its image pin on fresh hosts
+together before dropping the compatibility feature. Never reuse a passing
+check record across binaries/configurations or layouts.

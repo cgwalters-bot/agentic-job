@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn readiness_requires_live_read_and_both_proxy_refusals() {
         let policy = Policy::parse(
-            include_str!("../../../../egress/policy.toml"),
+            include_str!("../../egress/policy.toml"),
             crate::proxy::policy::ECOSYSTEMS,
         )
         .unwrap()
@@ -513,7 +513,7 @@ mod tests {
         // (policy, the URL read, the URL POSTed to)
         let cases = [
             (
-                include_str!("../../../../egress/policy.toml").to_owned(),
+                include_str!("../../egress/policy.toml").to_owned(),
                 Some("https://example.com/"),
                 Some("https://example.com/"),
             ),

@@ -44,7 +44,7 @@ pub enum Command {
     WorldWrite(WorldWrite),
     /// As root: harden the runner's user, closing its routes to credentials and root
     Setup {
-        /// The host's configuration (TOML); copied to /etc/agentic-job/
+        /// The host's configuration (TOML); copied to the root-owned runtime directory
         #[arg(long, value_name = "FILE")]
         config: PathBuf,
         /// Run the egress proxy from this podman image ID, in root podman:
