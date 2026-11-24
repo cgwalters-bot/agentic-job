@@ -24,14 +24,14 @@ and an open network. Host setup takes about two minutes on a hosted GitHub
 runner.
 
 - The agent can read whatever the job holds: its files, its environment and
-  its tokens ([what it does not do](sandbox.md#what-it-does-not-do)).
+  its tokens ([keep credentials separate](sandbox.md#keep-credentials-and-publishing-separate)).
 - The egress proxy allows reads from any host unless the policy file sets
   `[egress] mode = "allowlist"`, which is off by default
-  ([the agent's network](sandbox.md#what-setup-does-for-an-agent)).
+  ([the agent's network](sandbox.md#network-access)).
 - `host.close-resolved`, off by default and set in the
   [hosted example](examples/hosted.toml), closes the system resolver to
   every user but root. The runner's user still resolves names, so data can
-  leave through DNS ([the agent's network](sandbox.md#what-setup-does-for-an-agent)).
+  leave through DNS ([the agent's network](sandbox.md#network-access)).
 - The world-write policy is proven at run time on hosted Ubuntu 26.04, not
   on RHEL 10 or CentOS Stream 10 ([secure-host](secure-host.md)).
 - Private target repositories need a bounds opt-in, and the runner-only

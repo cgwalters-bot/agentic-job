@@ -39,8 +39,8 @@ the runner's own user on a hardened host, so it shares the host kernel and
 relies on [host hardening](secure-host.md). gh-aw's default Docker runtime
 also shares the kernel. Its preview KVM microVM runtimes have their own
 provisioning and compatibility limits
-([runtime matrix][gh-runtime]). [Why not a container](sandbox.md#why-not-a-container)
-explains the choice here.
+([runtime matrix][gh-runtime]). [Choose how to isolate the job](sandbox.md#choose-how-to-isolate-the-job)
+lists the options here.
 
 ## Feature comparison
 
@@ -48,7 +48,7 @@ explains the choice here.
 | --- | --- | --- |
 | Sandbox | Docker by default, with rootless AWF and network isolation, and the Docker socket hidden. Privileged Docker and preview microVMs are alternatives. [Sandbox][gh-sandbox], [runtimes][gh-runtime] | The agent runs as the runner's user on a hardened disposable host, with rootless Podman and KVM where the host provides them. [Sandbox](sandbox.md) |
 | Inference credentials | Provider keys can stay in an API-proxy sidecar outside the agent container. Other authentication options exist. [Copilot][gh-copilot], [routing][gh-routing], [authentication][gh-auth] | An external broker holds the provider key, and the agent holds a run token. Putting a provider key on the runner is refused. [Inference](inference.md) |
-| Network egress | Domain and ecosystem allowlists, with a small default set. Provider-hosted web tools have a separate policy. [Network][gh-network] | An egress proxy allows reads by default, except to threat-feed destinations, and has rules for writes. An agent run with the proxy on must use the write policy. A domain allowlist is opt-in. [What the sandbox does not do](sandbox.md#what-it-does-not-do) |
+| Network egress | Domain and ecosystem allowlists, with a small default set. Provider-hosted web tools have a separate policy. [Network][gh-network] | An egress proxy allows reads by default, except to threat-feed destinations, and has rules for writes. An agent run with the proxy on must use the write policy. A domain allowlist is opt-in. [Network access](sandbox.md#network-access) |
 | Safe outputs | The agent writes structured requests, and a collector validates and sanitizes them. If no other output is configured, `create-issue` is enabled. [Safe outputs][gh-outputs] | The agent writes JSONL. `check` runs on another machine and enforces the caller's bounds by type, target, size, path and secrets. Every output is off unless enabled. [Safe outputs](safe-outputs.md) |
 | Threat detection | On by default once any safe output is configured. In the default warn mode, a threat or detector failure annotates reviewable outputs, turns branch pushes into reviewable ones and blocks only the rest. Blocking everything needs `continue-on-error: false`. [Threat detection][gh-detection], [modes][gh-detection-modes] | Off unless the caller sets a detection model. When enabled, any threat or detector error blocks apply. [Threat detection](workflow.md#optional-threat-detection) |
 | Apply | Permission-scoped output jobs, which recheck patch digests before publishing. [Output jobs][gh-outputs] | Apply uses only the artifact that `check` released. Base, path and head-lease guards still apply. [Who applies](safe-outputs.md#who-applies) |
