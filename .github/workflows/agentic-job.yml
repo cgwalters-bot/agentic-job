@@ -68,6 +68,10 @@ on:
         description: Review task file in the trusted base checkout, never the review head
         type: string
         default: ""
+      review-shared-task:
+        description: Public GitHub OWNER/REPO@COMMIT providing workflow/review.md; review-task becomes optional caller-base additions
+        type: string
+        default: ""
       review-item:
         description: Positive pull request number for an operator-dispatched review (not an event run)
         type: string
@@ -75,7 +79,7 @@ on:
       review-head:
         description: >-
           With `review-item`, the full commit SHA its pull request must still be at, not a draft;
-          the review's task is then `review-task`, and `agent` and `model` must be set
+          the review's task is then rendered by policy, and `agent` and `model` must be set
         type: string
         default: ""
       push-item:
@@ -465,6 +469,7 @@ jobs:
       review: ${{ inputs.review }}
       advisory: ${{ inputs.advisory }}
       review-task: ${{ inputs.review-task }}
+      review-shared-task: ${{ inputs.review-shared-task }}
       review-item: ${{ inputs.review-item }}
       review-head: ${{ inputs.review-head }}
       push-item: ${{ inputs.push-item }}

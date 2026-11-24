@@ -1457,6 +1457,10 @@ the trusted base checkout with the exact head beside it; see the
 [dispatch caller](dispatch.md) also supports operator-selected reviews of open
 same-repository or fork PRs on the configured base, pinned to their exact head SHA.
 
+Trusted callers can opt into a [pinned shared code review task](review.md#shared-code-review-task)
+with `review-shared-task`. The policy job composes it with optional caller-base
+additions and publishes the final task for both the agent and the detector.
+
 With `event: true` the run is decided from the event that started the
 calling workflow, by `agentic-job event` in the policy job
 ([how it decides](events.md)). The caller adds a `[github.trigger]` table to

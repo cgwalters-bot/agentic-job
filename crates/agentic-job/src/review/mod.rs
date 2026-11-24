@@ -25,6 +25,7 @@ mod carry;
 mod classifier;
 pub mod history;
 mod submit;
+mod task;
 mod verdict;
 
 use std::path::{Component, Path, PathBuf};
@@ -35,6 +36,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::{exit::Exit, files};
+pub(crate) use task::check_size as check_task_size;
 
 // Only a single PR response, not a list or diff. Refuse an unexpectedly large
 // payload rather than let forge-controlled text exhaust the policy job.
@@ -128,8 +130,11 @@ pub enum Command {
     /// from the current directory, followed by its merge policy, and for a
     /// dispatch with a requested head the pull request it reviews
     Task {
-        /// The task file, relative to the current directory
+        /// The caller task file, relative to the current directory (empty for shared only)
         file: String,
+        /// The pinned shared task already fetched by trusted policy
+        #[arg(long, value_name = "FILE")]
+        shared_task: Option<PathBuf>,
         /// A dispatch's pull request, as `resolve-dispatch` read it
         #[arg(long, value_name = "FILE")]
         pull_request: Option<PathBuf>,
@@ -209,7 +214,11 @@ impl Command {
                 base,
                 output,
             } => println!("{}", admit_event(decision, base.as_deref(), output)?),
-            Self::Task { file, pull_request } => {
+            Self::Task {
+                file,
+                shared_task,
+                pull_request,
+            } => {
                 // An event review's request, or review.yml's dispatch, which
                 // the dispatch step checks again the same way, with the pull
                 // request it bound; an event's text follows from `event`.
@@ -239,7 +248,15 @@ impl Command {
                     None
                 };
                 let root = Path::new(".");
-                let mut task = task_file(root, file)?;
+                let mut task = if let Some(shared) = shared_task {
+                    ensure!(
+                        env("ADVISORY") != "true" && !classifier::enabled(&env)?,
+                        "Shared review tasks are for code reviews, not advisory or classifier reviews"
+                    );
+                    task::compose(root, shared, file)?
+                } else {
+                    task_file(root, file)?
+                };
                 if env("ADVISORY") != "true" {
                     task.push_str(&merge_statement(merge_policy(root)?));
                 }
@@ -247,6 +264,9 @@ impl Command {
                     task.extend(classifier);
                     task.push('\n');
                     task.push_str(&context);
+                    if shared_task.is_some() {
+                        check_task_size(task.len())?;
+                    }
                 }
                 print!("{task}");
             }

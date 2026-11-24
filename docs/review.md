@@ -69,6 +69,54 @@ Preserve explicit repository restrictions: neither `/review` admission nor an
 automated approval substitutes for human approval where the repository requires
 it. Requiring a review does not make an approved change trusted.
 
+## Shared code review task
+
+Trusted callers of `policy.yml` or `agentic-job.yml` can set
+`review-shared-task: OWNER/REPO@COMMIT` for an event code review or a dispatch
+with `review-item` and `review-head`. Use `pull_request_target` or `issue_comment`
+for events and dispatch from the caller's default branch. Unlike `pull_request`,
+these paths don't let the reviewed head supply the workflow's choice of pin.
+Set it in the calling workflow, not from the event or dispatch payload.
+`COMMIT` must be a full lowercase commit SHA in
+a public GitHub.com repository. Policy fetches `workflow/review.md` at that
+commit as data, without checking out or executing the shared repository.
+
+Leave `review-task` empty for shared-only reviews. To add repository rules,
+set `review-task` to a regular UTF-8 file committed in the trusted caller
+checkout: the policy revision for an event, the trusted workflow revision for
+a dispatch. Policy reads those additions from the checked-out Git commit,
+not the worktree, the review target, or its head. A named but missing, blank,
+or invalid file fails policy rather than silently falling back.
+
+The shared text comes first, then any additions, then the caller's existing
+merge guidance and the review's fenced context. Policy accepts at most
+262,144 UTF-8 bytes in the final task, including separators and generated
+text. It refuses an over-limit task rather than truncating trusted guidance.
+The agent and detector consume the same `task.md` from the policy artifact;
+neither should prepend or render anything after policy. Permissions, exact
+head checks, admission, and verdict handling are unchanged.
+
+The default (empty `review-shared-task`) keeps the existing complete
+`review-task` contract. Headless dispatches that pass `task`, prose advisories,
+and draft classifiers do not use shared code review tasks. The built-in review
+workflow and existing callers need no changes to keep their current behavior.
+
+### Release and wrapper checks
+
+The release train should verify the matching workflow and binary support this
+input before moving any wrapper pins. Run the renderer workflow fixture for
+both review entry points: shared-only, shared plus base additions, exact
+limit and one byte over, attempted head overrides, and identical artifact
+bytes for agent and detector. Also verify unchanged legacy and prose reviews.
+
+For the [wrapper migration](https://github.com/cgwalters-forge/actions/issues/311),
+move the helper pins together to a compatible release and validate one event
+and one exact-head dispatch against those pins. With the policy job's normal
+read-only token, confirm the shared fetch returns the known `workflow/review.md`
+bytes at the selected public commit. Opt in and trim full caller
+tasks to intentional local additions in the same caller change. Do not trim
+caller files first or prepend the shared task in the agent job.
+
 ## The verdict
 
 Before reading the code, the reviewer tries the change as a user would: it takes

@@ -67,7 +67,7 @@ Inputs:
   `outputs`, `max-outputs`, `allow`, `config`, `context`, `push-item`,
   `proposals-artifact`, `bind-continuation`;
 - reviews and events: `review`, `advisory`, `review-task`, `review-item`,
-  `review-head`, `event`;
+  [`review-shared-task`](review.md#shared-code-review-task), `review-head`, `event`;
 
 - the agent: `agent`, `model`, `agent-config-repo`, `agent-config-ref`,
   `agent-config-path`, `agent-skills`, `agent-user` (only `runner` since

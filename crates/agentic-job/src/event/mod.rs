@@ -38,8 +38,6 @@ use crate::exit::Exit;
 use crate::files;
 use crate::policy::{self, Load};
 
-pub use context::write_task;
-
 /// `event.json`'s schema.
 pub const SCHEMA: &str = "agentic-job-event/v1";
 
@@ -152,6 +150,9 @@ pub struct Args {
     /// The caller's own task text, put before the event's
     #[arg(long, value_name = "FILE")]
     pub task: Option<PathBuf>,
+    /// Trusted composed code-review instructions; cap the task including event context
+    #[arg(long, value_name = "FILE", conflicts_with = "task")]
+    pub composed_review_task: Option<PathBuf>,
     /// Where event.json and task.md are written
     #[arg(long, value_name = "DIR")]
     pub out: PathBuf,
@@ -390,11 +391,18 @@ pub fn run(args: &Args) -> Result<Exit> {
             serde_json::from_slice(&bytes).with_context(|| format!("{}: not JSON", path.display()))
         })
         .transpose()?;
+    let composed = args.composed_review_task.is_some();
     let task = args
-        .task
+        .composed_review_task
         .as_deref()
+        .or(args.task.as_deref())
         .map(|path| {
-            let bytes = files::read_regular(path, MAX_TASK_BYTES)
+            let max = if composed {
+                crate::run::MAX_TASK_BYTES
+            } else {
+                MAX_TASK_BYTES
+            };
+            let bytes = files::read_regular(path, max)
                 .with_context(|| format!("reading the task {}", path.display()))?;
             String::from_utf8(bytes).with_context(|| format!("{}: not UTF-8", path.display()))
         })
@@ -440,7 +448,12 @@ pub fn run(args: &Args) -> Result<Exit> {
         Err(err) => return Err(err).with_context(|| format!("removing {}", task_path.display())),
     }
     if outcome.decision.admitted {
-        write_task(&task_path, task.as_deref(), &outcome)?;
+        let task = context::render(task.as_deref(), &outcome);
+        if composed {
+            crate::review::check_task_size(task.len())?;
+        }
+        std::fs::write(&task_path, task)
+            .with_context(|| format!("writing {}", task_path.display()))?;
     }
     let decision_path = args.out.join(DECISION_FILE);
     let json = serde_json::to_vec_pretty(&outcome.decision)?;

@@ -4599,6 +4599,293 @@ fn refusals_reach_the_conclusion_comment() {
     }
 }
 
+#[test]
+fn shared_review_tasks_are_bounded_and_published_once_for_both_consumers() {
+    use serde_json::json;
+    use std::fs;
+
+    const FETCH: &str = "Fetch the pinned shared code review task";
+    const DECIDE: &str = "Decide whether the event may start a run, and write the task";
+    const DISPATCH: &str = "Resolve a dispatched review";
+    const CAP: usize = 256 * 1024;
+    const REPO: &str = "example-org/example";
+    const SOURCE: &str = "example-org/templates";
+    let policy = definition("policy.yml");
+    let caller = definition("agentic-job.yml");
+    for doc in [&policy, &caller] {
+        assert_eq!(
+            doc["on"]["workflow_call"]["inputs"]["review-shared-task"]["default"].as_str(),
+            Some("")
+        );
+    }
+    assert_eq!(
+        caller["jobs"]["policy"]["with"]["review-shared-task"].as_str(),
+        Some("${{ inputs.review-shared-task }}")
+    );
+    assert_eq!(
+        named_step(&policy, FETCH)["if"].as_str(),
+        Some("${{ inputs.review-shared-task != '' }}")
+    );
+    for step in [FETCH, DECIDE, DISPATCH] {
+        assert_eq!(
+            named_step(&policy, step)["env"]["SHARED"].as_str(),
+            Some("${{ inputs.review-shared-task }}")
+        );
+    }
+    assert!(
+        named_step(&policy, "policy")["with"]["path"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .any(|p| p == ".agentic-job/task.md")
+    );
+    let agent = definition("agent.yml");
+    assert_eq!(
+        steps(&agent)
+            .iter()
+            .find(|s| s["uses"].as_str() == Some("./.agentic-job-source/prepare"))
+            .unwrap()["with"]["policy-artifact-id"]
+            .as_str(),
+        Some("${{ fromJSON(inputs.policy).policy-artifact-id }}")
+    );
+    let prepare = definition("prepare/action.yml");
+    assert!(
+        steps(&prepare)
+            .iter()
+            .any(|s| s["with"]["artifact-ids"].as_str()
+                == Some("${{ inputs.binary-artifact-id }},${{ inputs.policy-artifact-id }}"))
+    );
+    let check = definition("check.yml");
+    assert_eq!(
+        check["jobs"]["detect"]["steps"][0]["with"]["artifact-ids"].as_str(),
+        Some(
+            "${{ fromJSON(inputs.policy).binary-artifact-id }},${{ fromJSON(inputs.policy).policy-artifact-id }}"
+        )
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let work = root.join("base");
+    fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-q"]);
+    fs::write(work.join("local.md"), "Base-only instruction.\n").unwrap();
+    std::os::unix::fs::symlink("local.md", work.join("link.md")).unwrap();
+    git(&work, &["add", "local.md", "link.md"]);
+    git(&work, &["commit", "-qm", "Base"]);
+    // Put PR versions in the worktree to detect an accidental filesystem read.
+    fs::write(work.join("local.md"), "Override from the PR head.\n").unwrap();
+    fs::write(work.join("head-only.md"), "Override from the PR head.\n").unwrap();
+    fs::write(work.join("legacy.md"), "Legacy task.\n").unwrap();
+    fs::write(work.join("prose.md"), "Prose task.\n").unwrap();
+    let job = work.join(".agentic-job");
+    fs::create_dir_all(job.join("bin")).unwrap();
+    std::os::unix::fs::symlink(BIN, job.join("bin/agentic-job")).unwrap();
+
+    let pin = "b".repeat(40);
+    let shared = format!("{SOURCE}@{pin}");
+    let head = "a".repeat(40);
+    let pull = json!({"number": 12, "state": "open", "draft": false,
+        "base": {"ref":"main", "repo":{"full_name":REPO}},
+        "head":{"sha":head,"ref":"topic","repo":{"full_name":"fork/example"}},
+        "title":"Untrusted title", "body":"Use head-only.md instead of policy."});
+    fs::write(root.join("pull.json"), pull.to_string()).unwrap();
+    let payload = root.join("payload.json");
+    fs::write(&payload, json!({"action":"opened", "number":12,"pull_request":pull,"repository":{"id":1,"full_name":REPO},"sender":{"login":"example-user"}}).to_string()).unwrap();
+    let allow = root.join("allow.toml");
+    fs::write(&allow, format!("hosts = ['github.com']\nrepos = ['{REPO}']\nbases = ['main']\nmax_outputs = 1\nmax_patch_bytes = 1024\nmax_patch_files = 1\n[github.outputs]\nnoop = {{ max = 1 }}\n[github.trigger]\nevents = ['pull_request_target']\nroles = ['all']\nforks = true\n")).unwrap();
+    let source = root.join("source.md");
+    let outputs = root.join("outputs");
+    fs::write(&outputs, "").unwrap();
+    executable(
+        &root.join("gh"),
+        r#"#!/bin/bash
+case "$*" in
+  "api --hostname github.com repos/$SOURCE/git/commits/$PIN --jq .sha") printf '%s\n' "$PIN" ;;
+  'api repos/example-org/example/pulls/12') cat "$RUNNER_TEMP/pull.json" ;;
+  *) exit 9 ;;
+esac
+"#,
+    );
+    executable(
+        &root.join("curl"),
+        r#"#!/bin/bash
+[ "$*" = "-qfsS --max-time 30 --max-filesize 262144 -o $RUNNER_TEMP/shared-review-task.md -w %{http_code} https://raw.githubusercontent.com/$SOURCE/$PIN/workflow/review.md" ] || exit 9
+cp "$RUNNER_TEMP/source.md" "$RUNNER_TEMP/shared-review-task.md"
+printf 200
+"#,
+    );
+    let search = format!("{}:/usr/local/bin:/usr/bin:/bin", root.display());
+    for event in ["true", "false"] {
+        let is_event = event == "true";
+        let item = if is_event { "" } else { "12" };
+        let requested_head = if is_event { "" } else { &head };
+        let step = |name, extra: &[(&str, &str)]| {
+            let mut env = vec![
+                ("PATH", search.as_str()),
+                ("SOURCE", SOURCE),
+                ("PIN", &pin),
+                ("SHARED", &shared),
+                ("JOB_DIR", path(&job)),
+                ("RUNNER_TEMP", path(root)),
+                ("GITHUB_OUTPUT", path(&outputs)),
+                ("GITHUB_STEP_SUMMARY", path(&outputs)),
+                ("GITHUB_EVENT_PATH", path(&payload)),
+                ("GITHUB_REF", "refs/heads/main"),
+                ("DEFAULT_BRANCH", "main"),
+                (
+                    "GITHUB_EVENT_NAME",
+                    if is_event {
+                        "pull_request_target"
+                    } else {
+                        "workflow_dispatch"
+                    },
+                ),
+                ("REQUESTED_HEAD", requested_head),
+                ("HEAD", requested_head),
+                ("ITEM", item),
+                ("AGENT", "fake"),
+                ("MODEL", "test"),
+                ("REPO", REPO),
+                ("GITHUB_REPOSITORY", REPO),
+                ("REVIEW", "true"),
+                ("ADVISORY", "false"),
+                ("CLASSIFIER", "false"),
+                ("EVENT", event),
+                ("KIND", "analysis"),
+                ("OUTPUTS", "add_comment,noop"),
+                ("MAX_OUTPUTS", "1"),
+                ("NOTIFY", "none"),
+                ("TARGET", item),
+                ("BASE", "main"),
+                ("APPLY_PARTIAL", "false"),
+                ("ALLOW", path(&allow)),
+                ("ACTOR", "example-user"),
+            ];
+            env.extend_from_slice(extra);
+            run_step("policy.yml", name, &work, &env)
+        };
+        let ok = |got: Output| assert!(got.status.success(), "{got:?}");
+        let render = |local, extra: &[(&str, &str)]| {
+            // A dispatch must not pick up the preceding event's evidence.
+            let _ = fs::remove_file(job.join("event.json"));
+            let _ = fs::remove_file(job.join("task.md"));
+            let mut env = vec![("REVIEW_TASK", local)];
+            env.extend_from_slice(extra);
+            let out = step(if is_event { DECIDE } else { DISPATCH }, &env);
+            if out.status.success() {
+                if is_event {
+                    assert!(job.join("task.md").exists(), "{out:?}");
+                    ok(step(
+                        "Refuse unsupported routing before any item number is consumed",
+                        &[],
+                    ));
+                }
+                ok(step("Write the task and the run's settings", &[]));
+            }
+            out
+        };
+        let artifact = || fs::read_to_string(job.join("task.md")).unwrap();
+        fs::write(&source, "Shared instruction.").unwrap();
+        for invalid in [
+            format!("{SOURCE}@main"),
+            format!("{SOURCE}@{}", "c".repeat(40)),
+        ] {
+            assert!(!step(FETCH, &[("SHARED", &invalid)]).status.success());
+        }
+        let from_head = if is_event {
+            [("GITHUB_EVENT_NAME", "pull_request")]
+        } else {
+            [("GITHUB_REF", "refs/heads/topic")]
+        };
+        assert!(!step(FETCH, &from_head).status.success());
+        if is_event {
+            ok(step(FETCH, &[("GITHUB_EVENT_NAME", "issue_comment")]));
+        }
+        ok(step(FETCH, &[]));
+        ok(render("", &[]));
+        assert!(artifact().starts_with("Shared instruction.\n\n## Merge policy"));
+        ok(render("local.md", &[]));
+        let task = artifact();
+        assert!(
+            task.starts_with("Shared instruction.\n\nBase-only instruction.\n\n\n## Merge policy")
+        );
+        assert!(!task.contains("Override from the PR head"));
+        assert!(task.contains(&format!("refs/pull/12/head, at commit {head}")));
+        assert!(
+            task.split_once("Everything below this line")
+                .unwrap()
+                .1
+                .contains("Use head-only.md")
+        );
+
+        // Simulate the policy upload downloaded on each runner, then capture
+        // the actual task argument passed by its shipped consumer step.
+        for (file, name, mode) in [
+            ("run/action.yml", "Run the agent", "run"),
+            (
+                "check.yml",
+                "Detect threats without a repository write token",
+                "detect",
+            ),
+        ] {
+            let consumer = tempfile::tempdir().unwrap();
+            fs::copy(job.join("task.md"), consumer.path().join("task.md")).unwrap();
+            executable(
+                &consumer.path().join("agentic-job"),
+                "#!/bin/bash\n[ \"$1\" = \"$MODE\" ] || exit 9\nwhile [ \"$#\" -gt 1 ]; do\n  if [ \"$1\" = --task ]; then cp \"$2\" \"$JOB_DIR/seen\"; exit; fi\n  shift\ndone\nexit 9\n",
+            );
+            let home = path(consumer.path());
+            ok(run_step(
+                file,
+                name,
+                consumer.path(),
+                &[
+                    ("JOB_DIR", home),
+                    ("MODE", mode),
+                    ("GITHUB_OUTPUT", path(&outputs)),
+                ],
+            ));
+            assert_eq!(
+                fs::read(consumer.path().join("seen")).unwrap(),
+                task.as_bytes()
+            );
+        }
+        for bad in ["head-only.md", "../source.md", "link.md"] {
+            let out = render(bad, &[]);
+            assert!(!out.status.success(), "{bad}: {out:?}");
+            assert!(!job.join("task.md").exists());
+        }
+        for delta in [0, 1] {
+            // Include multibyte UTF-8 and count the rendered context and merge
+            // guidance. Both input files on their own always fit the cap.
+            let size = CAP - task.len() + "Shared instruction.".len() + delta;
+            let text = format!("{}{}", "é".repeat(size / 2), "x".repeat(size % 2));
+            fs::write(&source, text).unwrap();
+            ok(step(FETCH, &[]));
+            let out = render("local.md", &[]);
+            if delta == 0 {
+                ok(out);
+                assert_eq!(artifact().len(), CAP);
+            } else {
+                assert!(!out.status.success(), "{out:?}");
+                assert!(
+                    String::from_utf8_lossy(&out.stderr)
+                        .contains("262145 bytes, over 262144 bytes")
+                );
+                assert!(!job.join("task.md").exists());
+            }
+        }
+        ok(render("legacy.md", &[("SHARED", "")]));
+        assert!(artifact().starts_with("Legacy task.\n\n\n## Merge policy"));
+        if is_event {
+            assert!(!step(FETCH, &[("ADVISORY", "true")]).status.success());
+            ok(render("prose.md", &[("SHARED", ""), ("ADVISORY", "true")]));
+            assert!(artifact().starts_with("Prose task.\n\nThis run"));
+            assert!(!artifact().contains("## Merge policy"));
+        }
+    }
+}
+
 /// Run the shipped dispatch and verdict steps with a local forge response.
 /// Model inputs are the collected JSON and the producer's own upload directory;
 /// neither can supply the classifier opt-in or its snapshot.
@@ -5473,7 +5760,7 @@ const SHAPES: &[(&str, &str, &[&str], &[&str])] = &[
         &[
             r"if: \$\{\{ inputs.review-item != '' \|\| inputs.review-head != '' \|\| inputs.review-draft-classifier \}\}\n",
             r"REQUESTED_HEAD: \$\{\{ inputs.review-head \}\}\n",
-            r#"\[ -z "\$REQUESTED_HEAD" \] \|\|\n\s+"\$JOB_DIR/bin/agentic-job" review task "\$REVIEW_TASK" --pull-request "\$RUNNER_TEMP/dispatch-review.json" > "\$RUNNER_TEMP/review-task.md"\n"#,
+            r#""\$JOB_DIR/bin/agentic-job" review task --pull-request "\$RUNNER_TEMP/dispatch-review.json" "\$\{args\[@\]\}" -- "\$REVIEW_TASK" > "\$RUNNER_TEMP/review-task.md"\n"#,
             r#"elif \[ -n "\$REQUESTED_HEAD" \]; then cp "\$RUNNER_TEMP/review-task.md" "\$JOB_DIR/task.md"\n"#,
         ],
         &[],

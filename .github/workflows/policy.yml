@@ -64,6 +64,10 @@ on:
         description: Review task file in the trusted base checkout, never the review head
         type: string
         default: ""
+      review-shared-task:
+        description: Public GitHub OWNER/REPO@COMMIT providing workflow/review.md; review-task becomes optional caller-base additions
+        type: string
+        default: ""
       review-item:
         description: Positive pull request number for an operator-dispatched review (not an event run)
         type: string
@@ -71,7 +75,7 @@ on:
       review-head:
         description: >-
           With `review-item`, the full commit SHA its pull request must still be at, not a draft unless `review-draft-classifier` is set;
-          the review's task is then `review-task`, and `agent` and `model` must be set
+          the review's task is then rendered by policy, and `agent` and `model` must be set
         type: string
         default: ""
       review-draft-classifier:
@@ -657,6 +661,36 @@ jobs:
         run: |
           [ "$BUILD" != true ] || set -- --build
           bash "$SOURCE_DIR/secure-host/binary.sh" get --out "$JOB_DIR/bin" "$@"
+      - name: Fetch the pinned shared code review task
+        if: ${{ inputs.review-shared-task != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHARED: ${{ inputs.review-shared-task }}
+          REVIEW: ${{ inputs.review }}
+          EVENT: ${{ inputs.event }}
+          ADVISORY: ${{ inputs.advisory }}
+          CLASSIFIER: ${{ inputs.review-draft-classifier }}
+          ITEM: ${{ inputs.review-item }}
+          HEAD: ${{ inputs.review-head }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [ "$REVIEW/$ADVISORY/$CLASSIFIER" = true/false/false ] &&
+            { { [ "$EVENT" = true ] && [ -z "$ITEM$HEAD" ]; } || { [ "$EVENT" = false ] && [ -n "$ITEM" ] && [ -n "$HEAD" ]; }; } ||
+            { echo '::error::review-shared-task requires a code review event or exact-head dispatch'; exit 1; }
+          # A caller workflow running from a PR head could choose its own pin.
+          case "$EVENT/$GITHUB_EVENT_NAME" in
+            true/pull_request_target|true/issue_comment) ;;
+            false/workflow_dispatch) [ -n "$DEFAULT_BRANCH" ] && [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ] ||
+              { echo '::error::shared review dispatch must run from the caller default branch'; exit 1; } ;;
+            *) echo '::error::review-shared-task requires a trusted caller workflow revision'; exit 1 ;;
+          esac
+          [[ "$SHARED" =~ ^([A-Za-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*)@([0-9a-f]{40})$ ]] ||
+            { echo '::error::review-shared-task must be OWNER/REPO@COMMIT with a full lowercase commit SHA'; exit 1; }
+          repo=${BASH_REMATCH[1]} sha=${BASH_REMATCH[2]}
+          # Require a real commit, not a mutable ref with a SHA-shaped name. Fetch only public bytes.
+          [ "$(gh api --hostname github.com "repos/$repo/git/commits/$sha" --jq .sha)" = "$sha" ]
+          status=$(curl -qfsS --max-time 30 --max-filesize 262144 -o "$RUNNER_TEMP/shared-review-task.md" -w '%{http_code}' "https://raw.githubusercontent.com/$repo/$sha/workflow/review.md")
+          [ "$status" = 200 ]
       # An event-triggered run (docs/events.md). What the decision needs
       # of the forge comes from the API with the job's token, which can
       # read and no more; the binary makes no request. The actor's
@@ -694,6 +728,7 @@ jobs:
           ACTOR: ${{ github.actor }}
           REVIEW: ${{ inputs.review }}
           REVIEW_TASK: ${{ inputs.review-task }}
+          SHARED: ${{ inputs.review-shared-task }}
           ADVISORY: ${{ inputs.advisory }}
           EVENT: ${{ inputs.event }}
           KIND: ${{ inputs.kind }}
@@ -707,14 +742,18 @@ jobs:
           APPLY_PARTIAL: ${{ inputs.apply-partial }}
           AGENT: ${{ inputs.agent }}
         run: |
-          if [ -n "$TASK_ARTIFACT" ]; then cp "$RUNNER_TEMP/task-artifact/task.md" "$RUNNER_TEMP/task.md"
+          task_arg=--task
+          if [ "$REVIEW" = true ]; then
+            args=()
+            if [ -n "$SHARED" ]; then args+=(--shared-task "$RUNNER_TEMP/shared-review-task.md"); task_arg=--composed-review-task; fi
+            "$JOB_DIR/bin/agentic-job" review task "${args[@]}" -- "$REVIEW_TASK" > "$RUNNER_TEMP/task.md"
+          elif [ -n "$TASK_ARTIFACT" ]; then cp "$RUNNER_TEMP/task-artifact/task.md" "$RUNNER_TEMP/task.md"
           else printf '%s\n' "$TASK" > "$RUNNER_TEMP/task.md"; fi
-          if [ "$REVIEW" = true ]; then "$JOB_DIR/bin/agentic-job" review task "$REVIEW_TASK" > "$RUNNER_TEMP/task.md"; fi
           [ ! -e "$RUNNER_TEMP/permission.json" ] || set -- "$@" --actor-permission "$RUNNER_TEMP/permission.json"
           [ ! -e "$RUNNER_TEMP/pull.json" ] || set -- "$@" --pull-request "$RUNNER_TEMP/pull.json"
           state=0
           "$JOB_DIR/bin/agentic-job" event --allow "$ALLOW" --event-name "$GITHUB_EVENT_NAME" --event "$GITHUB_EVENT_PATH" \
-            --actor "$ACTOR" --repository "$GITHUB_REPOSITORY" --task "$RUNNER_TEMP/task.md" --out "$JOB_DIR" "$@" || state=$?
+            --actor "$ACTOR" --repository "$GITHUB_REPOSITORY" "$task_arg" "$RUNNER_TEMP/task.md" --out "$JOB_DIR" "$@" || state=$?
           case "$state" in 0 | 1) ;; *) echo "::error::agentic-job event ended with exit state $state"; exit "$state" ;; esac
       # The binary writes the outputs, each on one line: a reason can name
       # event fields, and no text of the decision passes through the shell.
@@ -732,9 +771,9 @@ jobs:
       # read-only API access, never from agent text or the caller's task.
       # The binary checks the request before the call and prints only a SHA.
       # With `review-head` (review.yml's dispatch), the pull request must
-      # still be at that head, and the task is the trusted checkout's
-      # review task, then the pull request's number, head, and title and
-      # body fenced as untrusted text, as for an event review.
+      # still be at that head. The task is the trusted checkout's review
+      # task (or the shared pin plus trusted additions), then the PR's
+      # number, head, and title and body fenced as untrusted text.
       - name: Resolve a dispatched review
         id: dispatch-review
         if: ${{ inputs.review-item != '' || inputs.review-head != '' || inputs.review-draft-classifier }}
@@ -742,6 +781,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_HEAD: ${{ inputs.review-head }}
           REVIEW_TASK: ${{ inputs.review-task }}
+          SHARED: ${{ inputs.review-shared-task }}
           AGENT: ${{ inputs.agent }}
           MODEL: ${{ inputs.model }}
           REVIEW: ${{ inputs.review }}
@@ -767,8 +807,11 @@ jobs:
           gh api "$(jq -r '"repos/\(.owner)/\(.repo)/pulls/\(.pull_number)"' <<< "$target")" > "$RUNNER_TEMP/dispatch-review.json"
           head=$("$JOB_DIR/bin/agentic-job" review resolve-dispatch --pull-request "$RUNNER_TEMP/dispatch-review.json")
           echo "review-head=$head" >> "$GITHUB_OUTPUT"
-          [ -z "$REQUESTED_HEAD" ] ||
-            "$JOB_DIR/bin/agentic-job" review task "$REVIEW_TASK" --pull-request "$RUNNER_TEMP/dispatch-review.json" > "$RUNNER_TEMP/review-task.md"
+          if [ -n "$REQUESTED_HEAD" ]; then
+            args=()
+            [ -z "$SHARED" ] || args+=(--shared-task "$RUNNER_TEMP/shared-review-task.md")
+            "$JOB_DIR/bin/agentic-job" review task --pull-request "$RUNNER_TEMP/dispatch-review.json" "${args[@]}" -- "$REVIEW_TASK" > "$RUNNER_TEMP/review-task.md"
+          fi
           # Retain the very snapshot used to write the task. A producer must
           # not be able to replace the title or body check holds its verdict to.
           if [ "$REVIEW_DRAFT_CLASSIFIER" = true ]; then

@@ -9,10 +9,8 @@
 //! and URLs are left as written: they matter when the agent copies text
 //! into an output, and `collect` handles them there.
 
-use std::path::Path;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result};
 use regex::Regex;
 
 use super::{ItemKind, Outcome};
@@ -164,11 +162,6 @@ pub fn render(task: Option<&str>, outcome: &Outcome) -> String {
         out.push_str(&rendered);
     }
     out
-}
-
-pub fn write_task(path: &Path, task: Option<&str>, outcome: &Outcome) -> Result<()> {
-    std::fs::write(path, render(task, outcome))
-        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
