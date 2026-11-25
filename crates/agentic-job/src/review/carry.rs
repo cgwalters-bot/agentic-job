@@ -17,6 +17,13 @@
 //! The heads are data: git and rustfmt read them, in a scratch repository
 //! and an empty directory, so no configuration, hook, attribute driver or
 //! toolchain file of theirs applies, and nothing of theirs runs.
+//!
+//! What this trusts: a formatter-only change is taken to mean nothing,
+//! which is not so for a `.rs` file read as data (a fixture) or for
+//! `line!()`, and a file of an older edition is formatted as 2024's. The
+//! previous head's status is trusted too, and someone with write access can
+//! set it by hand, or have a branch's workflow set it as the job token's
+//! bot, as such a workflow can already submit a review as that bot.
 
 use std::io::Write;
 use std::path::Path;

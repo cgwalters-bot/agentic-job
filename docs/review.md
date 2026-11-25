@@ -2,189 +2,85 @@
 
 > This text is LLM generated.
 
-[`review.yml`](../.github/workflows/review.yml) has a real agent review pull
-requests on `main`: when one is opened, synchronized, reopened or marked
-ready for review (drafts wait), and again on a `/review` comment from someone
-with admin, maintain or write permission. The bounds admit any role's pull
-request, forks included ([`review.toml`](../workflow/review.toml),
-`roles = ["all"]`), but the policy job's `if:` starts automatic reviews only
-for authors whose `author_association` is `OWNER`, `MEMBER` or
-`COLLABORATOR`. GitHub sets that field; the author cannot. Anyone else's pull
-request, including one from someone with commits already merged here
-(`CONTRIBUTOR`), is reviewed when someone with write access comments
-`/review`, which keeps the role check
-([`review-command.toml`](../workflow/review-command.toml)). Bots
-start no automatic review unless the repository variable `REVIEW_BOT_IDS`,
-a JSON array, lists the bot author's numeric user id, which GitHub never
-reassigns, and the bounds' `bots` list its login. `review.toml` lists only
-`dependabot[bot]`; setting `REVIEW_BOT_IDS` to `[49699333]`, Dependabot's
-id on github.com, has its pull requests reviewed without a `/review`.
-Unset, the default, every bot's pull request waits for that comment. Set,
-the agent reads such a pull request's text, upstream release notes
-included, without anyone having asked: it is data to a sandboxed agent,
-but it can steer the verdict. The agent holds a broker run token and, by
-default, a GitHub read token
-([current boundary](inference.md#credential-boundary)). Admission
-spends a review; it does not override the repository's merge restrictions. The
-workflow, the bounds and the
-[standing task](../workflow/review.md) come from the trusted caller, never the
-head. On `pull_request_target`, policy and task files are read at
-`github.workflow_sha`, the running caller workflow's revision, not the pull
-request's possibly stale base SHA. The agent's separate trusted base checkout
-is unchanged.
+The [`review.yml`](../.github/workflows/review.yml) reusable workflow has an
+agent review each pull request and post one verdict, APPROVE or CHANGES. The
+agent reads the head as data inside the [sandbox](sandbox.md), and nothing
+outside it checks out or runs the head, so pull requests from forks are safe
+to review.
 
-When policy refuses an event review, the existing single bot status comment
-says `Review refused by policy: REASON` on one line. The reason is bounded to
-1000 characters and Markdown-escaped. Only the pinned workflow source runs
-with the comment-writing token; no head code or agent output is executed.
-This does not enable notifications for admitted reviews, change admission,
-or set a review commit status for a refused head.
+| Forge | Pull request review |
+| --- | --- |
+| GitHub | `review.yml`, described here |
+| GitLab | Not available yet |
+| Forgejo | Not available yet |
 
-The agent starts in the base checkout with the exact admitted head SHA fetched
-beside it, inside the sandbox. The head fetch uses no credential; the agent
-still holds the tokens [listed above](workflow.md#which-tokens-reach-what).
-The head is data, and
-nothing outside the sandbox checks it out or runs it. That is what makes forks
-safe to admit. One review's inference is bounded in `review.yml` by
-`max-requests: '150'`, `budget-usd: '5'` (US dollars) and
-`timeout: '75'` minutes. Under the broker's `plain` registration the per-run
-cap is only a convention ([inference.md](inference.md)); what then bounds
-spending is the broker's aggregate cap, which every caller shares. Nothing
-caps reviews per author or across pull requests: a push cancels the review it
-supersedes, which has spent what it spent by then, but each pull request runs
-its own. That is why automatic reviews are limited to those authors: if anyone
-could start them, opening pull requests, or closing and reopening one, would
-drain the shared cap and stall every implement, fix and review run until its
-window resets. One of those authors can still do that; per-author limits are
-[remaining work](plan.md).
-A malicious head can still sway its own verdict, including an opt-in GitHub
-approval. Model review is not a trust boundary.
+## When a review runs
 
-The `review` status is not a security control. The author controls both the
-code and text the agent reads and can sway its verdict. Repository merge policy
-is authoritative about whether agent approval suffices, including for external
-contributors. Required human or code-owner approvals belong in GitHub rulesets,
-not an invented universal reviewer gate; CODEOWNERS alone only requests review.
-Preserve explicit repository restrictions: neither `/review` admission nor an
-automated approval substitutes for human approval where the repository requires
-it. Requiring a review does not make an approved change trusted.
+| Trigger | Who | Notes |
+| --- | --- | --- |
+| Pull request opened, synchronized, reopened or marked ready | Authors whose `author_association` is `OWNER`, `MEMBER` or `COLLABORATOR` | Drafts wait. The forge sets the association, not the author. |
+| A bot's pull request | Bots whose numeric user id is in `REVIEW_BOT_IDS` and whose login is in the bounds' `bots` | Off by default. For Dependabot on github.com, `[49699333]`. |
+| `/review` comment | Anyone with admin, maintain or write permission | Reviews anyone's pull request. |
+| `workflow_dispatch` | Holders of `actions: write` | See [dispatched reviews](#dispatched-reviews). |
 
-## Shared code review task
+Nothing caps reviews per author, so automatic reviews are limited to trusted
+authors: otherwise anyone could drain the broker's cap shared with every
+other run. One review asks for at most 150 requests, 5 US dollars and 75
+minutes, but under a `plain` broker registration only the shared cap holds
+([inference](inference.md)). A push cancels the review it supersedes. A
+bot's pull request text, such as release notes, can steer the verdict, so
+weigh that before listing a bot. When policy refuses an event, the bot's
+status comment says `Review refused by policy: REASON`.
 
-Trusted callers of `policy.yml` or `agentic-job.yml` can set
-`review-shared-task: OWNER/REPO@COMMIT` for an event code review or a dispatch
-with `review-item` and `review-head`. Use `pull_request_target` or `issue_comment`
-for events and dispatch from the caller's default branch. Unlike `pull_request`,
-these paths don't let the reviewed head supply the workflow's choice of pin.
-Set it in the calling workflow, not from the event or dispatch payload.
-`COMMIT` must be a full lowercase commit SHA in
-a public GitHub.com repository. Policy fetches `workflow/review.md` at that
-commit as data, without checking out or executing the shared repository.
+## What you can rely on
 
-Leave `review-task` empty for shared-only reviews. To add repository rules,
-set `review-task` to a regular UTF-8 file committed in the trusted caller
-checkout: the policy revision for an event, the trusted workflow revision for
-a dispatch. Policy reads those additions from the checked-out Git commit,
-not the worktree, the review target, or its head. A named but missing, blank,
-or invalid file fails policy rather than silently falling back.
+- The workflow, its bounds ([`review.toml`](../workflow/review.toml),
+  [`review-command.toml`](../workflow/review-command.toml)) and the
+  [standing task](../workflow/review.md) come from the trusted caller, never
+  the head.
+- The head is fetched without credentials. The agent still holds a broker run
+  token and a read-only forge token
+  ([tokens](workflow.md#which-tokens-reach-what)).
+- Check refuses any output but one verdict comment or a noop, and the
+  optional inline findings and escalation label below, all for the reviewed
+  pull request.
 
-The shared text comes first, then any additions, then the caller's existing
-merge guidance and the review's fenced context. Policy accepts at most
-262,144 UTF-8 bytes in the final task, including separators and generated
-text. It refuses an over-limit task rather than truncating trusted guidance.
-The agent and detector consume the same `task.md` from the policy artifact;
-neither should prepend or render anything after policy. Permissions, exact
-head checks, admission, and verdict handling are unchanged.
-
-The default (empty `review-shared-task`) keeps the existing complete
-`review-task` contract. Headless dispatches that pass `task`, prose advisories,
-and draft classifiers do not use shared code review tasks. The built-in review
-workflow and existing callers need no changes to keep their current behavior.
-
-### Release and wrapper checks
-
-The release train should verify the matching workflow and binary support this
-input before moving any wrapper pins. Run the renderer workflow fixture for
-both review entry points: shared-only, shared plus base additions, exact
-limit and one byte over, attempted head overrides, and identical artifact
-bytes for agent and detector. Also verify unchanged legacy and prose reviews.
-
-For the [wrapper migration](https://github.com/cgwalters-forge/actions/issues/311),
-move the helper pins together to a compatible release and validate one event
-and one exact-head dispatch against those pins. With the policy job's normal
-read-only token, confirm the shared fetch returns the known `workflow/review.md`
-bytes at the selected public commit. Opt in and trim full caller
-tasks to intentional local additions in the same caller change. Do not trim
-caller files first or prepend the shared task in the agent job.
+Model review is not a trust boundary: the author controls what the agent
+reads and can sway its verdict. Required human or code-owner approvals belong
+in the forge's branch rules, and neither `/review` nor an agent approval
+replaces them.
 
 ## The verdict
 
-Before reading the code, the reviewer tries the change as a user would: it takes
-the claim from the pull request and linked issue as untrusted, builds the head
-and runs the new or changed commands from the docs and `--help` alone against
-local fixtures or made-up inputs, and follows changed docs literally. It reports
-under "Tried" what it ran, what happened and where that was confusing, wrong or
-missing, or why trying was not possible (privileged sandbox paths, real forge
-state, hardware). A main claim that fails when tried because of the change is a
-blocker. Building and running head code in the sandbox was already allowed; the
-step runs it on every review rather than for a specific concern, with the same
-sandbox user, read-only job token and egress policy, so a hostile head gains no
-new access, and the cost is review time and inference budget. The reviewer then
-reads the diff and surrounding code and reports findings. It does not run
-existing test suites, formatters or linters to confirm they pass, and does not
-look up or report CI results. It may build and run code to test whether a
-specific concern holds, such as a function failing under a condition no test
-covers, and reports what it ran and what it showed for that concern.
-The verdict has no `Verification:` paragraph. This applies
-to both `review.yml`'s standing task and dispatch's `review` profile. CI is a
-separate required check; the merge gate combines the checks, not the reviewer.
-These are review instructions, not an execution restriction enforced by the
-sandbox. Job permissions, token separation and output validation are unchanged.
+The reviewer first tries the change as a user would, building the head and
+running new or changed commands from the docs and `--help`, and reports that
+under "Tried". It then reads the diff and surrounding code. It does not rerun
+test suites, linters or CI; those are separate required checks.
 
-The verdict output is a comment whose first line starts with `VERDICT: APPROVE` or
-`VERDICT: CHANGES`, or a noop. `VERDICT: REJECT`, which briefs written for the
-earlier format still ask for, counts as CHANGES; the earlier `REASON:` line is
-no longer required. The check job refuses anything else, and any
-field that would retarget the comment. A redundant `item_number` equal to the
-fixed pull request number is accepted; other routing fields remain refused.
-The prompts ask for only `type` and `body`.
+The first line is `VERDICT: APPROVE` or `VERDICT: CHANGES`. Findings are
+tagged blocker, important or nit, and only a blocker earns CHANGES: a
+concrete failure of the change's main purpose, or a material defect it
+introduces. An approval lists the rest under "Follow-ups". The reviewer also
+asks whether the change should exist as written, or extend an existing
+mechanism instead. Beside the verdict, it may anchor up to ten findings to
+lines ([review comments](safe-outputs.md#review-comments-on-the-pull-request)).
 
-### Inline findings
-
-Next to a verdict comment, never a noop, `review.yml`'s agent may return up
-to ten `create_pull_request_review_comment` outputs, one per finding with a
-line: the bounds list the type with `max = 10`; with escalation below,
-`max_outputs = 12` allows the verdict, ten findings and one label request.
-Check holds each to the triggering pull request with the rules every
-review comment has ([safe outputs](safe-outputs.md#review-comments-on-the-pull-request));
-`agentic-job review verdict` also refuses a `repo`, any field a review comment cannot
-carry, a path with control characters or over 1024 characters, a range
-that ends before it starts, and a verdict comment whose body would exceed
-60000 characters with every inline finding folded in. That bound keeps
-whichever body is posted under GitHub's 65536-character limit.
-With real reviews they are the review's comments, as above. Otherwise,
-or when nothing is submitted, apply posts them in the comment's body,
-under "Inline findings" after the verdict, each under its path and line,
-as check folded them (`agentic-job review fold`, uploaded beside the
-unfolded output, since apply runs no binary), and posts no review comment: gh-aw's handler would put them in a second
-review, of event `COMMENT`, apart from the verdict. A path is shown with Markdown
-characters escaped, as it is the agent's and gh-aw does not sanitize it.
-Dispatch's `review` profile does not offer them.
+The commit status `review` on the head is `success` for a checked APPROVE
+that posted, carried ones included, `failure` for CHANGES, a noop or a
+review that failed to post, and `pending` for a
+[record-only event](#record-only-pushes). No status is set
+when the run was cancelled, or when another open pull request shares the
+head, until a maintainer closes the duplicate and comments `/review`. `review` is
+a compatibility status, not the merge gate. Remove it from required checks
+before enabling a merge queue: merge groups aren't reviewed, so queued pull
+requests would wait until they time out.
 
 ### Bounded security escalation
 
-Ask for human review only for a stated concrete security risk that the reviewer
-cannot bound, explaining the risk and what remains unbounded. Changes to the
-harness, workflows or permissions are not by themselves grounds for a human
-gate. Explicit repository restrictions still apply, including `merge = "person"`.
-
-The concrete threat is an agent using escalation to label unrelated PRs or
-drive arbitrary label-triggered automation. Escalation uses the existing
-`add_labels` safe output, off without explicit caller configuration. The caller
-requests `add_comment,noop,add_labels` with `max-outputs: '2'`, or
-`add_comment,noop,create_pull_request_review_comment,add_labels` with
-`max-outputs: '12'`, and bounds `add_labels` to `max = 1` and exactly one
-`allowed` spelling. For example:
+The reviewer can ask for a human, by adding one label, only for a concrete
+security risk it cannot bound. To stop an agent from labelling other pull
+requests or driving label-triggered automation, the bounds allow exactly
+one label:
 
 ```toml
 [github.outputs.add_labels]
@@ -192,211 +88,33 @@ max = 1
 allowed = ["security-triage"]
 ```
 
-The reviewer may return that exact singleton once beside a verdict, never
-alone, with noop, or from a draft classifier. Only `type`, the exact reviewed
-`repo`, its `item_number`, and `labels` are accepted; aliases, another PR or
-repository, different case/spelling, extra labels or requests, and removals
-refuse the entire review. Ordinary verdicts, noops and inline findings remain
-compatible without escalation. Check still applies all ordinary safe-output
-counts, label validation and bounds. The trusted policy's `review-label-bound`
-output carries the effective bound to check and submit; agents cannot set it.
+The stock `review.yml` always asks for `add_labels`, so its bounds must keep
+this entry: removing it refuses every review. The shipped
+[`review.toml`](../workflow/review.toml) and
+[`review-command.toml`](../workflow/review-command.toml) allow `needs-human`;
+name your own label in both and create it before the first review. A custom
+caller of `policy.yml` leaves escalation off unless it adds `add_labels` to
+its bounds and asks for exactly `add_comment,noop,add_labels` with
+`max-outputs: '2'`, or
+`add_comment,noop,create_pull_request_review_comment,add_labels` with
+`'12'`. Any other label request refuses the whole review. The label
+signals; it doesn't block merging.
 
-Apply retains the label when folding findings and, after submit posts the
-verdict as a real review or its 422 fallback comment, drops only the already
-posted verdict/findings, not the label. It makes one label request, with the
-existing apply token and permissions; submit does not label. Reapplying adds
-the same label idempotently; no removal, direct agent forge write or broader
-credential is granted. A label is an escalation signal, not a merge lock:
-callers that need a hold must enforce their policy outside the model.
+## Merge policy
 
-This repository opts in through both `workflow/review*.toml`, `review.yml`, and
-the dispatched review's `.github/agentic-job/dispatch.toml` and `dispatch.yml`,
-using its existing `needs-human` label. Other callers choose their own spelling,
-copy the bounds and adjust output counts together, and provision that label
-before enabling it. The handler does not create missing labels: a missing label
-or API/permission failure fails apply, without undoing an already-posted
-verdict. Inspect the apply log and PR before retrying. No live label publication
-is proven by the offline tests.
-
-Each finding is tagged blocker, important or nit, and only a blocker earns
-CHANGES. The standing task requires a concrete failure of the change's main
-purpose or a material defect the change introduces or makes reachable. It
-groups findings by cause and asks for the root fix. With a verified prior
-review, [re-reviews](#review-history) also distinguish regressions in the
-latest changes from newly reported defects that the last review could have
-seen. Both tasks cap findings that require malicious control of already trusted
-configuration or refs at important, unless the change weakens that boundary.
-Both prompts ask for every finding in one pass
-and, in an approving review, for important findings and nits under
-"Follow-ups" with file and line, for later pull requests; a fix for a blocker
-may take them along. Blocking on each new narrow finding cost a fix, CI and
-review run per finding, ten rounds on one pull request. Check does not read
-severities: refusing a mislabelled verdict would only lose its comment, and
-the status would fail as it does for CHANGES.
-
-Before correctness, `review.yml`'s standing task, dispatch's `review`
-profile and the implement skill's [diff reviewer](../skills/agents/diff-reviewer.md)
-ask whether the change should exist as
-written: whether it adds a mechanism where an existing one could be
-extended, configured or deleted, whether it sits in the repository and
-language the base's AGENTS.md or conventions call for, and whether it is
-the smallest change that works, lines added against lines removed: checking
-only against the issue approved well-scoped additions in the wrong place
-([#1816](https://github.com/cgwalters-forge/agentic-job/issues/1816)). In the
-standing task, name the architectural fix but block only if the design causes
-a concrete failure that meets the blocker rules above. The project's own
-conventions, not the prompts, name the right place and language. Tests that
-only restate the implementation (unit tests of private
-helpers, mocks asserting call sequences) are important, not blockers, with a
-request for an integration test where feasible, so taste starts no fix rounds.
-
-When check refuses the output or apply fails to post it, the existing failure
-status says
-`The review did not post; see the workflow run` and links to that run.
-The `status` job then sets the commit
-status `review` on the reviewed head: `success` only for a checked APPROVE
-that was posted, as the review or the comment, `failure` for CHANGES, a noop
-or a run that did not get that far. The status job
-holds `statuses: write` and `pull-requests: read`, runs the policy job's
-binary of the pinned source (`agentic-job review status`), never the head,
-and reads no agent text: the verdict is one of two words check.yml set.
-
-A status belongs to the commit, and the pull request's title and body reach
-the agent, so anyone could open a second pull request at someone else's head
-and talk its review into APPROVE. The status is set only when the triggering
-pull request is the one open pull request at that head; otherwise the run
-leaves a notice and the status as it was.
-
-The flip side: anyone can hold back the status on someone else's pull
-request, without write access, by opening a second pull request from a fork
-at the same head. Neither run then sets a status, and a required `review`
-stays expected until a maintainer closes the duplicate and asks for
-`/review`.
-
-Automatic events cancel a superseded review; only admitted runs enter the
-per-PR group, so a comment cannot cancel one. A cancelled run sets no status,
-and a head no run finished leaves a required `review` expected.
-
-## Real reviews and the poll contract
-
-Set repository variable `AGENT_REAL_REVIEWS=true` to opt in; unset is off.
-The verdict is then posted once, as the review, instead of as a comment as
-well (#583). The `submit` job, after check and before apply, uses its own
-`GITHUB_TOKEN` (`pull-requests: write`), never `SAFE_OUTPUTS_PAT`, to submit
-an `APPROVED` or `CHANGES_REQUESTED` review, and apply then posts no comment.
-When nothing is submitted (a noop, a run stopped at a limit, a head that moved
-or a failed submission, which also leaves the run red), apply posts the comment
-as it does with the variable off, and that comment is what sets the status.
-A refusal is not silent: `submit` logs the status and the response's
-`message` and `errors` (never its headers or URL, which hold the credential)
-as an error annotation. A 422, GitHub refusing the submission (a locked
-conversation, for example), posts the verdict as that plain comment itself,
-saying the review could not be submitted and why; the comment's URL counts
-as posted for the status, and apply posts nothing beside it. Any other
-failure still leaves the comment to apply. A re-run of all jobs posts its
-own.
-A re-run of failed jobs posts nothing twice: `submit` submits nothing where
-this run already has an applied comment, and reuses an identical review at
-the same head. A re-run of all jobs that reaches other findings submits a new
-review, the latest; one after a run whose comment was posted posts comments.
-Enable **Settings → Actions → General → Workflow permissions → Allow GitHub
-Actions to create and approve pull requests**. The reviewer is
-`github-actions[bot]`, distinct from the bot account opening the PR. PRs opened
-by that Actions identity cannot use this approval path. An approval's or change
-request's body is the request check accepted, read from check's upload in the
-same run rather than back from the forge, sanitized once by `collect`
-in check (apply's handler sanitizes a comment again), with `VERDICT:` still its first line.
-After it come a visible footer in the form of gh-aw's comment footer,
-`> Generated by [workflow](URL) for #N at HEAD`, linking the agent job (else
-the run, where a runner gives no job ID) from Actions' context, never the
-review text, and gh-aw's run marker (`<!-- gh-aw-agentic-workflow: ... run: URL -->`), as its
-handler ends a comment. As with gh-aw's footer, a body that leaves `<details>`
-or a code fence open can fold the footer away or show it as code. A comment
-apply posts instead keeps gh-aw's own footer, which links the run.
-
-Inline findings ([below](#inline-findings)) are the submitted review's
-own comments, in the same `pulls.createReview` call, so they belong to the
-approval or change request rather than standing beside it. Each needs its
-path and line, and a range's first line in the same hunk, in the diff of
-the head `submit` just read; one that is not, or whose file the API shows
-no patch for, goes in the review's body after the verdict line instead. A
-bad anchor so neither loses the finding nor fails the submission. The
-split depends only on the head, so a re-run at the same head builds the
-same body and reuses the review as above. The files are read only to place
-comments, never to decide whether to approve.
-
-The review is bound to `commit_id`, and a head that already changed is skipped.
-An APPROVE is submitted whatever files the pull request changes, including
-workflows, bounds and the review's own workflow, script and instructions.
-Whether that approval is enough to merge is the repository's
-[merge policy](#merge-policy) and GitHub's code-owner rule, not a gate-file
-list here. The deterministic guards stay: keep `ci` and the base branch's
-[workflow-ingress check](workflow-ingress.md) required in the ruleset.
-CHANGES is submitted as usual.
-
-Pollers read `GET /repos/{owner}/{repo}/pulls/{number}/reviews`, not issue
-comment text or the `review` status. A submitted verdict has no comment
-beside it, so a poller that still matches `VERDICT:` in comments finds none:
-move such a poller (tracker's `reviewText`, for its fix task) to reviews
-before setting the variable, or before a caller that has it set follows a
-commit with this behaviour. For `github-actions[bot]`, select the latest
-non-pending, non-comment review by submission time (ID breaks ties). Only
-`APPROVED` with `commit_id` equal to the current head is approval;
-`CHANGES_REQUESTED` triggers the existing fix dispatch and its body supplies
-findings. `DISMISSED`, absent or stale approval means wait, not approval.
-Other reviewers' outstanding change requests remain GitHub's merge gate; the
-poller must not override them. Noop, cancellation, refusal or submission
-failure produces no new approval. This repository does
-not implement the external tracker's poll loop.
-
-For `main`, enable the pull-request rule with **1 required approving review**,
-and **Dismiss stale pull request approvals when new commits are pushed**.
-Keep the merge queue and
-required `ci` check, remove `review` from required status checks, and give the
-automation identity no ruleset bypass. GitHub blocks an outstanding change
-request; the review requirement gates queue entry. Repository settings cannot
-be changed by this PR. Enabling repository auto-merge and requesting queue
-entry at PR creation belong to the opening controller; this workflow never
-merges or enables auto-merge itself.
-
-### Merge policy
-
-Whether the review job's approval merges a pull request by default is the
-repository owner's decision, kept in the repository rather than in prose the
-reviewer weighs: reviewers at older pins kept arguing whether a person should
-be required, and refused changes the owner had accepted (#556). The policy
-job reads `.github/agentic-job/merge.toml` from the same trusted checkout of
-the default branch as the standing task, never the head, and `agentic-job review task` appends it to the task under
-"Merge policy" as the owner's statement:
+The owner states whether the review job's approval is enough to merge in
+`.github/agentic-job/merge.toml` on the default branch:
 
 ```toml
 # an approving review by the review job merges by default
 merge = "agent"
 ```
 
-or `merge = "person"`, where a person approves every merge after the review.
-The file holds that one line among comments and blank lines; anything else,
-a symbolic link or more than 4 KiB fails the policy job. Without the file the
-policy is `person`, and the reviewer is told it is the default, not the
-owner's choice. The statement changes what the reviewer is told, not what
-GitHub enforces: an APPROVE is submitted under either policy, and the
-ruleset's required approvals decide what it merges. So the reviewer is told
-to review as hard under `person` too.
-
-Paths that still need the owner are listed in CODEOWNERS (`.github/`, the root
-or `docs/`), and the owner turns on **Require review from Code Owners** in the
-ruleset. The review job's approval is not a code owner's, so with that rule
-those paths wait for the owner whatever the model says; without it, CODEOWNERS
-only requests reviewers and holds nothing. The reviewer is asked to name the
-changed paths that have a code owner after its verdict line ("Code-owner paths
-(approval required only where enforced by the ruleset): …"), and to list
-there any change to the policy file or to a CODEOWNERS file, which changes
-who decides even before CODEOWNERS covers it; that line is the
-model's reading and informs, while GitHub's rule is what holds the merge. The
-reviewer cannot see the ruleset, so it is told to review those paths as hard
-as any other. Only the owner can add CODEOWNERS, since check refuses an
-agent's patch to it. Start it with the policy file and CODEOWNERS itself, so
-changing who decides takes the owner:
+or `merge = "person"`, the default. The file holds only that line and
+comments, at most 4 KiB, or policy fails. The reviewer is told the policy; branch
+rules still decide what an approval merges. To keep paths for a person, list
+them in CODEOWNERS, naming a person rather than the automation account, and
+turn on **Require review from Code Owners**:
 
 ```text
 # Paths that need the repository owner's review whatever the merge policy
@@ -405,446 +123,160 @@ changing who decides takes the owner:
 /.github/CODEOWNERS @OWNER
 ```
 
-For example, for this repository the owner is `@cgwalters`: the person, since an
-organization cannot be a code owner, and not the `cgwalters-bot` account
-automation acts as, since the rule holds nothing if automation can approve as
-the code owner. The owner adds the file, as check refuses it from any run, and
-until **Require review from Code Owners** is on these paths wait for no one.
+Check refuses an agent's patch to either file.
 
-Check refuses an agent's patch to either file, `.github/` exemption or not
-([safe outputs](safe-outputs.md)), so no implement or fix run can change the
-policy or drop the owner's review. The code that states the policy
-(`crates/agentic-job/src/review/`, `workflow/review.md`, `review.yml`) is reviewed like
-any other change to the harness; an owner who wants it held for a person
-lists it in CODEOWNERS too. Dispatched reviews
-(`dispatch.yml`'s `review` profile) are not given a merge policy.
+## Optional features
 
-### Compatibility status
+Each is a repository variable, off by default.
 
-`review` is a compatibility status, not the merge gate. It must not be added
-to the ruleset while `main` has a merge
-queue. The status is reported on the pull request's head commit only:
-`review.yml` has no `merge_group` trigger, and merge-group runs are not
-reviewed. A queue
-[waits for every required check](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
-on the merge group's own commit, and a ruleset's required status checks cannot
-be limited to pull requests, so a required `review` would hold each queued pull
-request until the queue's timeout removes it. How to report on a group is
-not designed.
+| Variable | Effect |
+| --- | --- |
+| `AGENT_REAL_REVIEWS=true` | [Post the verdict as a review](#real-reviews-and-the-poll-contract), not a comment. |
+| `REVIEW_CARRY_APPROVAL=true` | [Carry an approval](#carried-approvals) across a rebase or rustfmt-only push. |
+| `REVIEW_HISTORY=true` | [Give the reviewer earlier reviews](#review-history). |
+| `REVIEW_RECORD_ONLY` | [Record, don't review](#record-only-pushes), pushes by the listed user ids. |
 
-## Carried approvals
+### Real reviews and the poll contract
 
-Every push used to start a full review, and a rebase onto the base branch
-or a rustfmt-only commit cost as much as the change it moved
-([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)). With
-the repository variable `REVIEW_CARRY_APPROVAL=true` (unset is off), the
-`carry` job, on a `synchronize`, carries the previous head's approval to
-the new head instead of running the agent, when:
+The `submit` job posts an `APPROVED` or `CHANGES_REQUESTED` review bound to
+the head, with inline findings as its comments; when nothing can be
+submitted, the verdict is a comment as before
+([`submit.rs`](../crates/agentic-job/src/review/submit.rs)). An APPROVE is
+submitted whatever files the pull request changes, workflows and review
+instructions included; only branch rules, code owners and required checks
+stand between it and a merge. Enable
+**Settings → Actions → General → Allow GitHub Actions to create and approve
+pull requests**. The reviewer is `github-actions[bot]`, so its own pull
+requests can't use this path.
 
-- the previous head (the push's `before`) has the status `review`
-  `success`, set by the job token's bot, as the status job sets it after an
-  approval or a carried one; and
-- the new head's tree is exactly the approved changes replayed onto the
-  base branch: `git merge-tree` of the approved head, from its merge base
-  with the base branch onto the new head's, writes the new head's tree; or
-  it differs from that tree only in changed Rust files that are `rustfmt
-  --edition 2024`'s output for it, run without the trees' configuration.
+Pollers should read reviews, not comments or the status: the latest
+non-pending, non-comment review by `github-actions[bot]` approves only if it
+is `APPROVED` with `commit_id` equal to the current head. Move pollers before
+turning this on.
 
-Tree equality, not `git patch-id`, which ignores whitespace and so
-indentation that changes what Python or YAML means; a rebase whose
-conflicts were resolved by hand is not carried. Anything else, more than
-100 changed files or a file over 1 MiB to format, or any failure (a head
-the forge no longer serves, no `rustfmt` on the runner) runs the review. A
-`/review` always runs one.
+With `merge = "agent"`, one required approval lets the bot's approval count
+on paths that don't require a human code owner. With `merge = "person"`, the
+setting informs the reviewer but does not enforce a human approval: the bot
+can still satisfy a one-approval rule. To require a human for every change,
+cover every path with human CODEOWNERS and require their review. In either
+mode, dismiss stale approvals, keep `ci` and the
+[workflow-ingress check](workflow-ingress.md) required, and give the
+automation no bypass.
 
-`agentic-job review carry` fetches the base branch and both heads into a
-scratch repository with the job's read token (`contents: read`, and
-`statuses: read` for the previous head's status). It runs git and
-rustfmt from an empty directory, so no configuration, hook, attribute or
-toolchain file from either head applies, and none of their code runs. rustfmt
-only parses the head's Rust files, outside the sandbox. The status then
-says `Approval of SHA carried forward: rebase` or `format`. Where
-[real reviews](#real-reviews-and-the-poll-contract) are on, `submit`
-submits an `APPROVED` review at the new head whose body, the binary's own
-text, names the approved head and why, so pollers and the ruleset see an
-approval of the current head; the status is success only once it is
-submitted. No comment is posted otherwise.
+### Carried approvals
 
-What this trusts: the approved changes on a moved base were never reviewed
-against it, as with any approval kept across a rebase; `ci` and the other
-required checks still run on the new head. A formatter-only change is
-taken to mean nothing, which is not so for a `.rs` file read as data (a
-fixture) or for `line!()`, and a file of an older edition is formatted as
-2024's. Someone with write access can set a `review` status by hand, or
-have a workflow of a branch set one as the job token's bot, as such a
-workflow can already submit a review as that bot.
+A push whose head is exactly the approved changes replayed onto the base, or
+differs only by `rustfmt` output, keeps the approval without running the
+agent ([`carry.rs`](../crates/agentic-job/src/review/carry.rs)). This trusts
+that the change still holds on the moved base, and the previous head's
+`review` status, which someone with write access could set; `ci` still runs. `/review`
+always runs a full review.
 
-## Review history
+### Review history
 
-Each round of review used to start fresh, without the review job's own
-earlier verdicts, so it could find a new edge case instead of checking
-the last ones, and every round of CHANGES cost a fix run and another
-review ([#2190](https://github.com/cgwalters-forge/agentic-job/issues/2190)).
-With the repository variable `REVIEW_HISTORY=true` (unset is off),
-`review.yml` passes the pull request's number to `agent.yml` as
-`review-history`. Before `secure-host`, and so before anything of the
-agent's runs, the agent job runs `agentic-job review history`, the policy
-job's binary, with the job's read-only token, which the agent gets
-anyway; `run --review-history` puts what it wrote in the agent's home as
-`review-history.json`, and the brief names it untrusted data. A failure to
-write it is a warning, and the review runs without it.
+The reviewer gets earlier verdicts and comments from people with write
+access, as untrusted data, and first says whether each earlier finding is
+resolved ([`history.rs`](../crates/agentic-job/src/review/history.rs)).
+Scoping a re-review to the latest changes also needs `AGENT_REAL_REVIEWS`.
+To dispute a finding, cite its ID in a "Disputed" section near the top of
+the description before the next review; the reviewer changes a finding only
+if the code confirms the evidence.
 
-The file holds, sanitized as an event's text is and cut to 4 KiB a text
-and 512 KiB in all:
+## Shared code review task
 
-- `reviews`: the review job's verdicts, the latest ten, oldest first.
-  A verdict is a review by `github-actions[bot]` whose body starts with
-  `VERDICT:`, or apply's verdict comment (its `agentic-job-applied`
-  name) by that bot or someone with write access (below). Each has its head (the
-  review's commit, or the first of the pull request's commits a comment's
-  verdict names), its verdict
-  and body, and its `findings`: each line of the body tagged blocker,
-  important or nit, with the lines after it, then each inline comment, thirty
-  in all, with
-  an ID such as `R101.2` (`C` for a comment), the severity, and the file and
-  line where the comment is on one or the text names one (`src/a.rs:12`).
-  A finding a later verdict lists on a `Resolved:` line has `resolved_by`,
-  that verdict and its head. Also each verdict's `replies` to its inline
-  findings, and `commits_since`, the subjects of the commits after its
-  head, or `head_on_branch: false` where a force-push removed it.
-- `conversation`: the pull request's other comments, the latest thirty.
-- `last_reviewed_head`, the latest verdict's head.
-
-To fit, the oldest comments go first, then the oldest verdicts; the latest
-verdict stays, with its oldest replies and last findings dropped and
-`cut: true` where it must.
-
-Replies and conversation comments count only from someone with write
-access, by the forge's collaborator permission API (admin or write;
-`author_association` does not tell: an organization member may only read
-the repository), and the bot's own comments that apply did not post.
-Nothing apply posts counts: those are the words of other runs' agents,
-which read the pull request, posted with the job token or the PAT user's
-write access. Apply marks its comments but not its replies to a review
-thread, so no reply by the bot, or by an account that posted a marked
-comment on the pull request, counts either.
-
-Even so, nothing in the file settles a finding. The [task](../workflow/review.md)
-asks the reviewer to say first, per earlier finding, whether the new head
-resolves it, confirmed in its code and citing the commit, and to record
-each resolved one on a `Resolved:` line, so the next round's file carries
-it; a `resolved_by`, reply or comment is a claim to check, and a finding
-that still holds is raised again. Related findings are grouped by their
-verified cause, not just a similar symptom.
-
-With `REVIEW_HISTORY=true`, authors and maintainers can put evidence disputing
-earlier findings in a "Disputed" section near the top of the PR description.
-Automated fix runs leave the description alone. Editing it doesn't trigger a
-review: add the dispute before the next review starts, or ask someone with
-write access to request `/review`. An edit after policy captures the description
-isn't visible to that run. The reviewer answers each matching history ID once;
-IDs no longer in the supplied history are ignored. It drops or downgrades a
-finding only if the admitted code confirms evidence that refutes it or changes
-its severity.
-
-The reviewer still examines the whole diff. Re-review scoping needs a verified
-comparison with the latest verdict across submitted reviews and PR comments:
-a review must have actually run at an independently bound head whose tree and
-base can be compared with the current revision. An unbound verdict comment,
-a carried approval or an unavailable
-comparison after a rewrite leaves the first-review rules in force. Earlier
-findings and disputes remain leads, not proof. The SHA in a verdict comment
-is prose, so scoped re-reviews need verdicts submitted as reviews, which
-[`AGENT_REAL_REVIEWS=true`](#real-reviews-and-the-poll-contract) provides.
-With it unset, or where submission fell back to a comment, history still
-tracks findings and disputes, but each re-review applies first-review rules.
-
-With that comparison, an unresolved blocker still blocks if it meets the
-ordinary rubric. A material, concrete regression introduced or made reachable
-since the last review can also block, even if it occurs in older code. In that
-case, show why the last reviewed revision did not put the failure in scope.
-Another failure already in scope at that review blocks only with a concrete
-trigger and an evidenced reason the last review missed it, such as its Tried
-section showing it never ran the failing invocation; an unknown reason sends
-it to Follow-ups. A confirmed failure of the change's
-main purpose, data loss, security hole or dependency-integrity failure that the
-PR introduces or makes reachable can still block without an explanation for the
-miss. The ordinary severity limits still apply.
-Check holds the verdict to its usual bounds;
-the `Resolved:` lines are text in it, which only the next history reads.
+A trusted caller of `policy.yml` or `agentic-job.yml` can set
+`review-shared-task: OWNER/REPO@COMMIT` to use a public repository's
+`workflow/review.md` at a full commit SHA. Set it in the calling workflow,
+never from event data, on `pull_request_target`, `issue_comment` or a
+dispatch from the default branch. `review-task` may name a committed file of
+local additions. A missing or blank file fails policy, and a task over
+262,144 bytes is refused rather than cut.
 
 ## Dispatched reviews
 
-A review on every push spends whatever model the variables name, out of
-sight of the scheduler that paces every other run by pool: on 28 October
-about 95 reviews took one subscription to 79% of its weekly limit
-([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)).
-For example, agent-board's pass can start reviews itself instead
-([its `pr.reviewPools`](https://github.com/cgwalters-forge/agent-board/blob/main/docs/pass.md#reviews)),
-by dispatching `review.yml` on the default branch with three string
-inputs:
-
-- `pr`, the pull request's number;
-- `head`, the full 40-hex SHA the pass read as its head;
-- `pool`, the inference pool the pass chose.
-
-The run is named `review OWNER/REPO#PR HEAD (POOL)`, which is how the pass
-finds it; event runs keep GitHub's default name. A caller that is itself
-dispatched passes the same three inputs through `workflow_call`.
-
-The `pool` job maps the pool with the repository variable `REVIEW_POOLS`
-alone, a JSON object such as
-`{"openai": {"agent": "opencode", "model": "praxis/gpt-6.1-sol"}}`, each
-pool with an `agent`, a `model` and optionally `config`, the runner
-configuration in place of `AGENT_CONFIG`; `AGENT_CONFIG_REPO` and
-`AGENT_CONFIG_PATH` go only to an opencode or Vibe pool. A pool the
-variable does not map, or one whose values are not single words, fails
-the run there: it never falls back to `AGENT_MODEL`, which would spend a
-pool the pass did not pace, and no model, endpoint or path is taken from
-the inputs. The policy job then checks the inputs and binds the pull
-request, as an operator's dispatched review does
-(`agentic-job review dispatch-target` and `resolve-dispatch`, with
-`review-head`): `pr` must be a positive number and `head` an exact SHA
-before the pull request is read, and the pull request must be open, not a
-draft, on the configured base and still at `head`. Anything else fails the
-run before inference. The task is
-[`workflow/review.md`](../workflow/review.md) with its merge policy, as for
-an event, then the pull request's number, head, and title and body fenced
-as untrusted text; the bounds are `review.toml`'s. The task file and the
-bounds, like the workflow itself, are the dispatched ref's, the default branch where the pass
-dispatches. A dispatch has no event admission, nor the `if:`'s author
-check: dispatching takes `actions: write`, and a token that holds it, such
-as the pass's bot's, is trusted to spend a review on any open pull
-request, as with an operator's dispatched review.
-
-The review, check, submit and status jobs then run as for an event, on
-`head`. `submit` reads the pull request again before it submits, and
-submits nothing when its head moved; `status` sets the status only while
-the pull request is the one open at `head`. Without
-[real reviews](#real-reviews-and-the-poll-contract), apply's comment names
-the head it reviewed and is posted whatever the current head. The agent
-job's concurrency group is one per pull request for events and dispatches
-alike, and a dispatch, like a push, cancels the review in progress, so a
-superseded head's review stops when the next head's starts; an admitted
-`/review` still waits rather than cancel one, and an unadmitted comment
-never enters the group.
+A scheduler can start reviews itself, to pace them with its other runs, by
+dispatching `review.yml` on the default branch with `pr`, `head` (the full
+SHA) and `pool`. `REVIEW_POOLS` maps each pool to an `agent`, a `model` and
+an optional `config`, for example
+`{"pool-a": {"agent": "opencode", "model": "MODEL"}}`; an unmapped pool
+fails the run. The pull request must be open, not a draft, and still at
+`head`. The run is named `review OWNER/REPO#PR HEAD (POOL)`.
 
 ### Record-only pushes
 
-Dispatching reviews saves nothing while each push still starts one. With
-the repository variable `REVIEW_RECORD_ONLY`, a JSON array of user ids
-(unset is off; for example, `[12345]`), a
-`pull_request_target` event for a pull request from a fork by one of those
-authors runs the policy job as before, tries a
-[carried approval](#carried-approvals) on a `synchronize` whether or not
-`REVIEW_CARRY_APPROVAL` is set, and otherwise only records that the head
-needs a review: the `record` job sets the status `review` `pending` where
-the head has no `review` status yet. No register, agent, check, submit,
-apply or status job runs, so there is no inference and no verdict, neither
-approval nor failure. The pass then dispatches the head's review. The
-record job is outside the agent's concurrency group, so it cannot cancel a
-dispatched review of the same head that started first. Other authors'
-pull requests, a pull request from a branch of the repository itself and
-`/review` keep their review on the event.
-
-### Rollout
-
-**Caller-specific example:** the tracker/actions integration below illustrates
-coordinated rollout; other schedulers supply their own configuration.
-
-Turning this on changes who starts reviews, so the pieces move together;
-nothing here enables it:
-
-1. Each followed repository's review entrypoint takes the dispatch inputs
-   and maps pools: this file at a pin with this change, or
-   cgwalters-forge/actions' `cgwalters-review.yml`, which composes
-   `policy.yml` itself and so needs the same `workflow_dispatch` inputs,
-   `run-name`, pool mapping, `review-head`, concurrency and record job.
-   Each repository sets `REVIEW_POOLS`. The bot's token needs `actions:
-   write` there to dispatch.
-2. In one change: tracker's `.github/pass.json` sets `pr.reviewPools`, and
-   each followed repository sets `REVIEW_RECORD_ONLY` to the bot's id.
-   Before it, a head gets a review on both paths; after it without
-   `pr.reviewPools`, none.
-
-Reporting what reviews spend next to dispatches remains
-([#2163](https://github.com/cgwalters-forge/agentic-job/issues/2163)).
+With `REVIEW_RECORD_ONLY`, a JSON array of user ids, an admitted event on a
+fork pull request by one of those authors (opened, synchronized, reopened or
+marked ready) sets `review` to `pending` for the scheduler to dispatch. On
+`synchronize`, the wrapper tries to carry an approval first. Recording skips
+heads with an existing status, so an already reviewed head normally leaves no
+fresh `pending` marker. GitHub cannot make the read and write atomic: a
+status posted between those steps can still be overwritten. `/review` and pull
+requests from the repository's own branches still review as usual. Enable it
+together with the scheduler, or heads get two reviews or none.
 
 ## Draft classifier reviews
 
-**Caller-specific example:** this section describes agent-board's classifier
-contract, not a required coordinator or setup for agentic-job.
-
-agent-board's pass can sort its draft pull requests into quick and deep
-by a review's classification
-([its draft review result contract](https://github.com/cgwalters-forge/agent-board/blob/main/docs/poll.md#draft-review-result-contract)):
-an approval by `github-actions[bot]` at the head, holding one
-`agent-board-draft-review` JSON fence of schema
-`agent-board/draft-review/v1` and the one gh-aw run marker. The threat
-is laundering: agent prose, an ordinary review or a carried approval
-passed off as a checked classification of the pull request's current
-head, title and description. So the binary carries the result through
-the review's existing stages, off by default, and nothing here turns it
-on.
-
-The trusted caller opts in with the `policy.yml` boolean input
-`review-draft-classifier: true` (default `false`). Choose it in trusted
-caller configuration, never from `workflow_dispatch` fields, head code
-or agent output. This is for a `workflow_dispatch` exact-head review:
-`event: false`, `review: true`, `kind: analysis`, `review-item` and
-`comment-target` both the PR number, `review-head` the requested SHA,
-`repo` and `base` the target, and the trusted task and resolved agent/model
-as for an ordinary exact-head dispatch. Use `outputs: add_comment,noop`,
-`max-outputs: '1'`, `notify: none` and `apply-partial: false`. Do not set
-`push-item` or redirect the output repository. Inline comments would take
-findings out of the body the pass reads. The existing `review.yml` caller
-does not opt in. With it:
-
-- `review resolve-dispatch` admits a draft, and only a draft, open on the
-  configured base at the requested head, with a title. Without it a draft
-  is refused as before.
-- `review task --pull-request FILE` adds, after the merge policy and
-  before the pull request's untrusted text, the fields to return, with
-  the bound repository, number and head. The reviewer copies the title
-  and body from that text; check refuses a result that does not match
-  them, so a title or body the task shows sanitized or cut cannot be
-  classified, nor can one the collector's sanitizing changes in the
-  verdict.
-- `review verdict --pull-request FILE`, where FILE is the policy job's
-  `resolve-dispatch` snapshot, takes one verdict comment, or a noop, and
-  no inline comment. The comment holds exactly one fence, opening at the
-  start of its line, as its only code block, and no HTML comment, so the
-  run marker submit adds is its only one. The JSON has exactly the
-  schema's fields: an unknown, missing or repeated field, another schema,
-  evidence, a reason or an architecture finding that is empty, more than
-  one line or over 1024 bytes, or a verdict word that is not one
-  lowercase word, is refused. Its `repository`, `pr`, `reviewed_head`,
-  `title` and `description` must equal the snapshot's, the body (`""` for
-  none). The comment is at most 7168 bytes. The step notes whether the
-  pass may count the result quick: only `pass`, `matches` and `none`, a
-  known category and no architecture finding; any finding is deep.
-- `review submit`, with `BASE` set, refuses a carried approval and checks
-  the output again, then reads the pull request and submits nothing,
-  with a notice, unless it is still open, a draft, on `BASE`, at the
-  reviewed head, with the title and description the result names. The
-  body, footer and run marker included, must be at most 8192 bytes, the
-  pass's bound, or the job fails without posting. An edit between that
-  read and the submission is not seen here; the pass compares them again.
-  As with a moved head, a submission skipped this way leaves the verdict
-  to apply's comment, result included, which sets the `review` status as
-  any posted verdict does; the pass reads reviews, not comments, so the
-  draft stays deep. The freshness check comes before the search for this
-  run's earlier review, so a re-run after such an edit posts that
-  comment even where an earlier attempt submitted the review.
-
-Without the opt-in, `review verdict` and `review submit` refuse any
-verdict, or inline finding, with a line that opens an
-`agent-board-draft-review` fence, so neither an ordinary review nor a
-renamed writer job can post a result; prose naming the fence is still
-accepted. The
-verdict decides the review as for any other: only APPROVE submits
-`APPROVED` at `commit_id`, CHANGES a change request with its result,
-and a failed, cancelled or stopped run or a noop submits nothing. The
-idempotency and lost-response guards, the 422 comment, the submit job's
-`GITHUB_TOKEN` and the sandbox's credential-free head fetch are
-unchanged; it grants no fix, ready, promotion or merge authority beyond
-the approval any review submits. The pass still applies its own file,
-size, CI and run provenance checks.
+A scheduler can sort drafts by a checked classification: an approval holding
+one `agent-board-draft-review` fence of schema `agent-board/draft-review/v1`.
+To stop agent prose or an ordinary review being passed off as one, this is
+off unless the trusted caller sets the `policy.yml` input
+`review-draft-classifier: true` on an exact-head dispatch with
+`outputs: add_comment,noop`, `max-outputs: '1'`, `notify: none`,
+`apply-partial: false`, and `review-item` and `comment-target` both the pull
+request number, as well as the settings of any exact-head review
+(`review: true`, `event: false`, `kind: analysis`, a real agent and model).
+Set `review-task` to a nonempty task file path relative to the trusted base
+checkout. A shared review task does not replace this input.
+Policy refuses a dispatch without the required settings
+([`mod.rs`](../crates/agentic-job/src/review/mod.rs),
+[`classifier.rs`](../crates/agentic-job/src/review/classifier.rs)), so
+`review.yml` itself can't run one; it needs its own caller of `policy.yml`.
 
 ### Checked handoff to a wrapper
 
-Pin `policy.yml`, `check.yml` and their binary together at a revision that
-supports the input. Pass `policy: ${{ toJSON(needs.policy.outputs) }}` to
-check, as for ordinary reviews. An admitted classifier dispatch emits
-`review-draft-classifier: 'true'` and includes `dispatch-review.json` in
-`policy-artifact-id`. The file is the same GitHub API snapshot policy used
-to write the task, not another read after the agent runs. Check downloads
-it by the trusted policy artifact ID, separately from proposals. It binds
-the snapshot's repository, PR, head and base to the policy outputs, and
-the verdict command matches the result's exact title and description to
-that snapshot. Mode and evidence are not separate check inputs.
-
-For the downstream wrapper's submit path, require the policy opt-in, a
-successful agent exit (`0`), successful check, a nonempty released check
-artifact ID and a checked `APPROVE` or `CHANGES`; a verdict word alone is
-not evidence that check finished. Download `agent_output.json` from that
-checked artifact by ID in the same run, never from the agent or from a
-previous run. Run `review submit --accepted` on that file with the existing
-submit environment, taking `PULL`, `HEAD_SHA` and `BASE` from policy's
-`comment-target`, `review-head` and `base` in the target repository. Set
-`REVIEW_DRAFT_CLASSIFIER: 'true'` from policy's opt-in, not dispatch, and
-name the submit job `agent-board-review-result-v1` only in that mode. Do not
-use the carried approval path. Submit revalidates the live PR as described
-above, and the poller must revalidate again before using the result. No
-caller pin, release, publication setting or write permission changes here.
+Pin `policy.yml`, `check.yml` and the binary together, and pass
+`policy: ${{ toJSON(needs.policy.outputs) }}` to check. Submit only after the
+agent exits 0, check succeeds with a nonempty artifact ID, and the verdict is
+a checked APPROVE or CHANGES; take `agent_output.json` from that artifact in
+the same run, never a carried approval, and run
+`agentic-job review submit --accepted agent_output.json --output "$GITHUB_OUTPUT"`
+with the environment of `review.yml`'s
+[`submit` job](../.github/workflows/review.yml): `REAL_REVIEWS: 'true'`,
+`CHECK_RESULT`, `AGENT_EXIT` and `VERDICT` from those jobs, or it posts
+nothing. Take `PULL`, `HEAD_SHA` and `BASE` from policy's `comment-target`,
+`review-head` and `base`, and `REVIEW_DRAFT_CLASSIFIER` from policy's
+`review-draft-classifier` output, never from dispatch input. Name that job
+`agent-board-review-result-v1`, only in this mode. The consumer should check
+the live pull request again before using the result.
 
 ## Configuration
 
-`review.yml` has no network or inference setup of its own; the deployment
-supplies both, from what the repository owns, never from inputs a
-dispatcher could set:
-
-- **Network.** The agent job runs on `vars.AGENT_RUNNER` (default
-  `ubuntu-26.04`). Where that runner cannot reach the inference proxy, the
-  caller adds a [local composite action](https://docs.github.com/en/actions/sharing-automations/creating-actions/creating-a-composite-action)
-  at `.github/agentic-job/network/action.yml` in its own repository: a VPN
-  or tailnet join, for example. The register job runs it before it
-  registers the run, and the agent job (`agent.yml`, called with
-  `network: true`) runs it as root after `prepare` and before
-  `secure-host`, so before anything of the agent's is on the machine;
-  both skip it when the file is absent, the default. It comes from a
-  checkout of the trusted base (the commit the policy job decided), never
-  the pull request's head, so a pull request cannot change what runs
-  there: changing it takes a merge to the base branch, like changing
-  `review.yml`. It gets no repository secret. The register job's identity
-  token is there for a federated join; the agent job has none, since the
-  agent is the runner's user. So the step may leave the agent job a
-  credential of its own minting as its `secret` output: `review.yml`
-  passes it to `agent.yml` as the secret `NETWORK_SECRET`, which gives it
-  to the step there alone, as its `secret` input. It has to be spent by
-  that join, as a single-use key is: whatever is still valid after
-  `secure-host` is the agent's. This repository's step mints such a key.
-- **Inference.** The variables below name the proxy and the agent; nothing
-  in `review.yml` defaults to a deployment's.
-
-This repository's own review gate, the `pull_request_target` caller of the
-same file, keeps working through that route: its network step is
-[`.github/agentic-job/network`](../.github/agentic-job/network/action.yml),
-which joins this deployment's tailnet, and its variables name this
-deployment's proxy. Other repositories of this deployment call
-`cgwalters-forge/actions`' `cgwalters-review.yml`, which composes the same
-jobs at a release with that join. The inline join this replaces ran
-here; the network step itself has not yet run on a real pull request.
-It needs these repository or organization variables, and with a broker no secret:
-
 | Variable | |
 | --- | --- |
-| `AGENT` | `claude`, `opencode` or `vibe`; unset fails the run rather than fall back to the scripted agent |
-| `AGENT_MODEL` | the model, as the proxy serves it |
-| `INFERENCE_URL`, `INFERENCE_AUDIENCE` | the proxy, and the audience of the run's identity token |
-| `INFERENCE_REGISTER`, `INFERENCE_PROVIDER` | optional; `api-key`, a provider's API key in place of a broker ([inference](inference.md#a-provider-api-key)), is refused for now, as in `agentic-job.yml`: the agent is the runner's user, which would hold the key |
-| `AGENT_RUNNER` | optional, a runner label as JSON |
-| `AGENT_CONFIG` | optional, the caller's runner configuration file; default this repository's [`hosted.toml`](../.github/agentic-job/hosted.toml) at the called commit, written for `ubuntu-26.04` |
-| `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, where opencode's or Vibe's configuration is; passed only when `AGENT` is `opencode` or `vibe`, as in `dispatch.yml`, so it must hold that agent's file |
-| `REVIEW_BOT_IDS` | optional, a JSON array of the user ids of bots whose pull requests are reviewed automatically ([above](#pull-request-review)); its bounds must list their logins too |
-| `REVIEW_CARRY_APPROVAL` | optional, `true` carries an approval across a rebase or rustfmt-only push ([above](#carried-approvals)) |
-| `REVIEW_HISTORY` | optional, `true` gives the agent the pull request's earlier reviews ([above](#review-history)); scoped re-reviews also need `AGENT_REAL_REVIEWS` |
-| `REVIEW_POOLS` | for dispatched reviews, a JSON object mapping each pool to its `agent`, `model` and optional `config` ([above](#dispatched-reviews)); unset refuses every dispatch |
-| `REVIEW_RECORD_ONLY` | optional, a JSON array of user ids whose fork pull requests' pushes only record that the head needs a dispatched review ([above](#record-only-pushes)); for them it also carries approvals as `REVIEW_CARRY_APPROVAL` does, whether or not that is set |
+| `AGENT` | `claude`, `opencode` or `vibe`; required |
+| `AGENT_MODEL` | the model, as the inference proxy serves it |
+| `INFERENCE_URL`, `INFERENCE_AUDIENCE` | the proxy, and its identity token audience |
+| `INFERENCE_REGISTER`, `INFERENCE_PROVIDER` | optional; `api-key` is refused |
+| `AGENT_RUNNER` | optional runner label as JSON; default `ubuntu-26.04` |
+| `AGENT_CONFIG` | optional; default [`hosted.toml`](../.github/agentic-job/hosted.toml) at the called commit |
+| `AGENT_CONFIG_REPO`, `AGENT_CONFIG_PATH` | optional, opencode's or Vibe's configuration |
+| `REVIEW_BOT_IDS` | optional, [bots reviewed automatically](#when-a-review-runs) |
+| `REVIEW_POOLS` | for [dispatched reviews](#dispatched-reviews) |
 
-`SAFE_OUTPUTS_PAT` is optional and goes only to apply, to post as a user
-rather than `github-actions[bot]`; real reviews always use the submit job's
-token. `INFERENCE_API_KEY` is still declared, so that a caller that
-passes it is not refused, and goes to no job. The workflow, its steps
-and the network step are the base branch's, and the head is data the
-agent reads. The register job's identity token names `review.yml` as its
-`job_workflow_ref`, so the broker, and a network step's federated identity,
-have to admit it: here the `any_workflow` entry narrowed to this repository
-([inference.md](inference.md#which-workflows-a-broker-admits)).
+[Optional features](#optional-features) add their own variables. The secret
+`SAFE_OUTPUTS_PAT` optionally lets apply post as a user. The broker must
+[admit `review.yml`](inference.md#which-workflows-a-broker-admits).
+
+If the runner can't reach the proxy, add a
+[composite action](https://docs.github.com/en/actions/sharing-automations/creating-actions/creating-a-composite-action)
+at `.github/agentic-job/network/action.yml`, such as a VPN join. It runs from
+the trusted base, with no repository secret, before registration and before
+the sandbox is set up. A `secret` it outputs goes to the agent job's join;
+make it single-use, as anything still valid afterwards is the agent's.
 
 ## Another repository
 
-Another repository calls this workflow at a pinned commit:
+Call the workflow at a full commit SHA you have reviewed:
 
 ```yaml
 name: review
@@ -871,99 +303,41 @@ jobs:
       SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
 ```
 
-`COMMIT` is the full SHA of a reviewed commit of this repository. The caller
-copies [`workflow/review.toml`](../workflow/review.toml),
-[`workflow/review-command.toml`](../workflow/review-command.toml) (both with
-its own `repos` and `bases`) and [`workflow/review.md`](../workflow/review.md)
-to the same paths, sets the variables above and, if its runner needs one,
-adds its own [network step](#configuration). Its own
-`.github/agentic-job/merge.toml` and CODEOWNERS, if any, are its
-[merge policy](#merge-policy); without them it is `person`. It needs no copy of
-`hosted.toml`: without `AGENT_CONFIG` the policy job reads the one in
-this repository at `COMMIT`, so a reviewed pin also pins the runner
-hardening, and a caller on another image names its own file instead. A
-caller that kept an edited copy sets `AGENT_CONFIG` to its path, or the
-copy is no longer read. The broker entry for it is the
-`called_workflows` form, naming `review.yml` at that commit.
+Copy [`workflow/review.toml`](../workflow/review.toml),
+[`workflow/review-command.toml`](../workflow/review-command.toml) and
+[`workflow/review.md`](../workflow/review.md) to the same paths. In **both**
+bounds files, name your repository and your
+[escalation label](#bounded-security-escalation), and create that label:
 
-To take [dispatched reviews](#dispatched-reviews), the caller also adds
-`workflow_dispatch` with the string inputs `pr`, `head` and `pool`, lets
-`github.event_name == 'workflow_dispatch'` through its `if:`, passes the
-three inputs in `with:`, and names its dispatched runs, as the called
-file's `run-name` names no caller's run, without renaming its event runs:
+```toml
+repos = ["OWNER/REPO"]
+bases = ["main"]
+# ...
+
+[github.outputs]
+# ...
+add_labels = { max = 1, allowed = ["LABEL"] }
+```
+
+With a file that doesn't name your repository, every review it governs,
+automatic or `/review`, fails in the policy job, with nothing posted on the
+pull request. If the reviewer asks for a missing label, apply fails. In
+comment mode that means `review` is `failure`. With
+`AGENT_REAL_REVIEWS=true`, a real approval can post before apply runs; it
+still counts as `success` even if apply fails. Don't rely on label failure
+to hold a merge.
+The stock wrapper reviews pull requests on `main` only: changing
+`bases` does not let it review another branch. Set the
+[variables](#configuration), and register `review.yml` at that commit with
+the broker in its `called_workflows` form.
+
+For [dispatched reviews](#dispatched-reviews), also add `workflow_dispatch`
+with string inputs `pr`, `head` and `pool`, let it through the `if:`, pass
+the inputs in `with:`, and name the runs:
 
 ```yaml
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('review {0}#{1} {2} ({3})', github.repository, inputs.pr, inputs.head, inputs.pool) || '' }}
 ```
 
-A caller whose run is a `workflow_dispatch` for anything else must not
-call `review.yml` from it: without a known `pool` that run fails.
-
-## Tests
-
-Dispatched reviews use `agentic-job review dispatch-target` before the policy
-job's read-only API call, then `review resolve-dispatch --pull-request FILE`
-to bind the response to the selected open PR, configured repository and base,
-and exact head SHA; with `REQUESTED_HEAD` (`review-head`), also a pull request
-that is still at that head and not a draft (unless opted into draft
-classification), and a pool that resolved to a supported agent and a model.
-Neither command uses the fork's branch name. The
-record job's `review status` with `RECORD=true` sets only a pending status,
-and none over an existing one. An event
-review's admission is narrowed by `review admit`, and its task, with the
-merge policy, written by `review task`. Rust's `review::tests` pins routing
-and admission refusals, the request bounds against `review.yml` and its
-bounds files, the merge policy file and the statement the task gets from it,
-including the example above; `tests/review.rs` exercises the CLI stages and
-refuses oversized or symlinked API snapshots.
-
-After the agent, check.yml's `review verdict` and `review fold`, and
-review.yml's `review submit` and `review status`, run the same binary.
-`review::verdict::tests` covers the verdict grammar, hostile outputs, inline
-findings and their folding into the comment, and the refusal text.
-`review::submit::tests` covers opt-in submission, both review states, the
-checked body with its run marker at the exact commit, stale heads, stopped or
-failed runs and noops, outputs that do not match the verdict, re-runs and
-lost responses that must not post twice, a 422 posted as the comment, inline
-comments placed in the review or moved to its body, and the status for each
-combination of check, verdict, apply and open pull requests at the head,
-and a carried approval's review and status. `review::classifier::tests`
-and the classifier cases in the verdict, submit and dispatch tests cover
-the opt-in, drafts refused without it, malicious, repeated, unknown and
-oversized results, wrong targets, heads and bases, edited titles and
-bodies, closed, retargeted or readied pull requests, stopped runs and
-re-runs; `tests/review.rs` runs the policy and check stages with it.
-`review::carry::tests` builds
-local repositories and covers which heads carry (a rebase, a recommit,
-formatter output, rebased or not) and which do not (another change,
-added spaces, a non-Rust or new file, a conflicting rebase, a failing
-formatter), with a stand-in for rustfmt, and which statuses approve.
-They use a fake API; actual forge writes are left to real workflow runs.
-
-The crate's `tests/workflows.rs` checks, by reading `review.yml`, which job
-holds which token and what the status job runs, and pins the policy job's `if:`
-that decides which authors start automatic reviews, and that the review agent
-job has no project toolchain installation or build-cache restore.
-`dispatch::tests` checks that both review prompts require code analysis without
-running checks or consulting CI, findings tagged blocker, important or nit and
-CHANGES only for a blocker. `tests/workflows.rs`'s
-`caller_network_credentials_are_spent_before_the_agent` checks that the caller's network step is
-one optional step of the register job, from its base checkout, and of
-`agent.yml`'s job when review.yml asks for it, between `prepare` and
-`secure-host`, that no workflow joins a network itself, and
-that this repository's network action pins what it uses. In the crate,
-`tests/event.rs` runs the binary against both shipped bounds files as
-`review.yml`'s `allow:` line picks them (`review_caller_bounds_gate_roles`):
-anyone's pull request event, forks included, is admitted, `/review` needs
-write, and neither file admits the other's events; `tests/policy.rs` checks
-that both allow only the analysis outputs. CI's `e2e-review` runs the
-policy, agent, check and apply path with the scripted agent and no inference,
-through `agentic-job.yml`; `review.yml` itself, its network step and its
-submit and status jobs' API calls run only on real pull requests. Real-model review quality is not
-asserted.
-
-The npm registry available during this change reports `opencode-ai` latest as
-1.18.35, not a stable 2.x release. The workflow default uses that available
-release; the launcher no longer refuses versions. The 2.x migration and its
-configuration/ACP breaking-change review remain pending publication of an
-installable stable 2.x package.
+Don't call `review.yml` from a dispatch meant for anything else: without a
+known `pool`, it fails.

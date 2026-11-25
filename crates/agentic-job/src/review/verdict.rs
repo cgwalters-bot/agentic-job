@@ -3,6 +3,15 @@
 //! nothing was submitted as the review. check.yml validates with
 //! `review verdict`, and uploads `review fold`'s output for apply, which
 //! runs no binary; review.yml's submit job checks again before it submits.
+//!
+//! The first line starts `VERDICT: APPROVE` or `VERDICT: CHANGES`; the older
+//! `VERDICT: REJECT` counts as CHANGES. A redundant `item_number` equal to
+//! the reviewed pull request is accepted; any other field that would
+//! retarget the comment is refused. When nothing is submitted as a review,
+//! the inline findings are folded into the comment under "Inline findings",
+//! each under its path and line, with Markdown in the path escaped since the
+//! agent wrote it, instead of being posted as a second, `COMMENT` review by
+//! gh-aw's handler.
 
 use std::sync::LazyLock;
 

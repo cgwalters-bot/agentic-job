@@ -931,7 +931,7 @@ mod tests {
         assert!(merge_policy(&root).unwrap().set);
         // The example the docs show must be one the parser accepts (#558).
         let docs = std::fs::read_to_string(root.join("docs/review.md")).unwrap();
-        let section = &docs[docs.find("### Merge policy").unwrap()..];
+        let section = &docs[docs.find("## Merge policy").unwrap()..];
         let example = section
             .split("```toml\n")
             .skip(1)

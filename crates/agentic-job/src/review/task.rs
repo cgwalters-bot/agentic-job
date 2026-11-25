@@ -1,4 +1,10 @@
 //! Trusted code-review task composition, before publishing the policy artifact.
+//!
+//! With `review-shared-task`, the shared `workflow/review.md` comes first,
+//! then the caller's `review-task` additions, read from the checked-out Git
+//! commit rather than the worktree, then the merge guidance and the review's
+//! fenced context. The agent and the detector both read the resulting
+//! `task.md` from the policy artifact; neither adds to it.
 
 use std::path::Path;
 use std::process::Command;

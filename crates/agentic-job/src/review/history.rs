@@ -14,6 +14,16 @@
 //! posts as: apply marks its comments, but not its replies to a review
 //! thread, and both are the words of other runs' agents. The task still
 //! takes none of it as settling a finding; only the code does.
+//!
+//! The file holds `reviews`, the latest verdicts oldest first, each with its
+//! head, verdict, body, `findings` (each body line tagged blocker, important
+//! or nit and each inline comment, with an ID such as `R101.2`, `C` for a
+//! comment, and `resolved_by` where a later verdict lists it on a
+//! `Resolved:` line), `replies` and `commits_since` (or
+//! `head_on_branch: false` after a force-push); `conversation`, the pull
+//! request's other comments; and `last_reviewed_head`. To fit `MAX_BYTES`,
+//! the oldest comments go first, then the oldest verdicts; the latest
+//! verdict stays, cut and marked `cut: true` where it must be.
 
 use std::collections::HashSet;
 use std::path::Path;

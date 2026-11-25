@@ -3,6 +3,29 @@
 //! job's binary of the pinned source, never the reviewed head, and read no
 //! agent text but check's accepted upload: the verdict is one of two words
 //! check set, and the head is the one policy admitted.
+//!
+//! With AGENT_REAL_REVIEWS, submit posts the verdict once, as an
+//! `APPROVED` or `CHANGES_REQUESTED` review bound to `commit_id`, with the
+//! job's own token, and apply posts no comment. The body is check's
+//! accepted request, read from check's upload in this run rather than back
+//! from the forge, then a footer linking the agent job and gh-aw's run
+//! marker. Inline findings are the review's own comments when their path
+//! and line are in the head's diff, and go in its body otherwise, so a bad
+//! anchor neither loses a finding nor fails the submission. When nothing is
+//! submitted (a noop, a stopped run, a moved head, a failed submission),
+//! apply's comment carries the verdict instead; a 422 refusal (a locked
+//! conversation, for example) is posted here as that comment, saying why.
+//! A refusal is logged from the response body only, never its headers or
+//! URL, which hold the credential. A re-run of failed jobs posts nothing
+//! twice: it submits nothing where this run already has an applied comment,
+//! and reuses an identical review at the same head.
+//!
+//! The status is set only when the triggering pull request is the one open
+//! pull request at the head. A status belongs to the commit and the pull
+//! request's text reaches the agent, so otherwise anyone could open a
+//! second pull request at someone else's head and talk its review into
+//! APPROVE. The cost is that such a duplicate holds back the status of both
+//! until a maintainer closes it and asks for `/review`.
 
 use std::collections::HashMap;
 use std::fmt;
