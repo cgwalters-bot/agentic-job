@@ -1065,7 +1065,6 @@ mod tests {
             "without reading the implementation, exercise the changed behavior from the docs and --help alone",
             "Where trying is not possible",
             "do not skip it silently.",
-            "If the main claim fails when tried because of the change,",
             "failure of the sandbox itself goes under Tried only.",
             "Then read the diff and the code around it, and report findings and what you tried.",
             "Do not run existing test suites, formatters or linters to confirm they pass.",
@@ -1082,9 +1081,6 @@ mod tests {
             "cite files and lines for actionable findings",
             "Report every finding you can see in this one pass, not only the first.",
             "Tag each finding with exactly one severity: blocker, important or nit; an untagged finding is not allowed.",
-            "For supply-chain hardening, a blocker requires that the change newly runs third-party code with a write credential in reach, including in apply, with a PAT, in a write-permission pull_request_target job, or on the broker host.",
-            "Supply-chain hardening is wanted over time as tracked follow-ups, not as a gate on each change.",
-            "code an attacker controls to alter a published artifact or read a credential or private source; that is a blocker.",
             "VERDICT: CHANGES only when there is at least one blocker, and VERDICT: APPROVE otherwise",
             "list important findings and nits under a \"Follow-ups\" heading, each with its file and line, for later pull requests.",
             "When there is a blocker, the fix may take important findings and nits along.",
@@ -1119,6 +1115,26 @@ mod tests {
         }
         assert!(!standing.contains("merge gate for every change here"));
         assert!(!standing.contains("Without that section, a person approves every merge"));
+    }
+
+    #[test]
+    fn the_standing_review_task_blocks_only_on_regressions_or_no_delivery() {
+        let standing = standing();
+        for text in [
+            "Use the blocker rubric below for failures you observe",
+            "A blocker is a concrete defect this diff introduces or makes reachable that makes behavior worse than the base",
+            "data loss or a confirmed dependency-integrity failure this diff introduces or makes reachable, even when the faulty code is unchanged; those always block.",
+            "A dependency or pin bump that fixes something and regresses nothing is approved",
+            "a change that does not do its main stated purpose at all",
+            "Partial delivery is a follow-up, and a mismatch between the PR text and the code is fixed by rewording the text, not by blocking.",
+            "edge cases in an off-by-default option this PR adds, which nothing in it enables, are follow-ups.",
+            "A change to an existing option, enabled or not, keeps the regression bar.",
+            "pre-existing gaps, races that need an outside change mid-run, hardening, privacy or robustness the base also lacks",
+            "code an attacker controls to alter a published artifact or read a credential or private source",
+            "A change doing nothing toward its main stated purpose, or data loss, a security hole or a confirmed dependency-integrity failure introduced or made reachable by the PR, blocks without an explanation for the miss.",
+        ] {
+            assert!(standing.contains(text), "{text}");
+        }
     }
 
     /// Only triage may close issues, and only of the target: the item may

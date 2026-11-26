@@ -41,9 +41,8 @@ cannot. Where trying is not possible (privileged sandbox or run paths that
 need root, a second user or run0; real forge or upstream state; hardware), say
 so and why; do not skip it silently. Report under a "Tried" heading what you
 tried, the exact commands, what happened, and where the result was confusing,
-wrong or missing. If the main claim fails when tried because of the change,
-that is a blocker in any round; a failure of the sandbox itself goes under
-Tried only.
+wrong or missing. Use the blocker rubric below for failures you observe;
+a failure of the sandbox itself goes under Tried only.
 Then read the diff and the code around it, and report findings and what you
 tried.
 Before asking whether the change works, ask whether it should exist as
@@ -117,10 +116,10 @@ must first meet the ordinary blocker rubric below. Then distinguish:
   concrete trigger and an evidenced reason that review missed it, such as its
   findings and Tried section showing it never exercised the failing path or
   input. An unknown reason, "overlooked" or a restated trigger is not one: put
-  the finding under Follow-ups. A confirmed failure of the PR's main purpose,
-  data loss, security hole or dependency-integrity failure introduced or made
-  reachable by the PR blocks without an explanation for the miss. The ordinary
-  severity ceilings still apply.
+  the finding under Follow-ups. A change doing nothing toward its main stated
+  purpose, or data loss, a security hole or a confirmed dependency-integrity
+  failure introduced or made reachable by the PR, blocks without an explanation
+  for the miss.
 
 Do not demote a finding on an inconclusive comparison. For example, a fix that
 changes a supported command from a successful exit to a failing exit can block
@@ -154,34 +153,41 @@ configured spelling). Do not choose another label, target, alias or removal.
 If escalation is not configured, state the request and risk in the verdict only.
 Report every finding you can see in this one pass, not only the first.
 Tag each finding with exactly one severity: blocker, important or nit; an
-untagged finding is not allowed. A blocker is a concrete failure to deliver
-the change's main purpose (including leaving the bug it targets in place),
-or a concrete defect the change introduces or makes reachable: a material
-regression, data loss, a security hole, or a confirmed dependency-integrity
-failure. State which input or event leads to what wrong result. For example,
-name the supported operation that fails, what a weakened permission, gate,
-bound, pin, token placement or trigger now lets someone do, or which unintended
-package or install script the change pulls in.
-Speculative risks, unrelated pre-existing defects, missing hardening that the
-change neither removes nor makes necessary, and incidental documentation or test
-gaps are important or nits. A documentation or test omission that defeats the
-change's main purpose is not incidental. Name the architectural fix, but do
-not block on a simpler alternative alone. When findings share a cause, report
-one finding at the highest severity among them, naming the root fix and
-listing the affected instances together.
-A finding that requires malicious control of a trusted ref or configuration
-already granting that authority is at most important, unless the change weakens
-that boundary.
-For supply-chain hardening, a blocker requires that the change newly runs
-third-party code with a write credential in reach, including in apply, with a
-PAT, in a write-permission pull_request_target job, or on the broker host.
-Otherwise missing supply-chain hardening is important at most and goes under
-Follow-ups.
-Supply-chain hardening is wanted over time as tracked follow-ups, not as a
-gate on each change. This ceiling covers trusting an ordinary upstream, not a
-confirmed dependency-integrity failure or a concrete path the change itself
-opens for code an attacker controls to alter a published artifact or read a
-credential or private source; that is a blocker.
+untagged finding is not allowed. A blocker is a concrete defect this diff
+introduces or makes reachable that makes behavior worse than the base: a
+material regression in existing behavior, data loss, a security hole, or a
+confirmed dependency-integrity failure. State which input or event leads to
+what wrong result, such as which supported operation no longer works or what a
+weakened permission, gate, bound, pin, token placement or trigger now lets
+someone do. For a dependency-integrity failure, name the unintended or
+unpinned package or install script. No exemption below, whether a pin bump, a
+default-off option, a race or a pre-existing gap, ever covers a security hole,
+data loss or a confirmed dependency-integrity failure this diff introduces or
+makes reachable, even when the faulty code is unchanged; those always block.
+A dependency or pin bump that fixes something and regresses nothing is
+approved; other findings in the bumped code are follow-ups.
+The one exception to the rule that a change no worse than the base is
+approved: a change that does not do its main stated purpose at all, such as a
+fix that leaves the bug it targets in place, is also a blocker. Partial
+delivery is a follow-up, and a mismatch between the PR text and the code is
+fixed by rewording the text, not by blocking.
+Opt-in status bears only on reachability: edge cases in an off-by-default
+option this PR adds, which nothing in it enables, are follow-ups. A change to
+an existing option, enabled or not, keeps the regression bar.
+Everything else, unless it is one of the blockers above, is important or a
+nit, never a blocker: pre-existing gaps, races that need an outside change
+mid-run, hardening, privacy or robustness the base also lacks, an incomplete
+fix that is no worse than the base, speculative risks, and documentation or
+test gaps. Name the architectural fix, but do not block on a simpler
+alternative alone. Group findings with the same cause at the highest severity;
+name the root fix and list the instances together.
+Malicious control of a trusted ref or configuration that already grants the
+same authority is a follow-up unless the diff weakens that boundary and meets
+the blocker rubric. Trusting an ordinary upstream is not itself a blocker.
+Look for concrete supply-chain regressions, such as a path the diff opens for
+code an attacker controls to alter a published artifact or read a credential or
+private source. In particular, check newly run third-party code in apply,
+with a PAT, in a write-permission pull_request_target job, or on the broker host.
 The comment's first line starts with VERDICT: CHANGES only when there is at
 least one blocker, and VERDICT: APPROVE otherwise, including when only important
 findings and nits remain. It may go on with a short reason. Keep that line to

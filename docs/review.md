@@ -58,9 +58,11 @@ under "Tried". It then reads the diff and surrounding code. It does not rerun
 test suites, linters or CI; those are separate required checks.
 
 The first line is `VERDICT: APPROVE` or `VERDICT: CHANGES`. Findings are
-tagged blocker, important or nit, and only a blocker earns CHANGES: a
-concrete failure of the change's main purpose, or a material defect it
-introduces. An approval lists the rest under "Follow-ups". The reviewer also
+tagged blocker, important or nit. Only a blocker earns CHANGES: the diff makes
+behavior materially worse than the base or does nothing toward its main stated
+purpose. Security holes, data loss and confirmed dependency-integrity failures
+that the diff introduces or makes reachable always block. An approval lists
+the rest under "Follow-ups". The reviewer also
 asks whether the change should exist as written, or extend an existing
 mechanism instead. Beside the verdict, it may anchor up to ten findings to
 lines ([review comments](safe-outputs.md#review-comments-on-the-pull-request)).
