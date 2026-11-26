@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "agentic-job"
-version = "0.6.16"
+version = "0.6.17"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "secure-host"
-version = "0.6.16"
+version = "0.6.17"
 dependencies = [
  "anyhow",
  "bytes",
